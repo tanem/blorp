@@ -1,4 +1,4 @@
-# sift
+# blorp
 
 A terminal UI for working through a Fastmail inbox quickly. This file is the glossary for the project's language.
 
