@@ -4,3 +4,4 @@ Throwaway code answering wayfinder tickets. Each directory is its own crate. Not
 
 - `layout-keymap`: first round for ticket 06, a mail-reader shape with three layouts (A, B, C). Superseded by the reframe but kept as the record.
 - `triage-queue`: second round for ticket 06, a triage-queue shape with four layouts (D, E, F, G).
+- `style`: third round for ticket 06, four skins (H, I, J, K) and nvim-style mechanics on the triage-queue shape.

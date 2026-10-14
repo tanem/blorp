@@ -1,0 +1,9 @@
+[package]
+name = "blorp-prototype-style"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Throwaway style prototype for blorp. Not the app."
+
+[dependencies]
+ratatui = "0.30"
