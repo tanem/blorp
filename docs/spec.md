@@ -1,6 +1,6 @@
 # blorp v1 specification
 
-blorp is a terminal application that triages a single Fastmail account's mailboxes over JMAP. This document is the v1 specification: everything decided while charting the effort, organised by section rather than by the ticket that decided it, and restated in full because the map directory it was assembled from is machine-local scratch. Each section links the tickets it draws on, under `.scratch/triage-tui/issues/` on the machine that charted the map, and the research or prototype branch that holds the reasoning. Where two tickets amended each other, only the final rule appears here. Contradictions and gaps found while assembling are listed under Open points at the end, not resolved in place. `CONTEXT.md` at the repository root is the glossary, and this document uses its terms.
+blorp is a terminal application that triages a single Fastmail account's mailboxes over JMAP. This document is the v1 specification: everything decided while charting the effort, organised by section rather than by the ticket that decided it, and restated in full because the map directory it was assembled from is machine-local scratch. Each section links the tickets it draws on, under `.scratch/triage-tui/issues/` on the machine that charted the map, and the research or prototype branch that holds the reasoning. Where two tickets amended each other, only the final rule appears here. Contradictions and gaps found while assembling are listed under Open points at the end, not resolved in place. `GLOSSARY.md` at the repository root is the glossary, and this document uses its terms.
 
 ## Purpose and scope
 
@@ -457,7 +457,7 @@ The repository is github.com/tanem/blorp, public, MIT, configured on 2026-10-16 
 
 CI is one GitHub Actions workflow on `macos-latest`, triggered on pushes to `main` and on pull requests, running `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`. It uses the runner's preinstalled rustup and only GitHub-owned actions (`actions/checkout`, `actions/cache` for the cargo registry and target directory). No secrets. Once the workflow exists its job becomes the required status check in the `main` ruleset.
 
-`.scratch/` is gitignored and machine-local. `CONTEXT.md` is the glossary and `docs/adr/` holds the architecture decision records.
+`.scratch/` is gitignored and machine-local. `GLOSSARY.md` is the glossary and `docs/adr/` holds the architecture decision records.
 
 Sources: [GitHub repository settings and branch protection](../.scratch/triage-tui/issues/10-github-repo-settings.md), [Testing strategy](../.scratch/triage-tui/issues/16-testing-strategy.md).
 
