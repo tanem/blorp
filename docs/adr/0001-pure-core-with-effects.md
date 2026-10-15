@@ -1,0 +1,3 @@
+# Pure core with effects
+
+blorp's state is owned by one task and changed only through `update(&mut App, Msg) -> Vec<Effect>`, a synchronous function with no I/O. Network calls, file writes, browser launches, and logging are returned as effects that a thin executor carries out, feeding results back as messages. We chose this over async methods on the app so that triage behaviour (undo, snooze return, optimistic rollback, reconcile diffing) is tested by feeding messages and asserting on state and effects, with no runtime and no server. The cost is an explicit message and effect vocabulary that every new feature extends.
