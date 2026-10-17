@@ -12,7 +12,7 @@ The five canonical roles, each label string equal to its name: `needs-triage`, `
 
 ### TUI verification
 
-Before pushing a change to what blorp draws, its keys or commands, startup and exit, or a Fastmail request, drive the real binary against Fastmail with `scripts/tui.sh`. See `docs/agents/tui-verification.md`.
+Before pushing a change to what blorp draws, its keys or commands, startup and exit, or a Fastmail request, follow `docs/agents/tui-verification.md`.
 
 ### Domain docs
 
