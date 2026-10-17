@@ -10,6 +10,10 @@ Issues, specs, and wayfinder maps are GitHub issues on tanem/blorp, managed with
 
 The five canonical roles, each label string equal to its name: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
 
+### TUI verification
+
+Before pushing a change to what blorp draws, its keys or commands, startup and exit, or a Fastmail request, drive the real binary against Fastmail with `scripts/tui.sh`. See `docs/agents/tui-verification.md`.
+
 ### Domain docs
 
 Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
