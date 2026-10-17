@@ -1,5 +1,5 @@
 # blorp
 
-A terminal UI for triaging a Fastmail inbox over JMAP. Rust, ratatui.
+A terminal UI for triaging a Fastmail account's mailboxes over JMAP. Rust, ratatui.
 
 Status: planning.
