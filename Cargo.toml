@@ -1,0 +1,11 @@
+[package]
+name = "blorp"
+version = "0.1.0"
+edition = "2024"
+description = "A terminal UI for triaging a Fastmail account's mailboxes over JMAP"
+license = "MIT"
+repository = "https://github.com/tanem/blorp"
+publish = false
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
