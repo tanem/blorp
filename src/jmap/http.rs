@@ -41,7 +41,9 @@ pub struct HttpJmap {
 
 impl HttpJmap {
     /// Fetches the session at `session_url`, checks that it advertises the
-    /// mail capability, and binds a client to its primary mail account.
+    /// mail capability, and binds a client to its primary mail account. The
+    /// session URL and the API URL it names must be HTTPS, or plain HTTP to
+    /// a loopback address, since the token is sent to both.
     pub async fn connect(
         session_url: &str,
         token: SecretString,
@@ -52,11 +54,13 @@ impl HttpJmap {
             .build()
             .map_err(transport)?;
         let token = Arc::new(token);
+        require_secure(session_url)?;
         let response = authorize(http.get(session_url), &token)
             .send()
             .await
             .map_err(transport)?;
         let session: Session = read_json(response).await?;
+        require_secure(&session.api_url)?;
         let account_id = session.mail_account().ok_or(Error::NoMailCapability)?;
         let jmap = HttpJmap {
             http,
@@ -177,6 +181,24 @@ struct GetResponse<T> {
 struct QueryResponse {
     ids: Vec<String>,
     total: Option<usize>,
+}
+
+/// Accepts HTTPS, and plain HTTP only to a loopback address such as a test
+/// server on localhost.
+fn require_secure(url: &str) -> Result<(), Error> {
+    let insecure = || Error::InsecureUrl(url.to_string());
+    let parsed = reqwest::Url::parse(url).map_err(|_| insecure())?;
+    let loopback = match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if loopback => Ok(()),
+        _ => Err(insecure()),
+    }
 }
 
 /// The only place the token is exposed.

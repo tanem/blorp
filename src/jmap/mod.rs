@@ -64,6 +64,8 @@ pub enum Error {
     Method { method: String, kind: String },
     /// The response did not parse.
     Parse(String),
+    /// A URL the token would be sent to is not HTTPS, and not loopback.
+    InsecureUrl(String),
 }
 
 impl fmt::Display for Error {
@@ -77,6 +79,12 @@ impl fmt::Display for Error {
             ),
             Error::Method { method, kind } => write!(f, "Fastmail error: {kind} from {method}"),
             Error::Parse(message) => write!(f, "could not read Fastmail's response: {message}"),
+            Error::InsecureUrl(url) => {
+                write!(
+                    f,
+                    "refusing to send the API token to {url}, which is not HTTPS"
+                )
+            }
         }
     }
 }

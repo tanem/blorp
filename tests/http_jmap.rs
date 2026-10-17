@@ -301,3 +301,36 @@ async fn the_first_failing_call_in_a_chain_is_reported() {
         })
     );
 }
+
+#[tokio::test]
+async fn connect_refuses_a_session_url_that_is_not_https() {
+    let result = HttpJmap::connect("http://api.example.invalid/jmap/session", token()).await;
+
+    assert_eq!(
+        result.err(),
+        Some(Error::InsecureUrl(
+            "http://api.example.invalid/jmap/session".into()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn connect_refuses_an_api_url_that_is_not_https() {
+    let server = MockServer::start().await;
+    let mut session = session(&server, mail_capabilities());
+    session["apiUrl"] = json!("http://api.example.invalid/jmap/api/");
+    Mock::given(method("GET"))
+        .and(path("/jmap/session"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(session))
+        .mount(&server)
+        .await;
+
+    let result = connect(&server).await;
+
+    assert_eq!(
+        result.err(),
+        Some(Error::InsecureUrl(
+            "http://api.example.invalid/jmap/api/".into()
+        ))
+    );
+}
