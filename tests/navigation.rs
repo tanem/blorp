@@ -2,6 +2,7 @@ use blorp::app::{Effect, Msg};
 use blorp::harness::Harness;
 use blorp::jmap::fake::{EmailSpec, Store};
 use blorp::jmap::{EmailQuery, Error};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 
 /// An Inbox of `n` single-email threads, "Thread 1" newest.
@@ -167,4 +168,30 @@ fn a_result_for_an_older_generation_is_dropped() {
     });
 
     assert_eq!(h.subjects(), ["Thread 1", "Thread 2", "Thread 3"]);
+}
+
+#[test]
+fn a_pending_count_survives_spinner_ticks_and_the_load_landing() {
+    let mut h = Harness::new(inbox(20));
+    let effects = h.start();
+    h.keys("12");
+
+    h.send(Msg::Tick);
+    h.resolve(effects);
+    assert_eq!(h.pending_count(), Some(12));
+
+    h.keys("j");
+    assert_eq!(h.cursor(), 12);
+}
+
+#[test]
+fn esc_cancels_a_pending_count() {
+    let mut h = Harness::loaded(inbox(20));
+    h.keys("12");
+
+    h.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(h.pending_count(), None);
+
+    h.keys("j");
+    assert_eq!(h.cursor(), 1);
 }

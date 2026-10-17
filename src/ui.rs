@@ -26,13 +26,13 @@ const FIXED_WIDTH: usize =
 
 /// Draws the whole screen: the queue, the statusline, and the bottom line.
 pub fn view(app: &App, frame: &mut Frame) {
-    let [list, statusline, bottom] = Layout::vertical([
+    let [queue, statusline, bottom] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    rows(app, frame, list);
+    rows(app, frame, queue);
     frame.render_widget(
         Paragraph::new(status_bar(app, statusline.width)),
         statusline,
@@ -217,6 +217,7 @@ pub fn key_msg(key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('g') => Some(Msg::Top),
         KeyCode::Char('G') => Some(Msg::Bottom),
         KeyCode::Char('q') => Some(Msg::Quit),
+        KeyCode::Esc => Some(Msg::Cancel),
         KeyCode::Char(c) => c.to_digit(10).map(|d| Msg::Digit(d as u8)),
         _ => None,
     }

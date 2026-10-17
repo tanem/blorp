@@ -34,6 +34,8 @@ pub enum Msg {
     Bottom,
     /// A digit typed as part of a count prefix.
     Digit(u8),
+    /// Esc: drops a pending count.
+    Cancel,
     Quit,
     /// The spinner's tick while a request is in flight.
     Tick,
@@ -98,6 +100,11 @@ impl App {
         &self.status
     }
 
+    /// The pending count, cleared by the key that uses it.
+    fn take_count(&mut self) -> Option<usize> {
+        self.pending_count.take()
+    }
+
     fn load(&mut self, query: EmailQuery) -> Vec<Effect> {
         self.generation += 1;
         self.loading = true;
@@ -110,14 +117,6 @@ impl App {
 
 /// Applies `msg` to `app` and returns what the executor should do. Pure.
 pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
-    if let Msg::Digit(digit) = msg {
-        let count = app.pending_count.unwrap_or(0);
-        if count > 0 || digit > 0 {
-            app.pending_count = Some(count.saturating_mul(10).saturating_add(digit.into()));
-        }
-        return Vec::new();
-    }
-    let count = app.pending_count.take();
     match msg {
         Msg::Start => {
             let Some(inbox) = app.mailboxes.by_role(Role::Inbox) else {
@@ -131,23 +130,37 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             };
             app.load(query)
         }
+        Msg::Digit(digit) => {
+            let count = app.pending_count.unwrap_or(0);
+            if count > 0 || digit > 0 {
+                app.pending_count = Some(count.saturating_mul(10).saturating_add(digit.into()));
+            }
+            Vec::new()
+        }
         Msg::Down => {
-            app.queue.down(count.unwrap_or(1));
+            let rows = app.take_count().unwrap_or(1);
+            app.queue.down(rows);
             Vec::new()
         }
         Msg::Up => {
-            app.queue.up(count.unwrap_or(1));
+            let rows = app.take_count().unwrap_or(1);
+            app.queue.up(rows);
             Vec::new()
         }
         Msg::Top => {
+            app.take_count();
             app.queue.to_first();
             Vec::new()
         }
         Msg::Bottom => {
-            match count {
+            match app.take_count() {
                 Some(line) => app.queue.to_line(line),
                 None => app.queue.to_last(),
             }
+            Vec::new()
+        }
+        Msg::Cancel => {
+            app.take_count();
             Vec::new()
         }
         Msg::Quit => vec![Effect::Quit],
@@ -166,6 +179,5 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
             Vec::new()
         }
-        Msg::Digit(_) => unreachable!("handled above"),
     }
 }

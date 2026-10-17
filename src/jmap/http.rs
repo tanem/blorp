@@ -91,7 +91,7 @@ impl Jmap for HttpJmap {
                 "0",
             )])
             .await?;
-        let got: GetResponse<Mailbox> = take(&responses, "Mailbox/get", "0")?;
+        let got: GetResponse<Mailbox> = response_of(&responses, "Mailbox/get", "0")?;
         Ok(got.list)
     }
 
@@ -137,9 +137,9 @@ impl Jmap for HttpJmap {
                 ),
             ])
             .await?;
-        let ids: QueryResponse = take(&responses, "Email/query", "0")?;
-        let threads: GetResponse<Thread> = take(&responses, "Thread/get", "2")?;
-        let emails: GetResponse<Email> = take(&responses, "Email/get", "3")?;
+        let ids: QueryResponse = response_of(&responses, "Email/query", "0")?;
+        let threads: GetResponse<Thread> = response_of(&responses, "Thread/get", "2")?;
+        let emails: GetResponse<Email> = response_of(&responses, "Email/get", "3")?;
         Ok(QueryResult {
             ids: ids.ids,
             threads: threads.list,
@@ -173,7 +173,7 @@ fn call(name: &str, args: Value, call_id: &str) -> Invocation {
 
 /// Finds the response to call `call_id` and parses its arguments, turning a
 /// method error into [`Error::Method`].
-fn take<T: DeserializeOwned>(
+fn response_of<T: DeserializeOwned>(
     responses: &[Invocation],
     method: &str,
     call_id: &str,

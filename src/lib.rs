@@ -35,27 +35,21 @@ pub fn run(cli: Cli) -> ExitCode {
 /// Starts the TUI: everything up to `Mailbox/get` runs on the plain
 /// terminal, and a failure there prints the error and exits 1.
 fn tui() -> ExitCode {
-    let Some(token) = env_token() else {
-        eprintln!(
-            "blorp: a Fastmail API token is needed; set BLORP_API_TOKEN to one with the Email scope"
-        );
-        return ExitCode::FAILURE;
-    };
-    let _log = match start_log() {
-        Ok(guard) => guard,
+    match start_tui() {
+        Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("blorp: {message}");
-            return ExitCode::FAILURE;
+            ExitCode::FAILURE
         }
-    };
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("blorp: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let result = runtime.block_on(async {
+    }
+}
+
+fn start_tui() -> Result<(), String> {
+    let token = env_token()
+        .ok_or("a Fastmail API token is needed; set BLORP_API_TOKEN to one with the Email scope")?;
+    let _log = start_log()?;
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    runtime.block_on(async {
         let (jmap, _session) = HttpJmap::connect(FASTMAIL_SESSION_URL, token)
             .await
             .map_err(|e| e.to_string())?;
@@ -76,14 +70,7 @@ fn tui() -> ExitCode {
         .await;
         ratatui::restore();
         result.map_err(|e| e.to_string())
-    });
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("blorp: {message}");
-            ExitCode::FAILURE
-        }
-    }
+    })
 }
 
 /// `BLORP_API_TOKEN`, when set and not empty.

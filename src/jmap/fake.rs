@@ -197,34 +197,32 @@ pub struct StoreBuilder {
 
 impl StoreBuilder {
     /// A top-level mailbox with no role.
-    pub fn mailbox(mut self, id: &str, name: &str) -> Self {
-        self.store.mailboxes.push(Mailbox {
-            id: id.into(),
-            name: name.into(),
-            parent_id: None,
-            role: None,
-        });
-        self
+    pub fn mailbox(self, id: &str, name: &str) -> Self {
+        self.push_mailbox(id, name, None, None)
     }
 
     /// A top-level mailbox carrying a role such as `inbox`.
-    pub fn role_mailbox(mut self, id: &str, name: &str, role: &str) -> Self {
-        self.store.mailboxes.push(Mailbox {
-            id: id.into(),
-            name: name.into(),
-            parent_id: None,
-            role: Some(role.into()),
-        });
-        self
+    pub fn role_mailbox(self, id: &str, name: &str, role: &str) -> Self {
+        self.push_mailbox(id, name, None, Some(role))
     }
 
     /// A mailbox nested under `parent_id`.
-    pub fn child_mailbox(mut self, id: &str, name: &str, parent_id: &str) -> Self {
+    pub fn child_mailbox(self, id: &str, name: &str, parent_id: &str) -> Self {
+        self.push_mailbox(id, name, Some(parent_id), None)
+    }
+
+    fn push_mailbox(
+        mut self,
+        id: &str,
+        name: &str,
+        parent_id: Option<&str>,
+        role: Option<&str>,
+    ) -> Self {
         self.store.mailboxes.push(Mailbox {
             id: id.into(),
             name: name.into(),
-            parent_id: Some(parent_id.into()),
-            role: None,
+            parent_id: parent_id.map(Into::into),
+            role: role.map(Into::into),
         });
         self
     }
