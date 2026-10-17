@@ -30,6 +30,7 @@ async fn session_mailboxes_and_an_inbox_query_have_the_expected_shapes() {
         .query(&EmailQuery {
             filter: json!({"inMailbox": inbox.id}),
             ascending: false,
+            limit: 500,
         })
         .await
         .expect("Email/query chain");

@@ -33,6 +33,8 @@ pub struct EmailQuery {
     pub filter: Value,
     /// Oldest first when true, newest first when false.
     pub ascending: bool,
+    /// The most threads to return.
+    pub limit: usize,
 }
 
 /// The result of a [`Jmap::query`].
@@ -40,6 +42,8 @@ pub struct EmailQuery {
 pub struct QueryResult {
     /// The ids `Email/query` returned, one email per thread, in query order.
     pub ids: Vec<String>,
+    /// How many threads match, including any beyond the limit.
+    pub total: usize,
     /// The threads of those emails.
     pub threads: Vec<Thread>,
     /// Every email of those threads.

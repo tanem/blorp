@@ -86,6 +86,7 @@ async fn launch_loads_the_inbox_and_the_keys_move_through_it() {
             Call::Query(EmailQuery {
                 filter: json!({"inMailbox": "mb-inbox"}),
                 ascending: false,
+                limit: 500,
             }),
         ]
     );

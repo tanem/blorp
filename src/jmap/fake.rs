@@ -1,7 +1,8 @@
 //! An in-memory [`Jmap`] adapter over a small mail store, for tests.
 //!
 //! The store evaluates a subset of `Email/query`: `inMailbox`, sorting by
-//! `receivedAt` in either direction, and collapsing threads.
+//! `receivedAt` in either direction, collapsing threads, `limit`, and
+//! `calculateTotal`.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -130,11 +131,13 @@ impl Store {
             }
         });
         let mut seen_threads = HashSet::new();
-        let ids: Vec<String> = matches
+        let mut ids: Vec<String> = matches
             .into_iter()
             .filter(|e| seen_threads.insert(e.thread_id.clone()))
             .map(|e| e.id.clone())
             .collect();
+        let total = ids.len();
+        ids.truncate(query.limit);
         let mut threads = Vec::new();
         let mut emails = Vec::new();
         for id in &ids {
@@ -153,6 +156,7 @@ impl Store {
         }
         Ok(QueryResult {
             ids,
+            total,
             threads,
             emails,
         })

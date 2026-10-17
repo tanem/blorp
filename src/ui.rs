@@ -128,10 +128,11 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
     );
     let queue = app.queue();
     let len = queue.threads().len();
-    let position = if len == 0 {
-        " 0/0 ".to_string()
+    let row = if len == 0 { 0 } else { queue.cursor() + 1 };
+    let position = if app.total() > len {
+        format!(" {row}/{len} of {} ", app.total())
     } else {
-        format!(" {}/{len} ", queue.cursor() + 1)
+        format!(" {row}/{len} ")
     };
     let count = match app.pending_count() {
         Some(count) => format!("{count} "),
@@ -344,6 +345,24 @@ mod tests {
     fn pending_count() {
         let mut h = Harness::loaded(busy_inbox());
         h.keys("12");
+
+        insta::assert_snapshot!(render(&h, 80, 24));
+    }
+
+    #[test]
+    fn a_mailbox_larger_than_the_queue_shows_its_total() {
+        let mut store = Store::builder().role_mailbox("mb-inbox", "Inbox", "inbox");
+        for i in 0..503 {
+            let received = jiff::Timestamp::from_second(1_760_000_000 - i * 60).unwrap();
+            store = store.email(
+                EmailSpec::new(&format!("e{i}"), &format!("t{i}"), &received.to_string())
+                    .in_mailbox("mb-inbox")
+                    .seen()
+                    .from("Sender", "sender@example.invalid")
+                    .subject(&format!("Thread {}", i + 1)),
+            );
+        }
+        let h = Harness::loaded(store.build());
 
         insta::assert_snapshot!(render(&h, 80, 24));
     }

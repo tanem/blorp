@@ -67,7 +67,14 @@ impl HttpJmap {
         Ok((jmap, session))
     }
 
+    /// Sends one request. A method error is reported for the first call
+    /// that failed, since later calls that refer back to it fail only as a
+    /// consequence.
     async fn send(&self, method_calls: Vec<Invocation>) -> Result<Vec<Invocation>, Error> {
+        let methods: Vec<(String, String)> = method_calls
+            .iter()
+            .map(|call| (call.call_id.clone(), call.name.clone()))
+            .collect();
         let request = Request {
             using: vec![CORE.into(), MAIL.into()],
             method_calls,
@@ -78,6 +85,16 @@ impl HttpJmap {
             .await
             .map_err(transport)?;
         let response: Response = read_json(response).await?;
+        if let Some(error) = response.method_responses.iter().find(|r| r.name == "error") {
+            let method = methods
+                .iter()
+                .find(|(call_id, _)| *call_id == error.call_id)
+                .map_or("unknown method", |(_, name)| name.as_str());
+            return Err(Error::Method {
+                method: method.into(),
+                kind: error.args["type"].as_str().unwrap_or("unknown").into(),
+            });
+        }
         Ok(response.method_responses)
     }
 }
@@ -105,7 +122,9 @@ impl Jmap for HttpJmap {
                         "accountId": account,
                         "filter": query.filter,
                         "sort": [{"property": "receivedAt", "isAscending": query.ascending}],
-                        "collapseThreads": true
+                        "collapseThreads": true,
+                        "limit": query.limit,
+                        "calculateTotal": true
                     }),
                     "0",
                 ),
@@ -141,6 +160,7 @@ impl Jmap for HttpJmap {
         let threads: GetResponse<Thread> = response_of(&responses, "Thread/get", "2")?;
         let emails: GetResponse<Email> = response_of(&responses, "Email/get", "3")?;
         Ok(QueryResult {
+            total: ids.total.unwrap_or(ids.ids.len()),
             ids: ids.ids,
             threads: threads.list,
             emails: emails.list,
@@ -156,6 +176,7 @@ struct GetResponse<T> {
 #[derive(Deserialize)]
 struct QueryResponse {
     ids: Vec<String>,
+    total: Option<usize>,
 }
 
 /// The only place the token is exposed.
@@ -171,8 +192,7 @@ fn call(name: &str, args: Value, call_id: &str) -> Invocation {
     }
 }
 
-/// Finds the response to call `call_id` and parses its arguments, turning a
-/// method error into [`Error::Method`].
+/// Finds the response to call `call_id` and parses its arguments.
 fn response_of<T: DeserializeOwned>(
     responses: &[Invocation],
     method: &str,
@@ -182,13 +202,6 @@ fn response_of<T: DeserializeOwned>(
         .iter()
         .find(|r| r.call_id == call_id)
         .ok_or_else(|| Error::Parse(format!("no response to {method}")))?;
-    if response.name == "error" {
-        let kind = response.args["type"].as_str().unwrap_or("unknown");
-        return Err(Error::Method {
-            method: method.into(),
-            kind: kind.into(),
-        });
-    }
     serde_json::from_value(response.args.clone()).map_err(|e| Error::Parse(e.to_string()))
 }
 

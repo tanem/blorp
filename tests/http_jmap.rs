@@ -146,7 +146,9 @@ async fn query_chains_thread_get_and_email_get_by_back_reference() {
                     "accountId": "u1a2b3c4",
                     "filter": {"inMailbox": "mb1"},
                     "sort": [{"property": "receivedAt", "isAscending": false}],
-                    "collapseThreads": true
+                    "collapseThreads": true,
+                    "limit": 500,
+                    "calculateTotal": true
                 }, "0"],
                 ["Email/get", {
                     "accountId": "u1a2b3c4",
@@ -169,7 +171,7 @@ async fn query_chains_thread_get_and_email_get_by_back_reference() {
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "methodResponses": [
-                ["Email/query", {"accountId": "u1a2b3c4", "ids": ["Me2"], "position": 0}, "0"],
+                ["Email/query", {"accountId": "u1a2b3c4", "ids": ["Me2"], "position": 0, "total": 6443}, "0"],
                 ["Email/get", {"accountId": "u1a2b3c4", "list": [{"id": "Me2", "threadId": "Tt1"}], "notFound": []}, "1"],
                 ["Thread/get", {"accountId": "u1a2b3c4", "list": [{"id": "Tt1", "emailIds": ["Me1", "Me2"]}], "notFound": []}, "2"],
                 ["Email/get", {"accountId": "u1a2b3c4", "list": [
@@ -196,11 +198,13 @@ async fn query_chains_thread_get_and_email_get_by_back_reference() {
         .query(&EmailQuery {
             filter: json!({"inMailbox": "mb1"}),
             ascending: false,
+            limit: 500,
         })
         .await
         .unwrap();
 
     assert_eq!(result.ids, ["Me2"]);
+    assert_eq!(result.total, 6443);
     assert_eq!(result.threads.len(), 1);
     assert_eq!(result.threads[0].email_ids, ["Me1", "Me2"]);
     let ids: Vec<&str> = result.emails.iter().map(|e| e.id.as_str()).collect();
@@ -260,4 +264,40 @@ async fn errors_never_carry_the_token() {
     let error = connect(&server).await.err().unwrap();
 
     assert!(!format!("{error} {error:?}").contains("test-token-123"));
+}
+
+#[tokio::test]
+async fn the_first_failing_call_in_a_chain_is_reported() {
+    let server = MockServer::start().await;
+    serve_session(&server, mail_capabilities()).await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [
+                ["Email/query", {"accountId": "u1a2b3c4", "ids": ["Me1"], "position": 0, "total": 1}, "0"],
+                ["error", {"type": "requestTooLarge", "description": "number of ids exceeds maxObjectsInGet limit"}, "1"],
+                ["error", {"type": "invalidResultReference"}, "2"],
+                ["error", {"type": "invalidResultReference"}, "3"]
+            ],
+            "sessionState": "0"
+        })))
+        .mount(&server)
+        .await;
+    let jmap = connect(&server).await.unwrap();
+
+    let result = jmap
+        .query(&EmailQuery {
+            filter: json!({"inMailbox": "mb1"}),
+            ascending: false,
+            limit: 500,
+        })
+        .await;
+
+    assert_eq!(
+        result.err(),
+        Some(Error::Method {
+            method: "Email/get".into(),
+            kind: "requestTooLarge".into(),
+        })
+    );
 }

@@ -8,6 +8,12 @@ use crate::jmap::{EmailQuery, Error, QueryResult};
 use crate::mail::{Mailboxes, Role, Thread};
 use crate::queue::Queue;
 
+/// The most threads a queue holds: the newest, or oldest, this many of the
+/// threads that match. A JMAP get is capped at the session's
+/// `maxObjectsInGet` (4096 on Fastmail), and the query fetches every email
+/// of each thread.
+pub const QUEUE_LIMIT: usize = 500;
+
 /// The whole state of a running blorp, owned by the state task.
 #[derive(Debug)]
 pub struct App {
@@ -16,6 +22,7 @@ pub struct App {
     mailboxes: Mailboxes,
     queue: Queue,
     queue_name: String,
+    total: usize,
     generation: u64,
     loading: bool,
     pending_count: Option<usize>,
@@ -64,6 +71,7 @@ impl App {
             mailboxes,
             queue: Queue::default(),
             queue_name: String::new(),
+            total: 0,
             generation: 0,
             loading: false,
             pending_count: None,
@@ -78,6 +86,12 @@ impl App {
 
     pub fn queue_name(&self) -> &str {
         &self.queue_name
+    }
+
+    /// How many threads match the queue's query, including any beyond
+    /// [`QUEUE_LIMIT`].
+    pub fn total(&self) -> usize {
+        self.total
     }
 
     /// True while a queue query is in flight.
@@ -127,6 +141,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             let query = EmailQuery {
                 filter: json!({"inMailbox": inbox.id}),
                 ascending: false,
+                limit: QUEUE_LIMIT,
             };
             app.load(query)
         }
@@ -174,7 +189,10 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
             app.loading = false;
             match result {
-                Ok(result) => app.queue.replace(Thread::from_query(result)),
+                Ok(result) => {
+                    app.total = result.total;
+                    app.queue.replace(Thread::from_query(result));
+                }
                 Err(error) => app.status = error.to_string(),
             }
             Vec::new()

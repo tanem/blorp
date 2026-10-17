@@ -9,9 +9,9 @@ use serde_json::json;
 fn inbox(n: usize) -> Store {
     let mut store = Store::builder().role_mailbox("mb-inbox", "Inbox", "inbox");
     for i in 1..=n {
-        let received = format!("2026-10-{:02}T09:00:00Z", 28 - i);
+        let received = jiff::Timestamp::from_second(1_760_000_000 - i as i64 * 60).unwrap();
         store = store.email(
-            EmailSpec::new(&format!("e{i}"), &format!("t{i}"), &received)
+            EmailSpec::new(&format!("e{i}"), &format!("t{i}"), &received.to_string())
                 .in_mailbox("mb-inbox")
                 .subject(&format!("Thread {i}")),
         );
@@ -23,6 +23,7 @@ fn inbox_query() -> EmailQuery {
     EmailQuery {
         filter: json!({"inMailbox": "mb-inbox"}),
         ascending: false,
+        limit: 500,
     }
 }
 
@@ -196,4 +197,13 @@ fn esc_and_enter_cancel_a_pending_count() {
         h.keys("j");
         assert_eq!(h.cursor(), 1, "{code:?}");
     }
+}
+
+#[test]
+fn the_queue_holds_the_newest_500_threads_and_knows_the_total() {
+    let h = Harness::loaded(inbox(503));
+
+    assert_eq!(h.subjects().len(), 500);
+    assert_eq!(h.subjects()[499], "Thread 500");
+    assert_eq!(h.app.total(), 503);
 }
