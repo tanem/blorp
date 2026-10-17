@@ -5,7 +5,7 @@ A terminal UI for working through a Fastmail inbox quickly. This file is the glo
 ## Language
 
 **Queue**:
-The set of threads matching the current filter, Inbox by default, in the order the user works through them.
+The threads matching the current filter, Inbox by default, in the order the user works through them. When more threads match than the queue holds, it holds the first of them in that order.
 _Avoid_: List, feed, timeline, mailbox (for the queue)
 
 **Filter**:
