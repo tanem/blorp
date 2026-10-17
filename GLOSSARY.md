@@ -13,7 +13,7 @@ A typed expression that selects the queue: `in:`, `from:`, `to:`, `subject:`, `i
 _Avoid_: Search, query
 
 **Queue mailbox**:
-The mailbox the filter's `in:` names, Inbox when it names none, or every mailbox except Trash, Junk, Drafts, and Sent for `in:any`. Move actions touch only a thread's messages in the queue mailbox.
+The mailbox the filter's `in:` names, Inbox when it names none, or every mailbox except Trash, Junk, Drafts, Sent, and the snooze mailbox for `in:any`. Move actions touch only a thread's messages in the queue mailbox.
 _Avoid_: Current folder, scope
 
 **View**:
@@ -44,8 +44,12 @@ _Avoid_: Ex command, colon command
 Removing a thread from the queue until a chosen time, when it returns to the queue.
 _Avoid_: Defer, remind, postpone
 
+**Snooze mailbox**:
+The `Snoozed (blorp)` mailbox that holds snoozed threads until they return. It is not Fastmail's own snoozed mailbox.
+_Avoid_: Snoozed folder, snooze folder
+
 **Return**:
-A snoozed thread coming back to the queue, at its chosen time or early when a reply arrives.
+A snoozed thread coming back to the queue, at its chosen time or early when a new email arrives in the thread.
 _Avoid_: Unsnooze (for the automatic case), wake, resurface
 
 **Undo**:
@@ -64,11 +68,11 @@ The plain-terminal flow that takes an API token, checks it against Fastmail, and
 _Avoid_: Login, onboarding, auth
 
 **Schedule**:
-The record of every snoozed thread, where its messages came from, and when it returns.
+The record of every snoozed thread, where its messages came from, when it was snoozed, and when it returns.
 _Avoid_: Snooze list, timers
 
 **Reconcile**:
-Bringing the queue back in line with Fastmail after something changed on the server: triggered by a push notification, the fallback timer, or `R`.
+Bringing the queue back in line with Fastmail: triggered by a push event, once a minute, or by `R`.
 _Avoid_: Sync (for the act), refresh (for the automatic case), poll
 
 **Disconnected**:
