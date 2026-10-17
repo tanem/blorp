@@ -4,5 +4,8 @@
     "config:recommended",
     "helpers:pinGitHubActionDigests"
   ],
-  "rebaseWhen": "behind-base-branch"
+  "rebaseWhen": "behind-base-branch",
+  "lockFileMaintenance": {
+    "enabled": true
+  }
 }
