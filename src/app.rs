@@ -34,7 +34,7 @@ pub enum Msg {
     Bottom,
     /// A digit typed as part of a count prefix.
     Digit(u8),
-    /// Esc: drops a pending count.
+    /// Esc or Enter: drops a pending count.
     Cancel,
     Quit,
     /// The spinner's tick while a request is in flight.

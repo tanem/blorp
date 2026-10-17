@@ -217,7 +217,7 @@ pub fn key_msg(key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('g') => Some(Msg::Top),
         KeyCode::Char('G') => Some(Msg::Bottom),
         KeyCode::Char('q') => Some(Msg::Quit),
-        KeyCode::Esc => Some(Msg::Cancel),
+        KeyCode::Esc | KeyCode::Enter => Some(Msg::Cancel),
         KeyCode::Char(c) => c.to_digit(10).map(|d| Msg::Digit(d as u8)),
         _ => None,
     }

@@ -32,8 +32,7 @@ pub fn run(cli: Cli) -> ExitCode {
     }
 }
 
-/// Starts the TUI: everything up to `Mailbox/get` runs on the plain
-/// terminal, and a failure there prints the error and exits 1.
+/// Runs the TUI, printing any error and exiting 1 on failure.
 fn tui() -> ExitCode {
     match start_tui() {
         Ok(()) => ExitCode::SUCCESS,
@@ -44,6 +43,8 @@ fn tui() -> ExitCode {
     }
 }
 
+/// Everything up to `Mailbox/get` runs on the plain terminal; only then
+/// does the TUI take over.
 fn start_tui() -> Result<(), String> {
     let token = env_token()
         .ok_or("a Fastmail API token is needed; set BLORP_API_TOKEN to one with the Email scope")?;

@@ -185,13 +185,15 @@ fn a_pending_count_survives_spinner_ticks_and_the_load_landing() {
 }
 
 #[test]
-fn esc_cancels_a_pending_count() {
-    let mut h = Harness::loaded(inbox(20));
-    h.keys("12");
+fn esc_and_enter_cancel_a_pending_count() {
+    for code in [KeyCode::Esc, KeyCode::Enter] {
+        let mut h = Harness::loaded(inbox(20));
+        h.keys("12");
 
-    h.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(h.pending_count(), None);
+        h.key(KeyEvent::new(code, KeyModifiers::NONE));
+        assert_eq!(h.pending_count(), None, "{code:?}");
 
-    h.keys("j");
-    assert_eq!(h.cursor(), 1);
+        h.keys("j");
+        assert_eq!(h.cursor(), 1, "{code:?}");
+    }
 }
