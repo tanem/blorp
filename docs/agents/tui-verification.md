@@ -9,7 +9,7 @@ Drive the real `blorp` binary in tmux against the real Fastmail account with `sc
 
 ## The token
 
-The token reaches only blorp's environment: `scripts/tui.sh` reads it from the keychain inside the tmux command, and `log-check` passes it to grep as a pattern file. Commands, screen captures, and reports carry the keychain lookup, never the value. If `wait` times out with a keychain prompt on the screen, ask Tane to allow it.
+The token reaches only blorp's environment: `scripts/tui.sh` reads it from the keychain inside the tmux command, and `log-check` passes it to grep as a pattern file. Commands, screen captures, and reports carry the keychain lookup, never the value. If `wait` times out on a blank screen, a keychain dialog may be waiting on the desktop; ask Tane to allow it.
 
 ## Dry run
 
@@ -22,7 +22,7 @@ Run with `-- --dry-run` whenever the check presses a key or runs a command that 
 3. For each behaviour the change touches: `keys`, then `screen`, and compare. `resize` for layout.
 4. Quit with `q` or `C-c`, then `status`: expect `alternate screen: 0`, `blorp exited 0`, and `icanon echo`.
 5. `log-check`: expect `0`.
-6. For startup and error paths: `start --no-token` (BLORP_API_TOKEN empty) or `start --bad-token`, `wait 'blorp exited'`, then `screen`.
+6. For startup and error paths: `start --no-token` or `start --bad-token`, `wait 'blorp exited'`, then `screen`.
 7. `stop`.
 
 Done when every behaviour the change touches has a screen capture that matches the spec, the terminal is restored, and the log check prints 0.

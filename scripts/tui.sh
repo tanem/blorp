@@ -110,8 +110,12 @@ case "${1:-}" in
   log-check)
     [[ -f "$log" ]] || die "no log at $log"
     require_keychain_item
-    # The token reaches grep as a pattern file, not an argument.
-    grep -cFf <(security find-generic-password -s blorp -a fastmail -w) "$log" || [[ $? -eq 1 ]]
+    token="$(security find-generic-password -s blorp -a fastmail -w)" \
+      || die "could not read the token from the keychain"
+    [[ -n "$token" ]] || die "the keychain item holds no token"
+    # printf is a builtin, so the token reaches grep as a pattern file and
+    # never appears in a process's arguments.
+    grep -cFf <(printf '%s\n' "$token") "$log" || [[ $? -eq 1 ]]
     ;;
   stop)
     tmux kill-session -t "$session" 2>/dev/null || true
