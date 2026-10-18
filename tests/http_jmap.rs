@@ -1,8 +1,8 @@
-use blorp::jmap::{EmailQuery, Error, HttpJmap, Jmap, Mailbox};
+use blorp::jmap::{EmailQuery, Error, HttpJmap, Jmap, Mailbox, QueryResult};
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 mod common;
 
@@ -121,47 +121,108 @@ async fn get_mailboxes_sends_mailbox_get_on_the_primary_mail_account() {
     );
 }
 
+/// The query's first request: `Email/query`, the hits' `threadId`, and
+/// `Thread/get`, chained by back-reference.
+fn first_stage(filter: Value) -> Value {
+    json!({
+        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+        "methodCalls": [
+            ["Email/query", {
+                "accountId": "u1a2b3c4",
+                "filter": filter,
+                "sort": [{"property": "receivedAt", "isAscending": false}],
+                "collapseThreads": true,
+                "limit": 500,
+                "calculateTotal": true
+            }, "0"],
+            ["Email/get", {
+                "accountId": "u1a2b3c4",
+                "#ids": {"resultOf": "0", "name": "Email/query", "path": "/ids"},
+                "properties": ["threadId"]
+            }, "1"],
+            ["Thread/get", {
+                "accountId": "u1a2b3c4",
+                "#ids": {"resultOf": "1", "name": "Email/get", "path": "/list/*/threadId"}
+            }, "2"]
+        ]
+    })
+}
+
+/// The answer to [`first_stage`]: one hit, `Me2`, in a thread `Tt1` of
+/// `email_ids`.
+fn first_stage_answer(email_ids: &[String]) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "methodResponses": [
+            ["Email/query", {"accountId": "u1a2b3c4", "ids": ["Me2"], "position": 0, "total": 6443}, "0"],
+            ["Email/get", {"accountId": "u1a2b3c4", "list": [{"id": "Me2", "threadId": "Tt1"}], "notFound": []}, "1"],
+            ["Thread/get", {"accountId": "u1a2b3c4", "list": [{"id": "Tt1", "emailIds": email_ids}], "notFound": []}, "2"]
+        ],
+        "sessionState": "0"
+    }))
+}
+
+/// A member `Email/get` call for `ids`.
+fn member_get(ids: &[String], call_id: &str) -> Value {
+    json!(["Email/get", {
+        "accountId": "u1a2b3c4",
+        "ids": ids,
+        "properties": [
+            "id", "threadId", "mailboxIds", "keywords",
+            "from", "subject", "receivedAt", "hasAttachment"
+        ]
+    }, call_id])
+}
+
+fn email(id: &str, received_at: &str) -> Value {
+    json!({
+        "id": id, "threadId": "Tt1", "mailboxIds": {"mb1": true},
+        "keywords": {}, "from": [{"name": "Ana Lopez", "email": "ana@example.invalid"}],
+        "subject": "Trip", "receivedAt": received_at, "hasAttachment": false
+    })
+}
+
+fn ids(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|id| id.to_string()).collect()
+}
+
+/// Matches a request whose first method call is `name`.
+struct FirstCall(&'static str);
+
+impl Match for FirstCall {
+    fn matches(&self, request: &Request) -> bool {
+        serde_json::from_slice::<Value>(&request.body)
+            .is_ok_and(|body| body["methodCalls"][0][0] == self.0)
+    }
+}
+
+async fn inbox_query(jmap: &HttpJmap) -> Result<QueryResult, Error> {
+    jmap.query(&EmailQuery {
+        filter: json!({"inMailbox": "mb1"}),
+        ascending: false,
+        limit: 500,
+    })
+    .await
+}
+
 #[tokio::test]
-async fn query_chains_thread_get_and_email_get_by_back_reference() {
+async fn query_fetches_the_threads_then_their_emails_in_a_second_request() {
     let server = MockServer::start().await;
     serve_session(&server, mail_capabilities()).await;
     Mock::given(method("POST"))
         .and(path("/api/"))
+        .and(body_json(first_stage(json!({"inMailbox": "mb1"}))))
+        .respond_with(first_stage_answer(&ids(&["Me1", "Me2"])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
         .and(body_json(json!({
             "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
-            "methodCalls": [
-                ["Email/query", {
-                    "accountId": "u1a2b3c4",
-                    "filter": {"inMailbox": "mb1"},
-                    "sort": [{"property": "receivedAt", "isAscending": false}],
-                    "collapseThreads": true,
-                    "limit": 500,
-                    "calculateTotal": true
-                }, "0"],
-                ["Email/get", {
-                    "accountId": "u1a2b3c4",
-                    "#ids": {"resultOf": "0", "name": "Email/query", "path": "/ids"},
-                    "properties": ["threadId"]
-                }, "1"],
-                ["Thread/get", {
-                    "accountId": "u1a2b3c4",
-                    "#ids": {"resultOf": "1", "name": "Email/get", "path": "/list/*/threadId"}
-                }, "2"],
-                ["Email/get", {
-                    "accountId": "u1a2b3c4",
-                    "#ids": {"resultOf": "2", "name": "Thread/get", "path": "/list/*/emailIds"},
-                    "properties": [
-                        "id", "threadId", "mailboxIds", "keywords",
-                        "from", "subject", "receivedAt", "hasAttachment"
-                    ]
-                }, "3"]
-            ]
+            "methodCalls": [member_get(&ids(&["Me1", "Me2"]), "0")]
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "methodResponses": [
-                ["Email/query", {"accountId": "u1a2b3c4", "ids": ["Me2"], "position": 0, "total": 6443}, "0"],
-                ["Email/get", {"accountId": "u1a2b3c4", "list": [{"id": "Me2", "threadId": "Tt1"}], "notFound": []}, "1"],
-                ["Thread/get", {"accountId": "u1a2b3c4", "list": [{"id": "Tt1", "emailIds": ["Me1", "Me2"]}], "notFound": []}, "2"],
                 ["Email/get", {"accountId": "u1a2b3c4", "list": [
                     {
                         "id": "Me1", "threadId": "Tt1", "mailboxIds": {"mb3": true},
@@ -173,7 +234,7 @@ async fn query_chains_thread_get_and_email_get_by_back_reference() {
                         "keywords": {}, "from": [{"name": "Ana Lopez", "email": "ana@example.invalid"}],
                         "subject": "Re: Trip", "receivedAt": "2026-10-17T09:30:00Z", "hasAttachment": true
                     }
-                ], "notFound": []}, "3"]
+                ], "notFound": []}, "0"]
             ],
             "sessionState": "0"
         })))
@@ -182,14 +243,7 @@ async fn query_chains_thread_get_and_email_get_by_back_reference() {
         .await;
     let jmap = connect(&server).await.unwrap();
 
-    let result = jmap
-        .query(&EmailQuery {
-            filter: json!({"inMailbox": "mb1"}),
-            ascending: false,
-            limit: 500,
-        })
-        .await
-        .unwrap();
+    let result = inbox_query(&jmap).await.unwrap();
 
     assert_eq!(result.ids, ["Me2"]);
     assert_eq!(result.total, 6443);
@@ -198,6 +252,107 @@ async fn query_chains_thread_get_and_email_get_by_back_reference() {
     let ids: Vec<&str> = result.emails.iter().map(|e| e.id.as_str()).collect();
     assert_eq!(ids, ["Me1", "Me2"]);
     assert_eq!(result.emails[1].subject.as_deref(), Some("Re: Trip"));
+}
+
+#[tokio::test]
+async fn a_session_without_limits_gets_4096_emails_a_call() {
+    let server = MockServer::start().await;
+    serve_session(&server, mail_capabilities()).await;
+    let members: Vec<String> = (0..4097).map(|e| format!("Me{e}")).collect();
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(FirstCall("Email/query"))
+        .respond_with(first_stage_answer(&members))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(body_json(json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "methodCalls": [
+                member_get(&members[..4096], "0"),
+                member_get(&members[4096..], "1")
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [
+                ["Email/get", {"accountId": "u1a2b3c4", "list": [], "notFound": &members[..4096]}, "0"],
+                ["Email/get", {"accountId": "u1a2b3c4", "list": [], "notFound": &members[4096..]}, "1"]
+            ],
+            "sessionState": "0"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let jmap = connect(&server).await.unwrap();
+
+    inbox_query(&jmap).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_email_removed_before_the_second_request_is_left_out() {
+    let server = MockServer::start().await;
+    serve_session(&server, mail_capabilities()).await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(FirstCall("Email/query"))
+        .respond_with(first_stage_answer(&ids(&["Me1", "Me2"])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(FirstCall("Email/get"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [
+                ["Email/get", {
+                    "accountId": "u1a2b3c4",
+                    "list": [email("Me2", "2026-10-17T09:30:00Z")],
+                    "notFound": ["Me1"]
+                }, "0"]
+            ],
+            "sessionState": "0"
+        })))
+        .mount(&server)
+        .await;
+    let jmap = connect(&server).await.unwrap();
+
+    let result = inbox_query(&jmap).await.unwrap();
+
+    assert_eq!(result.threads[0].email_ids, ["Me1", "Me2"]);
+    let ids: Vec<&str> = result.emails.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, ["Me2"]);
+}
+
+#[tokio::test]
+async fn a_method_error_in_the_second_request_fails_the_query() {
+    let server = MockServer::start().await;
+    serve_session(&server, mail_capabilities()).await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(FirstCall("Email/query"))
+        .respond_with(first_stage_answer(&ids(&["Me1", "Me2"])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(FirstCall("Email/get"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [["error", {"type": "serverUnavailable"}, "0"]],
+            "sessionState": "0"
+        })))
+        .mount(&server)
+        .await;
+    let jmap = connect(&server).await.unwrap();
+
+    let result = inbox_query(&jmap).await;
+
+    assert_eq!(
+        result.err(),
+        Some(Error::Method {
+            method: "Email/get".into(),
+            kind: "serverUnavailable".into(),
+        })
+    );
 }
 
 #[tokio::test]

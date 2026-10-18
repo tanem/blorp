@@ -9,9 +9,8 @@ use crate::mail::{Mailboxes, Role, Thread};
 use crate::queue::Queue;
 
 /// The most threads a queue holds: the newest, or oldest, this many of the
-/// threads that match. A JMAP get is capped at the session's
-/// `maxObjectsInGet` (4096 on Fastmail), and the query fetches every email
-/// of each thread.
+/// threads that match. The query fetches every email of each thread, so the
+/// cap bounds the size and time of the queue fetch.
 pub const QUEUE_LIMIT: usize = 500;
 
 /// The whole state of a running blorp, owned by the state task.
