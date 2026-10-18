@@ -3,6 +3,7 @@
 //! The store evaluates a subset of `Email/query`: `inMailbox`, sorting by
 //! `receivedAt` in either direction, collapsing threads, `limit`, and
 //! `calculateTotal`. Every get is held to Fastmail's `maxObjectsInGet`.
+//! `Email/set` applies `mailboxIds/<id>` and `keywords/<keyword>` patches.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -12,13 +13,15 @@ use serde_json::Value;
 
 pub mod api;
 
-use super::{Email, EmailAddress, EmailQuery, Error, Jmap, Limits, Mailbox, QueryResult, Thread};
+use super::{Email, EmailAddress, EmailPatch, EmailQuery, EmailUpdate, Error, Jmap, Limits};
+use super::{Mailbox, QueryResult, SetResult, Thread};
 
 /// A call made to a [`FakeJmap`], in the order made.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Call {
     GetMailboxes,
     Query(EmailQuery),
+    SetEmails(EmailUpdate),
 }
 
 /// A fake JMAP server: a store, a call log, and failure injection.
@@ -72,7 +75,7 @@ impl FakeJmap {
     async fn call<T>(
         &self,
         call: Call,
-        f: impl FnOnce(&Store) -> Result<T, Error>,
+        f: impl FnOnce(&mut Store) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let injected = {
             let mut inner = self.inner.lock().unwrap();
@@ -84,7 +87,7 @@ impl FakeJmap {
             Some(Injected::Delay(delay)) => tokio::time::sleep(delay).await,
             None => {}
         }
-        f(&self.inner.lock().unwrap().store)
+        f(&mut self.inner.lock().unwrap().store)
     }
 }
 
@@ -99,6 +102,13 @@ impl Jmap for FakeJmap {
     async fn query(&self, query: &EmailQuery) -> Result<QueryResult, Error> {
         self.call(Call::Query(query.clone()), |store| store.query(query))
             .await
+    }
+
+    async fn set_emails(&self, update: &EmailUpdate) -> Result<SetResult, Error> {
+        self.call(Call::SetEmails(update.clone()), |store| {
+            Ok(store.set_emails(update))
+        })
+        .await
     }
 }
 
@@ -168,6 +178,24 @@ impl Store {
         let total = ids.len();
         ids.truncate(query.limit);
         Ok((ids, total))
+    }
+
+    /// `Email/set` with `update`: applies each patch, and lists as not
+    /// updated every unknown id and every patch with a path other than
+    /// `mailboxIds/<id>` or `keywords/<keyword>` or a value other than
+    /// `true` or `null`. Such a patch changes nothing.
+    pub fn set_emails(&mut self, update: &EmailUpdate) -> SetResult {
+        let mut not_updated = Vec::new();
+        for (id, patch) in update {
+            let Some(email) = self.emails.iter_mut().find(|e| &e.id == id) else {
+                not_updated.push(id.clone());
+                continue;
+            };
+            if !apply(email, patch) {
+                not_updated.push(id.clone());
+            }
+        }
+        SetResult { not_updated }
     }
 
     /// `Mailbox/get`: the mailboxes with `ids`, or every mailbox for `None`,
@@ -242,6 +270,33 @@ fn get_by_ids<T: Clone>(
         }
     }
     Ok((found, not_found))
+}
+
+/// Applies `patch` to `email` if every entry is one the store supports,
+/// and says whether it did.
+fn apply(email: &mut Email, patch: &EmailPatch) -> bool {
+    let mut patched = email.clone();
+    for (path, value) in patch {
+        let (set, key) = match path.split_once('/') {
+            Some(("mailboxIds", id)) => (&mut patched.mailbox_ids, id),
+            Some(("keywords", keyword)) => (&mut patched.keywords, keyword),
+            _ => return false,
+        };
+        if key.is_empty() {
+            return false;
+        }
+        match value {
+            Value::Bool(true) => {
+                set.insert(key.to_string(), true);
+            }
+            Value::Null => {
+                set.remove(key);
+            }
+            _ => return false,
+        }
+    }
+    *email = patched;
+    true
 }
 
 fn matches_filter(email: &Email, filter: &Value) -> Result<bool, Error> {
@@ -396,6 +451,43 @@ mod tests {
             }
         }
         builder.build()
+    }
+
+    fn patch(entries: &[(&str, Value)]) -> EmailPatch {
+        entries
+            .iter()
+            .map(|(path, value)| (path.to_string(), value.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn set_emails_applies_mailbox_patches_and_reports_unknown_ids() {
+        let store = Store::builder()
+            .role_mailbox("mb-inbox", "Inbox", "inbox")
+            .role_mailbox("mb-archive", "Archive", "archive")
+            .email(EmailSpec::new("e1", "t1", "2026-10-01T00:00:00Z").in_mailbox("mb-inbox"))
+            .build();
+        let jmap = FakeJmap::new(store);
+        let move_to_archive = patch(&[
+            ("mailboxIds/mb-inbox", Value::Null),
+            ("mailboxIds/mb-archive", Value::Bool(true)),
+        ]);
+        let update = EmailUpdate::from([
+            ("e1".to_string(), move_to_archive.clone()),
+            ("e9".to_string(), move_to_archive),
+        ]);
+
+        let result = jmap.set_emails(&update).await.unwrap();
+
+        assert_eq!(result.not_updated, ["e9"]);
+        assert_eq!(jmap.calls(), [Call::SetEmails(update)]);
+        let inbox = jmap.query(&inbox_query(500)).await.unwrap();
+        assert!(inbox.ids.is_empty());
+        let archive = EmailQuery {
+            filter: json!({"inMailbox": "mb-archive"}),
+            ..inbox_query(500)
+        };
+        assert_eq!(jmap.query(&archive).await.unwrap().ids, ["e1"]);
     }
 
     #[tokio::test]

@@ -59,6 +59,10 @@ _Avoid_: Revert, rollback
 **Redo**:
 Reapplying the most recently undone action.
 
+**Outbox**:
+The queue of actions waiting to reach Fastmail, sent one at a time in the order the user acted. Each entry is a job.
+_Avoid_: Send queue, pending actions
+
 **Agenda**:
 A read-only view of upcoming calendar events shown beside the queue. Out of scope for v1.
 _Avoid_: Calendar (for the pane), schedule (for the pane; schedule is the snooze record)

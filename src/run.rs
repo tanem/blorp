@@ -14,7 +14,7 @@ use ratatui::backend::Backend;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::app::{App, Effect, Msg, update};
-use crate::jmap::{Error, Fatal, Jmap};
+use crate::jmap::{EmailUpdate, Error, Fatal, Jmap};
 use crate::mail::Mailboxes;
 use crate::ui;
 
@@ -90,7 +90,8 @@ where
     C: Clock,
 {
     let (tx, mut rx) = unbounded_channel();
-    let executor = Executor { jmap, tx };
+    let outbox = outbox(jmap.clone(), tx.clone());
+    let executor = Executor { jmap, tx, outbox };
     let mut spinner = tokio::time::interval(SPINNER_TICK);
     let mut spinning = false;
     let mut next = Some(Msg::Start);
@@ -125,9 +126,26 @@ where
     }
 }
 
+/// Starts the outbox task: it sends each job's `Email/set` once the job
+/// before it has been answered, reports it back as [`Msg::Sent`], and stops
+/// when the sender is dropped.
+fn outbox<J: Jmap>(jmap: J, tx: UnboundedSender<Msg>) -> UnboundedSender<(u64, EmailUpdate)> {
+    let (outbox, mut jobs) = unbounded_channel::<(u64, EmailUpdate)>();
+    tokio::spawn(async move {
+        while let Some((job, update)) = jobs.recv().await {
+            let result = jmap.set_emails(&update).await;
+            if tx.send(Msg::Sent { job, result }).is_err() {
+                break;
+            }
+        }
+    });
+    outbox
+}
+
 struct Executor<J> {
     jmap: J,
     tx: UnboundedSender<Msg>,
+    outbox: UnboundedSender<(u64, EmailUpdate)>,
 }
 
 impl<J: Jmap> Executor<J> {
@@ -143,6 +161,17 @@ impl<J: Jmap> Executor<J> {
                         let result = jmap.query(&query).await;
                         let _ = tx.send(Msg::Loaded { generation, result });
                     });
+                }
+                Effect::SetEmails { job, update } => {
+                    let _ = self.outbox.send((job, update));
+                }
+                Effect::LogDryRun { action, thread_ids } => {
+                    tracing::info!(
+                        target: "blorp::dry_run",
+                        "{} {}",
+                        action.name(),
+                        thread_ids.join(" ")
+                    );
                 }
                 Effect::Quit => return ControlFlow::Break(Exit::Quit),
                 Effect::Fatal(fatal) => return ControlFlow::Break(Exit::Fatal(fatal)),

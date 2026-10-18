@@ -20,9 +20,13 @@ pub struct Harness {
 impl Harness {
     /// An app over `store`'s mailboxes, not yet started.
     pub fn new(store: Store) -> Self {
+        Harness::with_dry_run(store, false)
+    }
+
+    fn with_dry_run(store: Store, dry_run: bool) -> Self {
         let now: Timestamp = NOW.parse().expect("valid timestamp");
         Harness {
-            app: App::new(Mailboxes::from(store.mailboxes()), now),
+            app: App::new(Mailboxes::from(store.mailboxes()), now).with_dry_run(dry_run),
             store,
         }
     }
@@ -30,6 +34,14 @@ impl Harness {
     /// An app over `store` with its initial queue loaded.
     pub fn loaded(store: Store) -> Self {
         let mut harness = Harness::new(store);
+        let effects = harness.start();
+        harness.resolve(effects);
+        harness
+    }
+
+    /// An app over `store` started with `--dry-run`, its queue loaded.
+    pub fn loaded_dry(store: Store) -> Self {
+        let mut harness = Harness::with_dry_run(store, true);
         let effects = harness.start();
         harness.resolve(effects);
         harness
@@ -43,8 +55,9 @@ impl Harness {
         update(&mut self.app, msg)
     }
 
-    /// Answers every query in `effects` from the store and returns the
-    /// remaining effects.
+    /// Answers every query and `Email/set` in `effects` from the store, in
+    /// order, and returns the remaining effects, including those the
+    /// answers produce.
     pub fn resolve(&mut self, effects: Vec<Effect>) -> Vec<Effect> {
         let mut rest = Vec::new();
         for effect in effects {
@@ -52,6 +65,10 @@ impl Harness {
                 Effect::Query { generation, query } => {
                     let result = self.store.query(&query);
                     rest.extend(self.send(Msg::Loaded { generation, result }));
+                }
+                Effect::SetEmails { job, update } => {
+                    let result = Ok(self.store.set_emails(&update));
+                    rest.extend(self.send(Msg::Sent { job, result }));
                 }
                 other => rest.push(other),
             }

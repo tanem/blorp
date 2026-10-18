@@ -1,5 +1,6 @@
 //! The reqwest adapter for [`Jmap`].
 
+use std::collections::BTreeMap;
 use std::error::Error as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,8 +10,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::{CORE, Email, EmailQuery, Error, Invocation, Jmap, Limits, MAIL, Mailbox};
-use super::{QueryResult, Request, Response, Session, Thread};
+use super::{CORE, Email, EmailQuery, EmailUpdate, Error, Invocation, Jmap, Limits, MAIL};
+use super::{Mailbox, QueryResult, Request, Response, Session, SetResult, Thread};
 
 /// Fastmail's session resource.
 pub const FASTMAIL_SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
@@ -194,6 +195,20 @@ impl Jmap for HttpJmap {
             emails,
         })
     }
+
+    async fn set_emails(&self, update: &EmailUpdate) -> Result<SetResult, Error> {
+        let responses = self
+            .send(vec![call(
+                "Email/set",
+                json!({"accountId": self.account_id, "update": update}),
+                "0",
+            )])
+            .await?;
+        let set: SetResponse = response_of(&responses, "Email/set", "0")?;
+        Ok(SetResult {
+            not_updated: set.not_updated.unwrap_or_default().into_keys().collect(),
+        })
+    }
 }
 
 /// The ids of every email of `threads`, thread by thread in the order of
@@ -225,6 +240,12 @@ struct Hit {
 #[derive(Deserialize)]
 struct GetResponse<T> {
     list: Vec<T>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetResponse {
+    not_updated: Option<BTreeMap<String, Value>>,
 }
 
 #[derive(Deserialize)]

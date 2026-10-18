@@ -75,6 +75,11 @@ impl Sandbox {
         self.dir.path().join("secret/token")
     }
 
+    /// The log file blorp writes under its state directory.
+    pub fn log_path(&self) -> PathBuf {
+        self.dir.path().join("home/state/blorp/blorp.log")
+    }
+
     pub fn store_token(&self, token: &str) {
         TokenFile::new(self.token_path())
             .set(&SecretString::from(token))

@@ -4,6 +4,7 @@
 //! reqwest adapter [`HttpJmap`] for production and the in-memory
 //! [`fake::FakeJmap`] for tests.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 
@@ -31,6 +32,28 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// by the second stage is left out. A method error in any request fails
     /// the whole query.
     fn query(&self, query: &EmailQuery) -> impl Future<Output = Result<QueryResult, Error>> + Send;
+
+    /// One `Email/set` applying `update`. An email the server did not
+    /// update is listed in the result, not reported as an error.
+    fn set_emails(
+        &self,
+        update: &EmailUpdate,
+    ) -> impl Future<Output = Result<SetResult, Error>> + Send;
+}
+
+/// An `Email/set` patch: paths such as `mailboxIds/<id>` or
+/// `keywords/$seen`, each set to `true` or `null`. Applying one twice
+/// leaves the email as applying it once does.
+pub type EmailPatch = BTreeMap<String, Value>;
+
+/// The `update` argument of an `Email/set`: a patch per email id.
+pub type EmailUpdate = BTreeMap<String, EmailPatch>;
+
+/// The result of a [`Jmap::set_emails`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SetResult {
+    /// The ids in `notUpdated`, in id order.
+    pub not_updated: Vec<String>,
 }
 
 /// An `Email/query` sorted by `receivedAt`, with threads collapsed.

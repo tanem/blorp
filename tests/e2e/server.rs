@@ -1,7 +1,7 @@
 //! A local JMAP server for tests: the session resource and the API, served
 //! from a fake store on a loopback port.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use blorp::jmap::fake::{MAX_OBJECTS_IN_GET, Store, api};
 use blorp::jmap::{CORE, Limits, MAIL};
@@ -54,7 +54,7 @@ impl LocalJmap {
             })
             .mount(&server)
             .await;
-        let store = Arc::new(store);
+        let store = Arc::new(Mutex::new(store));
         Mock::given(method("POST"))
             .and(path("/jmap/api/"))
             .respond_with(Authorized {
@@ -109,10 +109,13 @@ impl Respond for Authorized {
     }
 }
 
-fn api_response(store: &Store, max_calls: usize, request: &Request) -> ResponseTemplate {
+fn api_response(store: &Mutex<Store>, max_calls: usize, request: &Request) -> ResponseTemplate {
     let result = serde_json::from_slice::<Value>(&request.body)
         .map_err(|_| api::problem("urn:ietf:params:jmap:error:notJSON"))
-        .and_then(|body| api::respond(store, ACCOUNT_ID, max_calls, &body));
+        .and_then(|body| {
+            let mut store = store.lock().unwrap();
+            api::respond(&mut store, ACCOUNT_ID, max_calls, &body)
+        });
     match result {
         Ok(response) => ResponseTemplate::new(200).set_body_json(response),
         Err(problem) => ResponseTemplate::new(400).set_body_json(problem),

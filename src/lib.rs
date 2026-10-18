@@ -30,7 +30,7 @@ use run::Exit;
 /// Runs blorp for parsed arguments and returns the process exit code.
 pub fn run(cli: Cli) -> ExitCode {
     let result = match cli.command {
-        None => tui(),
+        None => tui(cli.dry_run),
         Some(Command::Setup) => setup(),
         Some(Command::Logout) => logout(),
     };
@@ -113,7 +113,7 @@ fn logout() -> Result<(), Failure> {
 
 /// Everything up to `Mailbox/get` runs on the plain terminal, including
 /// setup when no token is found; only then does the TUI take over.
-fn tui() -> Result<(), Failure> {
+fn tui(dry_run: bool) -> Result<(), Failure> {
     let overrides = debug_overrides();
     let store = token_store(&overrides)?;
     let token = cli::find_token(env_token(), &*store)?;
@@ -124,7 +124,12 @@ fn tui() -> Result<(), Failure> {
             Some(token) => HttpJmap::connect(&session_url, token).await?,
             None => cli::setup(&*store, &mut Stdin, &mut io::stdout(), &session_url).await?,
         };
-        let app = run::launch(&jmap, Timestamp::now()).await?;
+        let app = run::launch(&jmap, Timestamp::now())
+            .await?
+            .with_dry_run(dry_run);
+        if dry_run {
+            println!("Dry run: actions are logged, not sent to Fastmail.");
+        }
         let mut terminal = ratatui::try_init().map_err(|e| {
             ratatui::restore();
             e.to_string()

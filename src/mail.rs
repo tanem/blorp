@@ -50,6 +50,27 @@ impl Mailboxes {
     pub fn by_role(&self, role: Role) -> Option<&Mailbox> {
         self.0.iter().find(|m| m.role == Some(role))
     }
+
+    /// The mailbox with `id`, if any.
+    pub fn by_id(&self, id: &str) -> Option<&Mailbox> {
+        self.0.iter().find(|m| m.id == id)
+    }
+
+    /// Whether a move action out of the queue mailbox `from` moves `email`.
+    /// It moves an email in `from` that is in no Drafts or Sent mailbox and
+    /// in no Trash or Junk mailbox other than `from`, so a Trash or Junk
+    /// queue can move its own emails out.
+    pub fn moves(&self, email: &Email, from: &str) -> bool {
+        email.mailbox_ids.contains(from)
+            && !email
+                .mailbox_ids
+                .iter()
+                .any(|id| match self.by_id(id).and_then(|m| m.role) {
+                    Some(Role::Drafts | Role::Sent) => true,
+                    Some(Role::Trash | Role::Junk) => id != from,
+                    _ => false,
+                })
+    }
 }
 
 impl From<Vec<jmap::Mailbox>> for Mailboxes {
@@ -169,5 +190,68 @@ impl Thread {
     /// The number of emails in the whole thread, across mailboxes.
     pub fn message_count(&self) -> usize {
         self.emails.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mailboxes() -> Mailboxes {
+        let mailbox = |id: &str, role: Option<Role>| Mailbox {
+            id: id.into(),
+            name: id.into(),
+            parent_id: None,
+            role,
+        };
+        Mailboxes(vec![
+            mailbox("inbox", Some(Role::Inbox)),
+            mailbox("archive", Some(Role::Archive)),
+            mailbox("trash", Some(Role::Trash)),
+            mailbox("junk", Some(Role::Junk)),
+            mailbox("drafts", Some(Role::Drafts)),
+            mailbox("sent", Some(Role::Sent)),
+            mailbox("travel", None),
+        ])
+    }
+
+    fn email(mailbox_ids: &[&str]) -> Email {
+        Email {
+            id: "e1".into(),
+            mailbox_ids: mailbox_ids.iter().map(|id| id.to_string()).collect(),
+            seen: false,
+            flagged: false,
+            sender: None,
+            subject: None,
+            received_at: Timestamp::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn a_move_takes_only_emails_in_the_queue_mailbox_and_never_drafts_or_sent() {
+        let m = mailboxes();
+        for (mailbox_ids, from, moved) in [
+            (&["inbox"][..], "inbox", true),
+            (&["travel"], "inbox", false),
+            (&["inbox", "travel"], "inbox", true),
+            (&["inbox", "sent"], "inbox", false),
+            (&["inbox", "drafts"], "inbox", false),
+            (&["inbox", "trash"], "inbox", false),
+            (&["inbox", "junk"], "inbox", false),
+            (&["trash"], "trash", true),
+            (&["trash", "inbox"], "trash", true),
+            (&["trash", "junk"], "trash", false),
+            (&["archive", "inbox"], "archive", true),
+            (&["junk"], "junk", true),
+            (&["trash", "sent"], "trash", false),
+            (&["sent"], "sent", false),
+            (&["drafts"], "drafts", false),
+        ] {
+            assert_eq!(
+                m.moves(&email(mailbox_ids), from),
+                moved,
+                "{mailbox_ids:?} from {from}"
+            );
+        }
     }
 }
