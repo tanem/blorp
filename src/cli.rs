@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use apple_native_keyring_store::keychain::{Cred, MacKeychainDomain};
@@ -11,6 +12,7 @@ use secrecy::zeroize::Zeroize;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::jmap::{self, Fatal, HttpJmap, Session};
+use crate::private_file;
 
 /// A terminal UI for triaging a Fastmail account's mailboxes over JMAP.
 #[derive(Debug, Parser)]
@@ -51,7 +53,7 @@ pub struct StoreError(pub String);
 
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "keychain: {}", self.0)
+        f.write_str(&self.0)
     }
 }
 
@@ -103,7 +105,56 @@ impl TokenStore for Keychain {
 }
 
 fn store_error(error: keyring_core::Error) -> StoreError {
-    StoreError(error.to_string())
+    StoreError(format!("keychain: {error}"))
+}
+
+/// A file holding the token in place of the keychain, for tests. Written as
+/// any secret-bearing file is: mode 0600 in a 0700 directory, through a temp
+/// file and rename, with symlinks refused.
+pub struct TokenFile(PathBuf);
+
+impl TokenFile {
+    pub fn new(path: impl Into<PathBuf>) -> TokenFile {
+        TokenFile(path.into())
+    }
+
+    fn error(&self, error: io::Error) -> StoreError {
+        StoreError(format!("token store {}: {error}", self.0.display()))
+    }
+}
+
+impl TokenStore for TokenFile {
+    fn get(&self) -> Result<Option<SecretString>, StoreError> {
+        let Some(contents) = private_file::read(&self.0).map_err(|e| self.error(e))? else {
+            return Ok(None);
+        };
+        String::from_utf8(contents)
+            .map(|token| Some(SecretString::from(token)))
+            .map_err(|_| self.error(io::Error::other("not UTF-8")))
+    }
+
+    /// Exposes the token to write it, as [`Keychain`] does.
+    fn set(&self, token: &SecretString) -> Result<(), StoreError> {
+        private_file::write(&self.0, token.expose_secret().as_bytes()).map_err(|e| self.error(e))
+    }
+
+    fn delete(&self) -> Result<bool, StoreError> {
+        private_file::remove(&self.0).map_err(|e| self.error(e))
+    }
+}
+
+impl<T: TokenStore + ?Sized> TokenStore for Box<T> {
+    fn get(&self) -> Result<Option<SecretString>, StoreError> {
+        (**self).get()
+    }
+
+    fn set(&self, token: &SecretString) -> Result<(), StoreError> {
+        (**self).set(token)
+    }
+
+    fn delete(&self) -> Result<bool, StoreError> {
+        (**self).delete()
+    }
 }
 
 /// The token a bare `blorp` uses: `env`, from `BLORP_API_TOKEN`, when set,
@@ -137,15 +188,47 @@ impl<R: BufRead> Prompt for FirstLine<R> {
 }
 
 /// The token typed at the terminal with echo off, or read from stdin when
-/// stdin is not a terminal.
+/// stdin is not a terminal. Ctrl-C fails the read as
+/// [`io::ErrorKind::Interrupted`], with the terminal restored.
 pub struct Stdin;
 
 impl Prompt for Stdin {
     fn read_token(&mut self, prompt: &str) -> io::Result<String> {
         if io::stdin().is_terminal() {
+            // rpassword raises SIGINT for Ctrl-C before it restores echo, so
+            // the default action would leave the terminal without echo.
+            let _ignored = IgnoreSigint::new()?;
             rpassword::prompt_password(prompt)
         } else {
             FirstLine(io::stdin().lock()).read_token(prompt)
+        }
+    }
+}
+
+/// Ignores SIGINT until dropped, then puts back the action it replaced.
+struct IgnoreSigint(libc::sigaction);
+
+impl IgnoreSigint {
+    fn new() -> io::Result<IgnoreSigint> {
+        // SAFETY: sigaction is called with valid pointers to initialised
+        // structs, and SIG_IGN needs no handler code.
+        unsafe {
+            let mut ignore: libc::sigaction = std::mem::zeroed();
+            ignore.sa_sigaction = libc::SIG_IGN;
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(libc::SIGINT, &ignore, &mut previous) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(IgnoreSigint(previous))
+        }
+    }
+}
+
+impl Drop for IgnoreSigint {
+    fn drop(&mut self) {
+        // SAFETY: restores the action saved in `new`.
+        unsafe {
+            libc::sigaction(libc::SIGINT, &self.0, std::ptr::null_mut());
         }
     }
 }
@@ -167,7 +250,12 @@ pub async fn setup(
          Email scope only: not read-only, and not Email submission."
     )?;
     out.flush()?;
-    let mut typed = prompt.read_token("API token: ")?;
+    let mut typed = prompt
+        .read_token("API token: ")
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::Interrupted => CommandError::Cancelled,
+            _ => CommandError::Io(error),
+        })?;
     let entered = !typed.trim().is_empty();
     let token = Arc::new(SecretString::from(typed.trim()));
     typed.zeroize();
@@ -192,6 +280,8 @@ pub enum CommandError {
     Jmap(jmap::Error),
     /// Setup read an empty token.
     NoToken,
+    /// Ctrl-C at the setup prompt.
+    Cancelled,
 }
 
 impl fmt::Display for CommandError {
@@ -204,6 +294,7 @@ impl fmt::Display for CommandError {
                 None => error.fmt(f),
             },
             CommandError::NoToken => write!(f, "no API token was entered"),
+            CommandError::Cancelled => write!(f, "setup was cancelled"),
         }
     }
 }

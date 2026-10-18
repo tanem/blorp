@@ -1,4 +1,4 @@
-//! Local file paths.
+//! Local file paths, and the settings tests give through the environment.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -14,6 +14,34 @@ pub fn state_dir(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     Some(base.join("blorp"))
 }
 
+/// What a debug build reads from the environment so tests can run the
+/// binary against a local server with no keychain.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DebugOverrides {
+    /// `BLORP_SESSION_URL`, in place of Fastmail's session URL.
+    pub session_url: Option<String>,
+    /// `BLORP_TOKEN_STORE`, a file to hold the token in place of the
+    /// keychain.
+    pub token_store: Option<PathBuf>,
+}
+
+/// The overrides `env` sets, or none when `debug_build` is false, so a
+/// release build always talks to Fastmail and the keychain. Empty values
+/// count as unset.
+pub fn debug_overrides(
+    debug_build: bool,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> DebugOverrides {
+    if !debug_build {
+        return DebugOverrides::default();
+    }
+    let var = |name| env(name).filter(|value| !value.is_empty());
+    DebugOverrides {
+        session_url: var("BLORP_SESSION_URL").map(|url| url.to_string_lossy().into_owned()),
+        token_store: var("BLORP_TOKEN_STORE").map(PathBuf::from),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -24,6 +52,42 @@ mod tests {
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| OsString::from(value))
         }
+    }
+
+    #[test]
+    fn a_debug_build_reads_the_session_url_and_token_store() {
+        let vars = [
+            ("BLORP_SESSION_URL", "http://127.0.0.1:4000/jmap/session"),
+            ("BLORP_TOKEN_STORE", "/tmp/t/secret/token"),
+        ];
+
+        assert_eq!(
+            debug_overrides(true, env(&vars)),
+            DebugOverrides {
+                session_url: Some("http://127.0.0.1:4000/jmap/session".into()),
+                token_store: Some(PathBuf::from("/tmp/t/secret/token")),
+            }
+        );
+    }
+
+    #[test]
+    fn a_release_build_ignores_the_session_url_and_token_store() {
+        let vars = [
+            ("BLORP_SESSION_URL", "http://127.0.0.1:4000/jmap/session"),
+            ("BLORP_TOKEN_STORE", "/tmp/t/secret/token"),
+        ];
+
+        assert_eq!(
+            debug_overrides(false, env(&vars)),
+            DebugOverrides::default()
+        );
+    }
+
+    #[test]
+    fn empty_overrides_are_ignored() {
+        let vars = [("BLORP_SESSION_URL", ""), ("BLORP_TOKEN_STORE", "")];
+
+        assert_eq!(debug_overrides(true, env(&vars)), DebugOverrides::default());
     }
 
     #[test]

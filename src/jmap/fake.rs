@@ -2,13 +2,15 @@
 //!
 //! The store evaluates a subset of `Email/query`: `inMailbox`, sorting by
 //! `receivedAt` in either direction, collapsing threads, `limit`, and
-//! `calculateTotal`.
+//! `calculateTotal`. Every get is held to Fastmail's `maxObjectsInGet`.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
+
+pub mod api;
 
 use super::{Email, EmailAddress, EmailQuery, Error, Jmap, Mailbox, QueryResult, Thread};
 
@@ -88,8 +90,10 @@ impl FakeJmap {
 
 impl Jmap for FakeJmap {
     async fn get_mailboxes(&self) -> Result<Vec<Mailbox>, Error> {
-        self.call(Call::GetMailboxes, |store| Ok(store.mailboxes.clone()))
-            .await
+        self.call(Call::GetMailboxes, |store| {
+            store.get_mailboxes(None).map(|(list, _)| list)
+        })
+        .await
     }
 
     async fn query(&self, query: &EmailQuery) -> Result<QueryResult, Error> {
@@ -114,8 +118,29 @@ impl Store {
         self.mailboxes.clone()
     }
 
-    /// Evaluates `query` the way [`Jmap::query`] does.
+    /// Evaluates `query` the way [`Jmap::query`] does: the same four calls
+    /// the reqwest adapter chains, each get held to [`MAX_OBJECTS_IN_GET`].
     pub fn query(&self, query: &EmailQuery) -> Result<QueryResult, Error> {
+        let (ids, total) = self.query_ids(query)?;
+        let (hits, _) = self.get_emails(&ids)?;
+        let thread_ids: Vec<String> = hits.into_iter().map(|e| e.thread_id).collect();
+        let (threads, _) = self.get_threads(&thread_ids)?;
+        let email_ids: Vec<String> = threads
+            .iter()
+            .flat_map(|t| t.email_ids.iter().cloned())
+            .collect();
+        let (emails, _) = self.get_emails(&email_ids)?;
+        Ok(QueryResult {
+            ids,
+            total,
+            threads,
+            emails,
+        })
+    }
+
+    /// `Email/query` with `collapseThreads`: the ids of one email per
+    /// matching thread, up to `query.limit`, and how many threads match.
+    pub fn query_ids(&self, query: &EmailQuery) -> Result<(Vec<String>, usize), Error> {
         let mut matches: Vec<&Email> = Vec::new();
         for email in &self.emails {
             if matches_filter(email, &query.filter)? {
@@ -138,36 +163,81 @@ impl Store {
             .collect();
         let total = ids.len();
         ids.truncate(query.limit);
-        let mut threads = Vec::new();
-        let mut emails = Vec::new();
-        for id in &ids {
-            let thread_id = &self.email(id).thread_id;
-            let mut members: Vec<&Email> = self
-                .emails
-                .iter()
-                .filter(|e| &e.thread_id == thread_id)
-                .collect();
-            members.sort_by_key(|e| e.received_at);
-            threads.push(Thread {
-                id: thread_id.clone(),
-                email_ids: members.iter().map(|e| e.id.clone()).collect(),
-            });
-            emails.extend(members.into_iter().cloned());
-        }
-        Ok(QueryResult {
-            ids,
-            total,
-            threads,
-            emails,
-        })
+        Ok((ids, total))
     }
 
-    fn email(&self, id: &str) -> &Email {
-        self.emails
-            .iter()
-            .find(|e| e.id == id)
-            .expect("email in store")
+    /// `Mailbox/get`: the mailboxes with `ids`, or every mailbox for `None`,
+    /// and the ids not found.
+    pub fn get_mailboxes(
+        &self,
+        ids: Option<&[String]>,
+    ) -> Result<(Vec<Mailbox>, Vec<String>), Error> {
+        get("Mailbox/get", &self.mailboxes, ids, |m| &m.id)
     }
+
+    /// `Email/get`: the emails with `ids`, and the ids not found.
+    pub fn get_emails(&self, ids: &[String]) -> Result<(Vec<Email>, Vec<String>), Error> {
+        get("Email/get", &self.emails, Some(ids), |e| &e.id)
+    }
+
+    /// `Thread/get`: the threads with `ids`, each listing its emails oldest
+    /// first, and the ids not found.
+    pub fn get_threads(&self, ids: &[String]) -> Result<(Vec<Thread>, Vec<String>), Error> {
+        check_size("Thread/get", ids.len())?;
+        let mut threads = Vec::new();
+        let mut not_found = Vec::new();
+        for id in ids {
+            let mut members: Vec<&Email> =
+                self.emails.iter().filter(|e| &e.thread_id == id).collect();
+            if members.is_empty() {
+                not_found.push(id.clone());
+                continue;
+            }
+            members.sort_by_key(|e| e.received_at);
+            threads.push(Thread {
+                id: id.clone(),
+                email_ids: members.iter().map(|e| e.id.clone()).collect(),
+            });
+        }
+        Ok((threads, not_found))
+    }
+}
+
+/// Fastmail's `maxObjectsInGet`: a get for more objects than this fails with
+/// `requestTooLarge`.
+pub const MAX_OBJECTS_IN_GET: usize = 4096;
+
+fn check_size(method: &str, requested: usize) -> Result<(), Error> {
+    if requested > MAX_OBJECTS_IN_GET {
+        return Err(Error::Method {
+            method: method.into(),
+            kind: "requestTooLarge".into(),
+        });
+    }
+    Ok(())
+}
+
+/// A get over `objects` by id, or of all of them for `None`.
+fn get<T: Clone>(
+    method: &str,
+    objects: &[T],
+    ids: Option<&[String]>,
+    id_of: impl Fn(&T) -> &String,
+) -> Result<(Vec<T>, Vec<String>), Error> {
+    let Some(ids) = ids else {
+        check_size(method, objects.len())?;
+        return Ok((objects.to_vec(), Vec::new()));
+    };
+    check_size(method, ids.len())?;
+    let mut found = Vec::new();
+    let mut not_found = Vec::new();
+    for id in ids {
+        match objects.iter().find(|o| id_of(o) == id) {
+            Some(object) => found.push(object.clone()),
+            None => not_found.push(id.clone()),
+        }
+    }
+    Ok((found, not_found))
 }
 
 fn matches_filter(email: &Email, filter: &Value) -> Result<bool, Error> {
@@ -292,5 +362,60 @@ impl EmailSpec {
     pub fn attachment(mut self) -> Self {
         self.0.has_attachment = true;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn inbox_query(limit: usize) -> EmailQuery {
+        EmailQuery {
+            filter: json!({"inMailbox": "mb-inbox"}),
+            ascending: false,
+            limit,
+        }
+    }
+
+    /// `threads` threads in the Inbox, each of `per_thread` emails.
+    fn inbox(threads: usize, per_thread: usize) -> Store {
+        let mut builder = Store::builder().role_mailbox("mb-inbox", "Inbox", "inbox");
+        for t in 0..threads {
+            for e in 0..per_thread {
+                let received = format!("2026-10-{:02}T{:02}:00:00Z", 1 + t % 28, e % 24);
+                builder = builder.email(
+                    EmailSpec::new(&format!("e{t}-{e}"), &format!("t{t}"), &received)
+                        .in_mailbox("mb-inbox"),
+                );
+            }
+        }
+        builder.build()
+    }
+
+    fn too_large(method: &str) -> Error {
+        Error::Method {
+            method: method.into(),
+            kind: "requestTooLarge".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_query_fetching_more_emails_than_max_objects_in_get_is_too_large() {
+        let jmap = FakeJmap::new(inbox(10, 410));
+
+        let result = jmap.query(&inbox_query(500)).await;
+
+        assert_eq!(result, Err(too_large("Email/get")));
+    }
+
+    #[test]
+    fn a_query_fetching_exactly_max_objects_in_get_emails_succeeds() {
+        let store = inbox(8, 512);
+
+        let result = store.query(&inbox_query(500)).unwrap();
+
+        assert_eq!(result.emails.len(), MAX_OBJECTS_IN_GET);
     }
 }
