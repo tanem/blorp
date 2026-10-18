@@ -524,6 +524,7 @@ fn a_redo_waits_until_its_undo_is_answered() {
     assert_eq!(h.ctrl('r'), []);
     assert_eq!(h.status(), "The undo has not reached Fastmail yet");
     assert_eq!(h.subjects(), ["Trip", "Lunch", "Invoice"]);
+    assert_eq!(h.app.undo_depth(), 0);
 
     h.resolve(undo);
     assert!(matches!(h.ctrl('r')[..], [Effect::SetEmails { .. }]));
