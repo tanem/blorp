@@ -15,6 +15,13 @@ use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native
 use secrecy::{ExposeSecret, SecretString};
 use tempfile::TempDir;
 
+/// The token the local server accepts.
+pub const TOKEN: &str = "fake-token-1";
+
+/// What blorp prints when Fastmail answers 401.
+pub const REJECTED: &str = "Fastmail rejected the API token. It may have been removed in \
+Settings. Run `blorp setup` to store a new one.";
+
 /// How long a wait for the screen or for blorp to exit may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -182,6 +189,20 @@ pub struct Modes {
     pub echo: bool,
 }
 
+impl Modes {
+    /// The modes of a terminal out of raw mode.
+    pub const COOKED: Modes = Modes {
+        canonical: true,
+        echo: true,
+    };
+
+    /// Raw mode, as the TUI runs in.
+    pub const RAW: Modes = Modes {
+        canonical: false,
+        echo: false,
+    };
+}
+
 impl Blorp {
     /// Waits until `ready` holds for the screen, or fails naming `what`.
     pub fn wait_for(&self, what: &str, ready: impl Fn(&vt100::Screen) -> bool) {
@@ -214,13 +235,7 @@ impl Blorp {
 
     /// The screen's rows, without trailing spaces.
     pub fn rows(&self) -> Vec<String> {
-        let state = self.state();
-        let screen = state.parser.screen();
-        let (_, cols) = screen.size();
-        screen
-            .rows(0, cols)
-            .map(|row| row.trim_end().to_string())
-            .collect()
+        rows(self.state().parser.screen())
     }
 
     /// The second-last row, without trailing spaces.
@@ -316,13 +331,18 @@ impl Drop for Blorp {
     }
 }
 
-/// The screen's second-last row, without trailing spaces.
-pub fn statusline(screen: &vt100::Screen) -> String {
-    let (rows, cols) = screen.size();
+/// The screen's rows, without trailing spaces.
+pub fn rows(screen: &vt100::Screen) -> Vec<String> {
+    let (_, cols) = screen.size();
     screen
         .rows(0, cols)
-        .nth(usize::from(rows.saturating_sub(2)))
-        .unwrap_or_default()
-        .trim_end()
-        .to_string()
+        .map(|row| row.trim_end().to_string())
+        .collect()
+}
+
+/// The screen's second-last row, without trailing spaces.
+pub fn statusline(screen: &vt100::Screen) -> String {
+    let mut rows = rows(screen);
+    let index = rows.len().saturating_sub(2);
+    rows.swap_remove(index)
 }

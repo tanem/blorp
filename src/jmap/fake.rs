@@ -172,12 +172,12 @@ impl Store {
         &self,
         ids: Option<&[String]>,
     ) -> Result<(Vec<Mailbox>, Vec<String>), Error> {
-        get("Mailbox/get", &self.mailboxes, ids, |m| &m.id)
+        get_by_ids("Mailbox/get", &self.mailboxes, ids, |m| &m.id)
     }
 
     /// `Email/get`: the emails with `ids`, and the ids not found.
     pub fn get_emails(&self, ids: &[String]) -> Result<(Vec<Email>, Vec<String>), Error> {
-        get("Email/get", &self.emails, Some(ids), |e| &e.id)
+        get_by_ids("Email/get", &self.emails, Some(ids), |e| &e.id)
     }
 
     /// `Thread/get`: the threads with `ids`, each listing its emails oldest
@@ -218,7 +218,7 @@ fn check_size(method: &str, requested: usize) -> Result<(), Error> {
 }
 
 /// A get over `objects` by id, or of all of them for `None`.
-fn get<T: Clone>(
+fn get_by_ids<T: Clone>(
     method: &str,
     objects: &[T],
     ids: Option<&[String]>,

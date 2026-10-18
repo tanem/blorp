@@ -87,8 +87,9 @@ impl TokenStore for Keychain {
         }
     }
 
-    /// The one place besides the `Authorization` header that the token is
-    /// exposed, since the keychain stores the token itself.
+    /// Exposes the token to write it, since the keychain stores the token
+    /// itself. The token stores' `set` and the `Authorization` header are
+    /// the only places the token is exposed.
     fn set(&self, token: &SecretString) -> Result<(), StoreError> {
         self.0
             .set_password(token.expose_secret())
@@ -133,7 +134,7 @@ impl TokenStore for TokenFile {
             .map_err(|_| self.error(io::Error::other("not UTF-8")))
     }
 
-    /// Exposes the token to write it, as [`Keychain`] does.
+    /// Exposes the token to write it, as [`Keychain::set`] does.
     fn set(&self, token: &SecretString) -> Result<(), StoreError> {
         private_file::write(&self.0, token.expose_secret().as_bytes()).map_err(|e| self.error(e))
     }
@@ -143,25 +144,11 @@ impl TokenStore for TokenFile {
     }
 }
 
-impl<T: TokenStore + ?Sized> TokenStore for Box<T> {
-    fn get(&self) -> Result<Option<SecretString>, StoreError> {
-        (**self).get()
-    }
-
-    fn set(&self, token: &SecretString) -> Result<(), StoreError> {
-        (**self).set(token)
-    }
-
-    fn delete(&self) -> Result<bool, StoreError> {
-        (**self).delete()
-    }
-}
-
 /// The token a bare `blorp` uses: `env`, from `BLORP_API_TOKEN`, when set,
 /// else the stored one. `None` means setup must run.
 pub fn find_token(
     env: Option<SecretString>,
-    store: &impl TokenStore,
+    store: &dyn TokenStore,
 ) -> Result<Option<SecretString>, StoreError> {
     match env {
         Some(token) => Ok(Some(token)),
@@ -196,7 +183,8 @@ impl Prompt for Stdin {
     fn read_token(&mut self, prompt: &str) -> io::Result<String> {
         if io::stdin().is_terminal() {
             // rpassword raises SIGINT for Ctrl-C before it restores echo, so
-            // the default action would leave the terminal without echo.
+            // the default action would leave the terminal without echo. A
+            // SIGINT sent from outside is ignored too while the prompt reads.
             let _ignored = IgnoreSigint::new()?;
             rpassword::prompt_password(prompt)
         } else {
@@ -238,7 +226,7 @@ impl Drop for IgnoreSigint {
 /// at `session_url`, and only then stores it, replacing any stored token.
 /// Returns the client and session the check produced.
 pub async fn setup(
-    store: &impl TokenStore,
+    store: &dyn TokenStore,
     prompt: &mut impl Prompt,
     out: &mut impl Write,
     session_url: &str,
@@ -333,7 +321,7 @@ impl From<io::Error> for CommandError {
 /// `BLORP_API_TOKEN` is set, since blorp uses that token regardless. The
 /// config file and the snooze schedule are left alone.
 pub fn logout(
-    store: &impl TokenStore,
+    store: &dyn TokenStore,
     env_token_set: bool,
     out: &mut impl Write,
 ) -> Result<(), CommandError> {

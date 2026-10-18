@@ -8,9 +8,8 @@ use serde_json::json;
 
 mod e2e;
 
+use e2e::TOKEN;
 use e2e::server::LocalJmap;
-
-const TOKEN: &str = "fake-token-1";
 
 fn store() -> Store {
     Store::builder()

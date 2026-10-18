@@ -6,18 +6,13 @@ use blorp::jmap::fake::{EmailSpec, Store};
 mod e2e;
 
 use e2e::server::LocalJmap;
-use e2e::{Modes, Sandbox};
-
-const TOKEN: &str = "fake-token-1";
+use e2e::{Modes, REJECTED, Sandbox, TOKEN};
 
 const INTRO: &str = "blorp needs a Fastmail API token. Create one in Fastmail under \
 Settings, Privacy & Security, Connected apps & API tokens, with the Email scope \
 only: not read-only, and not Email submission.";
 
 const STORED: &str = "Stored the API token for kim@example.invalid in the keychain.";
-
-const REJECTED: &str = "Fastmail rejected the API token. It may have been removed in Settings. \
-Run `blorp setup` to store a new one.";
 
 const NO_EMAIL_SCOPE: &str = "The API token does not give access to mail. It needs the Email \
 scope. Run `blorp setup` to store one that has it.";
@@ -105,13 +100,7 @@ async fn ctrl_c_at_the_prompt_exits_with_echo_restored() {
     blorp.keys("fake\x03");
 
     assert_eq!(blorp.wait_exit().exit_code(), 130);
-    assert_eq!(
-        blorp.modes(),
-        Modes {
-            canonical: true,
-            echo: true,
-        }
-    );
+    assert_eq!(blorp.modes(), Modes::COOKED);
     assert_eq!(sandbox.stored_token(), None);
     assert!(!blorp.entered_alternate_screen());
 }

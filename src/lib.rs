@@ -89,32 +89,40 @@ impl From<StoreError> for Failure {
 
 /// `blorp setup`: always prompts, whether or not `BLORP_API_TOKEN` is set.
 fn setup() -> Result<(), Failure> {
-    let store = token_store()?;
+    let overrides = debug_overrides();
+    let store = token_store(&overrides)?;
     let _log = start_log()?;
     runtime()?.block_on(async {
-        cli::setup(&store, &mut Stdin, &mut io::stdout(), &session_url()).await?;
+        cli::setup(
+            &*store,
+            &mut Stdin,
+            &mut io::stdout(),
+            &session_url(&overrides),
+        )
+        .await?;
         Ok(())
     })
 }
 
 /// `blorp logout`.
 fn logout() -> Result<(), Failure> {
-    let store = token_store()?;
-    cli::logout(&store, env_token().is_some(), &mut io::stdout())?;
+    let store = token_store(&debug_overrides())?;
+    cli::logout(&*store, env_token().is_some(), &mut io::stdout())?;
     Ok(())
 }
 
 /// Everything up to `Mailbox/get` runs on the plain terminal, including
 /// setup when no token is found; only then does the TUI take over.
 fn tui() -> Result<(), Failure> {
-    let store = token_store()?;
-    let token = cli::find_token(env_token(), &store)?;
-    let session_url = session_url();
+    let overrides = debug_overrides();
+    let store = token_store(&overrides)?;
+    let token = cli::find_token(env_token(), &*store)?;
+    let session_url = session_url(&overrides);
     let _log = start_log()?;
     runtime()?.block_on(async {
         let (jmap, _session) = match token {
             Some(token) => HttpJmap::connect(&session_url, token).await?,
-            None => cli::setup(&store, &mut Stdin, &mut io::stdout(), &session_url).await?,
+            None => cli::setup(&*store, &mut Stdin, &mut io::stdout(), &session_url).await?,
         };
         let app = run::launch(&jmap, Timestamp::now()).await?;
         let mut terminal = ratatui::try_init().map_err(|e| {
@@ -146,15 +154,16 @@ fn debug_overrides() -> DebugOverrides {
 }
 
 /// Fastmail's session URL, or `BLORP_SESSION_URL` in a debug build.
-fn session_url() -> String {
-    debug_overrides()
+fn session_url(overrides: &DebugOverrides) -> String {
+    overrides
         .session_url
+        .clone()
         .unwrap_or_else(|| FASTMAIL_SESSION_URL.to_string())
 }
 
 /// The keychain, or the file `BLORP_TOKEN_STORE` names in a debug build.
-fn token_store() -> Result<Box<dyn TokenStore>, StoreError> {
-    match debug_overrides().token_store {
+fn token_store(overrides: &DebugOverrides) -> Result<Box<dyn TokenStore>, StoreError> {
+    match &overrides.token_store {
         Some(path) => Ok(Box::new(TokenFile::new(path))),
         None => Ok(Box::new(Keychain::open()?)),
     }

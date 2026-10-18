@@ -110,12 +110,7 @@ fn the_inbox_opens_in_a_terminal_moves_and_quits_cleanly() {
 
     assert_eq!(blorp.wait_exit().exit_code(), 0);
     assert!(!blorp.on_alternate_screen());
-    assert_eq!(
-        blorp.modes(),
-        Modes {
-            canonical: true,
-            echo: true,
-        }
-    );
-    assert_eq!(sandbox.stored_token(), None, "nothing was stored");
+    assert_eq!(blorp.modes(), Modes::COOKED);
+    // Not assert_eq!, which would print a stored token.
+    assert!(sandbox.stored_token().is_none(), "nothing was stored");
 }
