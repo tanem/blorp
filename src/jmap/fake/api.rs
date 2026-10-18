@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use super::Store;
+use super::{MAX_OBJECTS_IN_SET, Store};
 use crate::jmap::{CORE, EmailQuery, EmailUpdate, Error, MAIL};
 
 /// Answers a JMAP request envelope with its response envelope. A
@@ -198,8 +198,9 @@ fn get_response<T: Serialize>(
     Ok(json!({"accountId": account_id, "state": "0", "list": list, "notFound": not_found}))
 }
 
-/// `Email/set` with `update` only. An id the store does not hold is
-/// `notFound`; a patch the store does not apply is `invalidPatch`.
+/// `Email/set` with `update` only, of at most [`MAX_OBJECTS_IN_SET`]
+/// emails. An id the store does not hold is `notFound`; a patch the store
+/// does not apply is `invalidPatch`.
 fn email_set(
     store: &mut Store,
     account_id: &str,
@@ -217,6 +218,9 @@ fn email_set(
         .transpose()
         .map_err(|_| "invalidArguments")?
         .unwrap_or_default();
+    if update.len() > MAX_OBJECTS_IN_SET {
+        return Err("requestTooLarge".into());
+    }
     let result = store.set_emails(&update);
     let mut updated = Map::new();
     let mut not_updated = Map::new();

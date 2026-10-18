@@ -39,8 +39,12 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// left out.
     fn get_emails(&self, ids: &[String]) -> impl Future<Output = Result<Vec<Email>, Error>> + Send;
 
-    /// One `Email/set` applying `update`. An email the server did not
-    /// update is listed in the result, not reported as an error.
+    /// `update` applied in `Email/set` calls of at most the session's
+    /// `maxObjectsInSet` emails, in requests of at most its
+    /// `maxCallsInRequest` calls, sent one after another; none is sent for
+    /// an empty update. An email the server did not update is listed in the
+    /// result, not reported as an error. A failed request fails the whole
+    /// update, and the calls answered before it stay applied.
     fn set_emails(
         &self,
         update: &EmailUpdate,

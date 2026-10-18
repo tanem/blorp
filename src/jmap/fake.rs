@@ -2,7 +2,8 @@
 //!
 //! The store evaluates a subset of `Email/query`: `inMailbox`, sorting by
 //! `receivedAt` in either direction, collapsing threads, `limit`, and
-//! `calculateTotal`. Every get is held to Fastmail's `maxObjectsInGet`.
+//! `calculateTotal`. Every get is held to Fastmail's `maxObjectsInGet`, and
+//! the local test server holds every `Email/set` to its `maxObjectsInSet`.
 //! `Email/set` applies `mailboxIds/<id>` and `keywords/<keyword>` patches.
 
 use std::collections::{HashSet, VecDeque};
@@ -250,6 +251,10 @@ impl Store {
 /// Fastmail's `maxObjectsInGet`: a get for more objects than this fails with
 /// `requestTooLarge`.
 pub const MAX_OBJECTS_IN_GET: usize = Limits::FASTMAIL.max_objects_in_get;
+
+/// Fastmail's `maxObjectsInSet`: an `Email/set` of more updates than this
+/// fails with `requestTooLarge`.
+pub const MAX_OBJECTS_IN_SET: usize = Limits::FASTMAIL.max_objects_in_set;
 
 fn check_size(method: &str, requested: usize) -> Result<(), Error> {
     if requested > MAX_OBJECTS_IN_GET {

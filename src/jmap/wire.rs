@@ -46,6 +46,7 @@ impl Session {
         let default = Limits::FASTMAIL;
         Limits {
             max_objects_in_get: limit("maxObjectsInGet").unwrap_or(default.max_objects_in_get),
+            max_objects_in_set: limit("maxObjectsInSet").unwrap_or(default.max_objects_in_set),
             max_calls_in_request: limit("maxCallsInRequest")
                 .unwrap_or(default.max_calls_in_request),
         }
@@ -57,14 +58,20 @@ impl Session {
 pub struct Limits {
     /// The most ids one `/get` call may name.
     pub max_objects_in_get: usize,
+    /// The most objects one `/set` call may create, update, or destroy.
+    pub max_objects_in_set: usize,
     /// The most method calls one request may carry.
     pub max_calls_in_request: usize,
 }
 
 impl Limits {
-    /// The values Fastmail's session advertised on 2026-10-19.
+    /// Fastmail's values: `maxObjectsInGet` and `maxCallsInRequest` as its
+    /// session advertised them on 2026-10-19, and `maxObjectsInSet` as two
+    /// published dumps of its session show it, not yet checked against a
+    /// live session.
     pub const FASTMAIL: Limits = Limits {
         max_objects_in_get: 4096,
+        max_objects_in_set: 4096,
         max_calls_in_request: 50,
     };
 }
@@ -234,13 +241,15 @@ mod tests {
 
     #[test]
     fn session_limits_are_read_from_the_core_capability() {
-        let session =
-            session_with_core(serde_json::json!({"maxObjectsInGet": 256, "maxCallsInRequest": 16}));
+        let session = session_with_core(
+            serde_json::json!({"maxObjectsInGet": 256, "maxObjectsInSet": 128, "maxCallsInRequest": 16}),
+        );
 
         assert_eq!(
             session.limits(),
             Limits {
                 max_objects_in_get: 256,
+                max_objects_in_set: 128,
                 max_calls_in_request: 16,
             }
         );
@@ -254,6 +263,7 @@ mod tests {
             session.limits(),
             Limits {
                 max_objects_in_get: 4096,
+                max_objects_in_set: 4096,
                 max_calls_in_request: 50,
             }
         );
@@ -269,13 +279,14 @@ mod tests {
             Value::Null,
         ] {
             let session = session_with_core(
-                serde_json::json!({"maxObjectsInGet": value, "maxCallsInRequest": value}),
+                serde_json::json!({"maxObjectsInGet": value, "maxObjectsInSet": value, "maxCallsInRequest": value}),
             );
 
             assert_eq!(
                 session.limits(),
                 Limits {
                     max_objects_in_get: 4096,
+                    max_objects_in_set: 4096,
                     max_calls_in_request: 50,
                 },
                 "{value}"

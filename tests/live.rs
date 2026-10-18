@@ -27,7 +27,7 @@ async fn session_mailboxes_and_an_inbox_query_have_the_expected_shapes() {
         .await
         .expect("session with the mail capability");
     assert!(session.mail_account().is_some());
-    for limit in ["maxObjectsInGet", "maxCallsInRequest"] {
+    for limit in ["maxObjectsInGet", "maxObjectsInSet", "maxCallsInRequest"] {
         // The message leaves out the value, which comes from the live session.
         assert!(
             session.capabilities[CORE][limit]

@@ -24,6 +24,14 @@ _Avoid_: Tab, folder, saved search
 The threads an action applies to: the visual range if one is open, else the marked rows, else the count of rows from the cursor.
 _Avoid_: Highlighted, checked
 
+**Mark**:
+A flag on a row, set and cleared with `x`, that puts its thread in the selection while no visual range is open. A mark lasts until `X` clears it, its thread leaves the queue, or the filter changes.
+_Avoid_: Tag, check
+
+**Visual range**:
+The rows from the one `V` was pressed on to the cursor, while visual line mode is open.
+_Avoid_: Highlight, region
+
 **Thread**:
 A conversation as Fastmail groups it: the unit that every action applies to.
 _Avoid_: Message (when the whole conversation is meant), email, conversation
