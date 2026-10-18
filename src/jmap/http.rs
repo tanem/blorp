@@ -9,8 +9,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::{CORE, Email, EmailQuery, Error, Invocation, Jmap, MAIL, Mailbox, QueryResult};
-use super::{Request, Response, Session, Thread};
+use super::{CORE, Email, EmailQuery, Error, Invocation, Jmap, Limits, MAIL, Mailbox};
+use super::{QueryResult, Request, Response, Session, Thread};
 
 /// Fastmail's session resource.
 pub const FASTMAIL_SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
@@ -30,13 +30,15 @@ const EMAIL_PROPERTIES: [&str; 8] = [
     "hasAttachment",
 ];
 
-/// A JMAP client bound to one session's API URL and primary mail account.
+/// A JMAP client bound to one session's API URL, primary mail account, and
+/// request limits.
 #[derive(Clone)]
 pub struct HttpJmap {
     http: reqwest::Client,
     token: Arc<SecretString>,
     api_url: String,
     account_id: String,
+    limits: Limits,
 }
 
 impl HttpJmap {
@@ -67,6 +69,7 @@ impl HttpJmap {
             token,
             api_url: session.api_url.clone(),
             account_id: account_id.to_string(),
+            limits: session.limits(),
         };
         Ok((jmap, session))
     }
@@ -100,6 +103,34 @@ impl HttpJmap {
             });
         }
         Ok(response.method_responses)
+    }
+
+    /// `Email/get` for `ids`, in calls of at most `maxObjectsInGet` ids and
+    /// requests of at most `maxCallsInRequest` calls, sent one after
+    /// another. Ids not found are left out.
+    async fn get_emails(&self, ids: &[String]) -> Result<Vec<Email>, Error> {
+        let mut emails = Vec::with_capacity(ids.len());
+        let chunks: Vec<&[String]> = ids.chunks(self.limits.max_objects_in_get).collect();
+        for batch in chunks.chunks(self.limits.max_calls_in_request) {
+            let calls = batch
+                .iter()
+                .enumerate()
+                .map(|(i, chunk)| {
+                    let args = json!({
+                        "accountId": self.account_id,
+                        "ids": chunk,
+                        "properties": EMAIL_PROPERTIES
+                    });
+                    call("Email/get", args, &i.to_string())
+                })
+                .collect();
+            let responses = self.send(calls).await?;
+            for i in 0..batch.len() {
+                let got: GetResponse<Email> = response_of(&responses, "Email/get", &i.to_string())?;
+                emails.extend(got.list);
+            }
+        }
+        Ok(emails)
     }
 }
 
@@ -149,27 +180,46 @@ impl Jmap for HttpJmap {
                     }),
                     "2",
                 ),
-                call(
-                    "Email/get",
-                    json!({
-                        "accountId": account,
-                        "#ids": {"resultOf": "2", "name": "Thread/get", "path": "/list/*/emailIds"},
-                        "properties": EMAIL_PROPERTIES
-                    }),
-                    "3",
-                ),
             ])
             .await?;
         let ids: QueryResponse = response_of(&responses, "Email/query", "0")?;
+        let hits: GetResponse<Hit> = response_of(&responses, "Email/get", "1")?;
         let threads: GetResponse<Thread> = response_of(&responses, "Thread/get", "2")?;
-        let emails: GetResponse<Email> = response_of(&responses, "Email/get", "3")?;
+        let email_ids = member_ids(&ids.ids, &hits.list, &threads.list);
+        let emails = self.get_emails(&email_ids).await?;
         Ok(QueryResult {
             total: ids.total.unwrap_or(ids.ids.len()),
             ids: ids.ids,
             threads: threads.list,
-            emails: emails.list,
+            emails,
         })
     }
+}
+
+/// The ids of every email of `threads`, thread by thread in the order of
+/// the query's `ids`, since a `/get` may list its objects in any order. A
+/// thread no hit names comes last.
+fn member_ids(ids: &[String], hits: &[Hit], threads: &[Thread]) -> Vec<String> {
+    let position = |thread: &Thread| {
+        hits.iter()
+            .find(|hit| hit.thread_id == thread.id)
+            .and_then(|hit| ids.iter().position(|id| *id == hit.id))
+            .unwrap_or(usize::MAX)
+    };
+    let mut ordered: Vec<&Thread> = threads.iter().collect();
+    ordered.sort_by_cached_key(|thread| position(thread));
+    ordered
+        .into_iter()
+        .flat_map(|thread| thread.email_ids.iter().cloned())
+        .collect()
+}
+
+/// A query hit, fetched for its thread.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Hit {
+    id: String,
+    thread_id: String,
 }
 
 #[derive(Deserialize)]

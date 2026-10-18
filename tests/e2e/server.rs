@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use blorp::jmap::fake::{MAX_OBJECTS_IN_GET, Store, api};
-use blorp::jmap::{CORE, MAIL};
+use blorp::jmap::{CORE, Limits, MAIL};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -22,18 +22,30 @@ pub struct LocalJmap {
 impl LocalJmap {
     /// Serves `store` to requests bearing `token`.
     pub async fn start(store: Store, token: &str) -> LocalJmap {
-        LocalJmap::serve(store, token, true).await
+        LocalJmap::serve(store, token, true, Limits::FASTMAIL.max_calls_in_request).await
+    }
+
+    /// Serves `store`, advertising and enforcing `max_calls` as the
+    /// session's `maxCallsInRequest`.
+    pub async fn start_with_max_calls(store: Store, token: &str, max_calls: usize) -> LocalJmap {
+        LocalJmap::serve(store, token, true, max_calls).await
     }
 
     /// Serves a session that does not advertise the mail capability.
     pub async fn start_without_mail(token: &str) -> LocalJmap {
-        LocalJmap::serve(Store::builder().build(), token, false).await
+        LocalJmap::serve(
+            Store::builder().build(),
+            token,
+            false,
+            Limits::FASTMAIL.max_calls_in_request,
+        )
+        .await
     }
 
-    async fn serve(store: Store, token: &str, mail: bool) -> LocalJmap {
+    async fn serve(store: Store, token: &str, mail: bool, max_calls: usize) -> LocalJmap {
         let server = MockServer::start().await;
         let auth = format!("Bearer {token}");
-        let session = session(&server.uri(), mail);
+        let session = session(&server.uri(), mail, max_calls);
         Mock::given(method("GET"))
             .and(path("/jmap/session"))
             .respond_with(Authorized {
@@ -47,7 +59,7 @@ impl LocalJmap {
             .and(path("/jmap/api/"))
             .respond_with(Authorized {
                 auth,
-                answer: Box::new(move |request| api_response(&store, request)),
+                answer: Box::new(move |request| api_response(&store, max_calls, request)),
             })
             .mount(&server)
             .await;
@@ -56,6 +68,23 @@ impl LocalJmap {
 
     pub fn session_url(&self) -> String {
         format!("{}/jmap/session", self.server.uri())
+    }
+
+    /// The API URL the session names.
+    pub fn api_url(&self) -> String {
+        format!("{}/jmap/api/", self.server.uri())
+    }
+
+    /// The body of every API request received so far, in the order received.
+    pub async fn api_requests(&self) -> Vec<Value> {
+        self.server
+            .received_requests()
+            .await
+            .expect("request recording is on")
+            .iter()
+            .filter(|request| request.url.path() == "/jmap/api/")
+            .map(|request| serde_json::from_slice(&request.body).expect("a JSON request"))
+            .collect()
     }
 }
 
@@ -80,20 +109,23 @@ impl Respond for Authorized {
     }
 }
 
-fn api_response(store: &Store, request: &Request) -> ResponseTemplate {
+fn api_response(store: &Store, max_calls: usize, request: &Request) -> ResponseTemplate {
     let result = serde_json::from_slice::<Value>(&request.body)
-        .map_err(|_| "urn:ietf:params:jmap:error:notJSON".to_string())
-        .and_then(|body| api::respond(store, ACCOUNT_ID, &body));
+        .map_err(|_| api::problem("urn:ietf:params:jmap:error:notJSON"))
+        .and_then(|body| api::respond(store, ACCOUNT_ID, max_calls, &body));
     match result {
         Ok(response) => ResponseTemplate::new(200).set_body_json(response),
-        Err(kind) => ResponseTemplate::new(400).set_body_json(json!({"type": kind, "status": 400})),
+        Err(problem) => ResponseTemplate::new(400).set_body_json(problem),
     }
 }
 
 /// A session resource in Fastmail's shape, advertising Fastmail's
-/// `maxObjectsInGet`.
-fn session(base: &str, mail: bool) -> Value {
-    let mut capabilities = json!({CORE: {"maxObjectsInGet": MAX_OBJECTS_IN_GET}});
+/// `maxObjectsInGet` and `max_calls` as `maxCallsInRequest`.
+fn session(base: &str, mail: bool, max_calls: usize) -> Value {
+    let mut capabilities = json!({CORE: {
+        "maxObjectsInGet": MAX_OBJECTS_IN_GET,
+        "maxCallsInRequest": max_calls
+    }});
     let mut primary = json!({CORE: ACCOUNT_ID});
     if mail {
         capabilities[MAIL] = json!({});

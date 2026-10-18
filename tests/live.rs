@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use blorp::jmap::http::FASTMAIL_SESSION_URL;
-use blorp::jmap::{EmailQuery, HttpJmap, Jmap};
+use blorp::jmap::{CORE, EmailQuery, HttpJmap, Jmap};
 use blorp::mail::{Mailboxes, Role};
 use secrecy::SecretString;
 use serde_json::json;
@@ -27,6 +27,15 @@ async fn session_mailboxes_and_an_inbox_query_have_the_expected_shapes() {
         .await
         .expect("session with the mail capability");
     assert!(session.mail_account().is_some());
+    for limit in ["maxObjectsInGet", "maxCallsInRequest"] {
+        // The message leaves out the value, which comes from the live session.
+        assert!(
+            session.capabilities[CORE][limit]
+                .as_u64()
+                .is_some_and(|n| n > 0),
+            "the core capability advertises {limit} as a positive integer"
+        );
+    }
 
     let mailboxes = Mailboxes::from(jmap.get_mailboxes().await.expect("Mailbox/get"));
     let inbox = mailboxes
@@ -40,7 +49,7 @@ async fn session_mailboxes_and_an_inbox_query_have_the_expected_shapes() {
             limit: 500,
         })
         .await
-        .expect("Email/query chain");
+        .expect("the two-stage Inbox query");
 
     let emails: HashSet<&str> = result.emails.iter().map(|e| e.id.as_str()).collect();
     let threads: HashSet<&str> = result.emails.iter().map(|e| e.thread_id.as_str()).collect();

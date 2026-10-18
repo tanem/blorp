@@ -31,6 +31,42 @@ impl Session {
         }
         self.primary_accounts.get(MAIL).map(String::as_str)
     }
+
+    /// The request limits the core capability advertises. A limit that is
+    /// missing, or not a positive integer, takes its value in
+    /// [`Limits::FASTMAIL`].
+    pub fn limits(&self) -> Limits {
+        let core = self.capabilities.get(CORE);
+        let limit = |name: &str| {
+            core.and_then(|core| core.get(name))
+                .and_then(Value::as_u64)
+                .filter(|&n| n > 0)
+                .and_then(|n| usize::try_from(n).ok())
+        };
+        let default = Limits::FASTMAIL;
+        Limits {
+            max_objects_in_get: limit("maxObjectsInGet").unwrap_or(default.max_objects_in_get),
+            max_calls_in_request: limit("maxCallsInRequest")
+                .unwrap_or(default.max_calls_in_request),
+        }
+    }
+}
+
+/// The session limits blorp works within (RFC 8620 section 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// The most ids one `/get` call may name.
+    pub max_objects_in_get: usize,
+    /// The most method calls one request may carry.
+    pub max_calls_in_request: usize,
+}
+
+impl Limits {
+    /// The values Fastmail's session advertised on 2026-10-19.
+    pub const FASTMAIL: Limits = Limits {
+        max_objects_in_get: 4096,
+        max_calls_in_request: 50,
+    };
 }
 
 /// A request envelope (RFC 8620 section 3.3).
@@ -182,6 +218,69 @@ mod tests {
         .unwrap();
 
         assert_eq!(session.mail_account(), None);
+    }
+
+    fn session_with_core(core: Value) -> Session {
+        serde_json::from_value(serde_json::json!({
+            "capabilities": {CORE: core, MAIL: {}},
+            "accounts": {},
+            "primaryAccounts": {MAIL: "u1a2b3c4"},
+            "username": "kim@example.invalid",
+            "apiUrl": "https://api.example.invalid/jmap/api/",
+            "state": "0"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn session_limits_are_read_from_the_core_capability() {
+        let session =
+            session_with_core(serde_json::json!({"maxObjectsInGet": 256, "maxCallsInRequest": 16}));
+
+        assert_eq!(
+            session.limits(),
+            Limits {
+                max_objects_in_get: 256,
+                max_calls_in_request: 16,
+            }
+        );
+    }
+
+    #[test]
+    fn session_limits_default_to_fastmails_when_missing() {
+        let session = session_with_core(serde_json::json!({}));
+
+        assert_eq!(
+            session.limits(),
+            Limits {
+                max_objects_in_get: 4096,
+                max_calls_in_request: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn session_limits_default_to_fastmails_when_not_a_positive_integer() {
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("10"),
+            Value::Null,
+        ] {
+            let session = session_with_core(
+                serde_json::json!({"maxObjectsInGet": value, "maxCallsInRequest": value}),
+            );
+
+            assert_eq!(
+                session.limits(),
+                Limits {
+                    max_objects_in_get: 4096,
+                    max_calls_in_request: 50,
+                },
+                "{value}"
+            );
+        }
     }
 
     #[test]

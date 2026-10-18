@@ -12,7 +12,7 @@ use serde_json::Value;
 
 pub mod api;
 
-use super::{Email, EmailAddress, EmailQuery, Error, Jmap, Mailbox, QueryResult, Thread};
+use super::{Email, EmailAddress, EmailQuery, Error, Jmap, Limits, Mailbox, QueryResult, Thread};
 
 /// A call made to a [`FakeJmap`], in the order made.
 #[derive(Debug, Clone, PartialEq)]
@@ -118,8 +118,9 @@ impl Store {
         self.mailboxes.clone()
     }
 
-    /// Evaluates `query` the way [`Jmap::query`] does: the same four calls
-    /// the reqwest adapter chains, each get held to [`MAX_OBJECTS_IN_GET`].
+    /// Evaluates `query` the way [`Jmap::query`] does: the same calls the
+    /// reqwest adapter makes, each get held to [`MAX_OBJECTS_IN_GET`], with
+    /// the threads' emails fetched in gets of at most that many ids.
     pub fn query(&self, query: &EmailQuery) -> Result<QueryResult, Error> {
         let (ids, total) = self.query_ids(query)?;
         let (hits, _) = self.get_emails(&ids)?;
@@ -129,7 +130,10 @@ impl Store {
             .iter()
             .flat_map(|t| t.email_ids.iter().cloned())
             .collect();
-        let (emails, _) = self.get_emails(&email_ids)?;
+        let mut emails = Vec::new();
+        for chunk in email_ids.chunks(MAX_OBJECTS_IN_GET) {
+            emails.extend(self.get_emails(chunk)?.0);
+        }
         Ok(QueryResult {
             ids,
             total,
@@ -205,7 +209,7 @@ impl Store {
 
 /// Fastmail's `maxObjectsInGet`: a get for more objects than this fails with
 /// `requestTooLarge`.
-pub const MAX_OBJECTS_IN_GET: usize = 4096;
+pub const MAX_OBJECTS_IN_GET: usize = Limits::FASTMAIL.max_objects_in_get;
 
 fn check_size(method: &str, requested: usize) -> Result<(), Error> {
     if requested > MAX_OBJECTS_IN_GET {
@@ -394,20 +398,14 @@ mod tests {
         builder.build()
     }
 
-    fn too_large(method: &str) -> Error {
-        Error::Method {
-            method: method.into(),
-            kind: "requestTooLarge".into(),
-        }
-    }
-
     #[tokio::test]
-    async fn a_query_fetching_more_emails_than_max_objects_in_get_is_too_large() {
+    async fn a_query_fetching_more_emails_than_max_objects_in_get_loads() {
         let jmap = FakeJmap::new(inbox(10, 410));
 
-        let result = jmap.query(&inbox_query(500)).await;
+        let result = jmap.query(&inbox_query(500)).await.unwrap();
 
-        assert_eq!(result, Err(too_large("Email/get")));
+        assert_eq!(result.threads.len(), 10);
+        assert_eq!(result.emails.len(), 4100);
     }
 
     #[test]
@@ -417,5 +415,26 @@ mod tests {
         let result = store.query(&inbox_query(500)).unwrap();
 
         assert_eq!(result.emails.len(), MAX_OBJECTS_IN_GET);
+    }
+
+    #[test]
+    fn a_thread_of_more_emails_than_max_objects_in_get_loads_oldest_first() {
+        let start: jiff::Timestamp = "2026-10-01T00:00:00Z".parse().unwrap();
+        let mut builder = Store::builder().role_mailbox("mb-inbox", "Inbox", "inbox");
+        for e in (0..5000).rev() {
+            let received = start + jiff::SignedDuration::from_secs(e);
+            builder = builder.email(
+                EmailSpec::new(&format!("e{e}"), "t1", &received.to_string())
+                    .in_mailbox("mb-inbox"),
+            );
+        }
+
+        let result = builder.build().query(&inbox_query(500)).unwrap();
+
+        let oldest_first: Vec<String> = (0..5000).map(|e| format!("e{e}")).collect();
+        assert_eq!(result.threads.len(), 1);
+        assert_eq!(result.threads[0].email_ids, oldest_first);
+        let emails: Vec<&str> = result.emails.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(emails, oldest_first);
     }
 }

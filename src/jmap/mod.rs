@@ -21,8 +21,15 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// `Mailbox/get` for every mailbox in the account.
     fn get_mailboxes(&self) -> impl Future<Output = Result<Vec<Mailbox>, Error>> + Send;
 
-    /// `Email/query` with `collapseThreads`, then `Thread/get` and `Email/get`
-    /// chained by back-reference, as one request.
+    /// The threads matching `query` and every email of them, in two stages
+    /// that are not atomic. First, one request chains `Email/query` with
+    /// `collapseThreads`, `Email/get` for the hits' threads, and `Thread/get`
+    /// by back-reference. Then the threads' emails are fetched with
+    /// `Email/get` calls of at most the session's `maxObjectsInGet` ids, in
+    /// requests of at most its `maxCallsInRequest` calls, sent one after
+    /// another; none is sent for an empty queue. An email gone
+    /// by the second stage is left out. A method error in any request fails
+    /// the whole query.
     fn query(&self, query: &EmailQuery) -> impl Future<Output = Result<QueryResult, Error>> + Send;
 }
 

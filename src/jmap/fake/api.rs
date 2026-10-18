@@ -10,8 +10,15 @@ use super::Store;
 use crate::jmap::{CORE, EmailQuery, Error, MAIL};
 
 /// Answers a JMAP request envelope with its response envelope. A
-/// request-level error is returned as its `type`, to be sent with HTTP 400.
-pub fn respond(store: &Store, account_id: &str, request: &Value) -> Result<Value, String> {
+/// request-level error is returned as its problem details, to be sent with
+/// HTTP 400 (RFC 8620 section 3.6.1). A request of more than
+/// `max_calls_in_request` method calls is refused with the `limit` error.
+pub fn respond(
+    store: &Store,
+    account_id: &str,
+    max_calls_in_request: usize,
+    request: &Value,
+) -> Result<Value, Value> {
     let using: Vec<&str> = request["using"]
         .as_array()
         .ok_or_else(not_request)?
@@ -19,9 +26,14 @@ pub fn respond(store: &Store, account_id: &str, request: &Value) -> Result<Value
         .filter_map(Value::as_str)
         .collect();
     if !using.contains(&CORE) || !using.contains(&MAIL) {
-        return Err("urn:ietf:params:jmap:error:unknownCapability".into());
+        return Err(problem("urn:ietf:params:jmap:error:unknownCapability"));
     }
     let calls = request["methodCalls"].as_array().ok_or_else(not_request)?;
+    if calls.len() > max_calls_in_request {
+        let mut limit = problem("urn:ietf:params:jmap:error:limit");
+        limit["limit"] = json!("maxCallsInRequest");
+        return Err(limit);
+    }
     let mut responses: Vec<Value> = Vec::new();
     for call in calls {
         let (Some(name), Some(args), Some(call_id)) =
@@ -38,8 +50,13 @@ pub fn respond(store: &Store, account_id: &str, request: &Value) -> Result<Value
     Ok(json!({"methodResponses": responses, "sessionState": "0"}))
 }
 
-fn not_request() -> String {
-    "urn:ietf:params:jmap:error:notRequest".into()
+/// A request-level error's problem details.
+pub fn problem(kind: &str) -> Value {
+    json!({"type": kind, "status": 400})
+}
+
+fn not_request() -> Value {
+    problem("urn:ietf:params:jmap:error:notRequest")
 }
 
 /// Replaces each `#name` argument with the value its result reference
