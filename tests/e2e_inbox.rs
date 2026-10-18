@@ -7,7 +7,7 @@ use jiff::{SignedDuration, Timestamp};
 mod e2e;
 
 use e2e::server::LocalJmap;
-use e2e::{Blorp, Modes, REJECTED, Sandbox, TOKEN, statusline};
+use e2e::{Blorp, Modes, REJECTED, Sandbox, TOKEN, rows, statusline};
 
 /// RFC 3339 for `minutes` before now, so ages on screen do not depend on
 /// the date the tests run.
@@ -118,7 +118,7 @@ async fn the_inbox_loads_with_its_rows_and_statusline_at_80x24() {
     );
     assert_eq!(
         rows[22],
-        " NORMAL  Inbox                                                              3/5"
+        " NORMAL  Inbox                                                      newest  3/5"
     );
     assert_eq!(rows[23], "");
 }
@@ -146,9 +146,25 @@ async fn the_inbox_loads_with_its_rows_and_statusline_at_120x40() {
     );
     assert_eq!(
         rows[38],
-        " NORMAL  Inbox                                                                                                      3/5"
+        " NORMAL  Inbox                                                                                              newest  3/5"
     );
     assert_eq!(rows[39], "");
+}
+
+#[tokio::test]
+async fn a_filter_and_the_sort_select_the_queue_from_the_server() {
+    let server = LocalJmap::start(busy_inbox(), TOKEN).await;
+    let (_sandbox, mut blorp) = start(&server, 80, 24);
+    blorp.wait_statusline("1/5");
+
+    blorp.keys("/is:unread\r");
+    blorp.wait_statusline("is:unread                                           newest  1/2");
+    blorp.keys("t");
+    blorp.wait_statusline("oldest  1/2");
+    blorp.wait_for("the oldest unread thread first", |screen| {
+        let rows = rows(screen);
+        rows[0].contains("(no subject)") && rows[1].contains("Lunch on Friday?")
+    });
 }
 
 #[tokio::test]
@@ -182,7 +198,7 @@ async fn esc_and_enter_drop_a_pending_count() {
 
     for (cancel, from, to) in [("\x1b", "1/30", " 2/30"), ("\r", "2/30", " 3/30")] {
         blorp.keys("5");
-        blorp.wait_statusline(&format!("5  {from}"));
+        blorp.wait_statusline(&format!("5  newest  {from}"));
         blorp.keys(cancel);
         blorp.wait_for("the count to be dropped", |screen| {
             let statusline = statusline(screen);

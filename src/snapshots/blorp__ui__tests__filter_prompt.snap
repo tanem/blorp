@@ -1,0 +1,28 @@
+---
+source: src/ui.rs
+expression: screen
+---
+"  1 ●  Ana Lopez            Lunch on Friday?                                  2m"
+"  1 ●⚑ Maximiliana Feather… (no subject)                                      4w"
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+" FILTER  Inbox  is:unread                                           newest  1/2 "
+"/is:unread                                                                      "

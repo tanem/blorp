@@ -1,12 +1,15 @@
 //! An in-memory [`Jmap`] adapter over a small mail store, for tests.
 //!
-//! The store evaluates a subset of `Email/query`: `inMailbox`, sorting by
-//! `receivedAt` in either direction, collapsing threads, `limit`, and
-//! `calculateTotal`. Every get is held to Fastmail's `maxObjectsInGet`, and
+//! The store evaluates a subset of `Email/query`: the conditions
+//! `inMailbox`, `inMailboxOtherThan`, `hasKeyword`, `notKeyword`,
+//! `hasAttachment`, and `from`, `to`, `subject`, and `text` as
+//! case-insensitive substring matches, where `text` covers from, to, and
+//! subject; the operators `AND` and `NOT`; sorting by `receivedAt` in either
+//! direction; collapsing threads; `limit`; and `calculateTotal`. Every get is held to Fastmail's `maxObjectsInGet`, and
 //! the local test server holds every `Email/set` to its `maxObjectsInSet`.
 //! `Email/set` applies `mailboxIds/<id>` and `keywords/<keyword>` patches.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,6 +38,9 @@ pub struct FakeJmap {
 struct Inner {
     store: Store,
     calls: Vec<Call>,
+    /// The calls that ran to the end, rather than being dropped while
+    /// they waited.
+    answered: Vec<Call>,
     injected: VecDeque<Injected>,
 }
 
@@ -49,6 +55,7 @@ impl FakeJmap {
             inner: Arc::new(Mutex::new(Inner {
                 store,
                 calls: Vec::new(),
+                answered: Vec::new(),
                 injected: VecDeque::new(),
             })),
         }
@@ -74,6 +81,12 @@ impl FakeJmap {
         self.inner.lock().unwrap().calls.clone()
     }
 
+    /// Every call that ran to the end, in the order they ended. A call
+    /// dropped while it waited out a delay is not here.
+    pub fn answered(&self) -> Vec<Call> {
+        self.inner.lock().unwrap().answered.clone()
+    }
+
     async fn call<T>(
         &self,
         call: Call,
@@ -81,15 +94,21 @@ impl FakeJmap {
     ) -> Result<T, Error> {
         let injected = {
             let mut inner = self.inner.lock().unwrap();
-            inner.calls.push(call);
+            inner.calls.push(call.clone());
             inner.injected.pop_front()
         };
-        match injected {
-            Some(Injected::Fail(error)) => return Err(error),
-            Some(Injected::Delay(delay)) => tokio::time::sleep(delay).await,
-            None => {}
-        }
-        f(&mut self.inner.lock().unwrap().store)
+        let delayed = match injected {
+            Some(Injected::Fail(error)) => Err(error),
+            Some(Injected::Delay(delay)) => {
+                tokio::time::sleep(delay).await;
+                Ok(())
+            }
+            None => Ok(()),
+        };
+        let mut inner = self.inner.lock().unwrap();
+        inner.answered.push(call);
+        delayed?;
+        f(&mut inner.store)
     }
 }
 
@@ -130,6 +149,9 @@ impl Jmap for FakeJmap {
 pub struct Store {
     mailboxes: Vec<Mailbox>,
     emails: Vec<Email>,
+    /// Each email's `To` addresses by email id, which blorp does not fetch
+    /// but `to` and `text` conditions match.
+    to: HashMap<String, Vec<EmailAddress>>,
 }
 
 impl Store {
@@ -170,7 +192,12 @@ impl Store {
     pub fn query_ids(&self, query: &EmailQuery) -> Result<(Vec<String>, usize), Error> {
         let mut matches: Vec<&Email> = Vec::new();
         for email in &self.emails {
-            if matches_filter(email, &query.filter)? {
+            let to = self
+                .to
+                .get(&email.id)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            if matches_filter(email, to, &query.filter)? {
                 matches.push(email);
             }
         }
@@ -316,13 +343,52 @@ fn apply(email: &mut Email, patch: &EmailPatch) -> bool {
     true
 }
 
-fn matches_filter(email: &Email, filter: &Value) -> Result<bool, Error> {
-    let Value::Object(conditions) = filter else {
+/// Whether `email`, sent to `to`, matches `filter`: a `FilterOperator` or a
+/// `FilterCondition` whose properties must all match.
+fn matches_filter(email: &Email, to: &[EmailAddress], filter: &Value) -> Result<bool, Error> {
+    let Value::Object(filter) = filter else {
         return Err(unsupported_filter());
     };
-    for (key, value) in conditions {
+    if let Some(operator) = filter.get("operator") {
+        let Some(Value::Array(conditions)) = filter.get("conditions") else {
+            return Err(unsupported_filter());
+        };
+        let mut any = false;
+        let mut all = true;
+        for condition in conditions {
+            let matched = matches_filter(email, to, condition)?;
+            any |= matched;
+            all &= matched;
+        }
+        return match operator.as_str() {
+            Some("AND") => Ok(all),
+            Some("NOT") => Ok(!any),
+            _ => Err(unsupported_filter()),
+        };
+    }
+    let from = email.from.as_deref().unwrap_or_default();
+    let subject = email.subject.as_deref().unwrap_or_default();
+    for (key, value) in filter {
         let matched = match (key.as_str(), value) {
             ("inMailbox", Value::String(id)) => email.mailbox_ids.contains_key(id),
+            ("inMailboxOtherThan", Value::Array(ids)) => {
+                let ids: Vec<&str> = ids.iter().filter_map(Value::as_str).collect();
+                email
+                    .mailbox_ids
+                    .keys()
+                    .any(|id| !ids.contains(&id.as_str()))
+            }
+            ("hasKeyword", Value::String(k)) => email.keywords.contains_key(k),
+            ("notKeyword", Value::String(k)) => !email.keywords.contains_key(k),
+            ("hasAttachment", Value::Bool(has)) => email.has_attachment == *has,
+            ("from", Value::String(text)) => addresses_contain(from, text),
+            ("to", Value::String(text)) => addresses_contain(to, text),
+            ("subject", Value::String(text)) => contains(subject, text),
+            ("text", Value::String(text)) => {
+                addresses_contain(from, text)
+                    || addresses_contain(to, text)
+                    || contains(subject, text)
+            }
             _ => return Err(unsupported_filter()),
         };
         if !matched {
@@ -330,6 +396,18 @@ fn matches_filter(email: &Email, filter: &Value) -> Result<bool, Error> {
         }
     }
     Ok(true)
+}
+
+/// Whether `haystack` contains `needle`, ignoring case.
+fn contains(haystack: &str, needle: &str) -> bool {
+    haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+/// Whether any address's name or email contains `text`, ignoring case.
+fn addresses_contain(addresses: &[EmailAddress], text: &str) -> bool {
+    addresses.iter().any(|a| {
+        a.name.as_deref().is_some_and(|name| contains(name, text)) || contains(&a.email, text)
+    })
 }
 
 fn unsupported_filter() -> Error {
@@ -378,7 +456,10 @@ impl StoreBuilder {
     }
 
     pub fn email(mut self, email: EmailSpec) -> Self {
-        self.store.emails.push(email.0);
+        if !email.to.is_empty() {
+            self.store.to.insert(email.email.id.clone(), email.to);
+        }
+        self.store.emails.push(email.email);
         self
     }
 
@@ -390,12 +471,15 @@ impl StoreBuilder {
 /// One synthetic email: unread, unflagged, in no mailbox, and with no
 /// sender or subject until set.
 #[derive(Debug, Clone)]
-pub struct EmailSpec(Email);
+pub struct EmailSpec {
+    email: Email,
+    to: Vec<EmailAddress>,
+}
 
 impl EmailSpec {
     /// `received_at` is RFC 3339, such as `2026-10-17T09:30:00Z`.
     pub fn new(id: &str, thread_id: &str, received_at: &str) -> Self {
-        EmailSpec(Email {
+        let email = Email {
             id: id.into(),
             thread_id: thread_id.into(),
             mailbox_ids: Default::default(),
@@ -404,39 +488,52 @@ impl EmailSpec {
             subject: None,
             received_at: received_at.parse().expect("RFC 3339 timestamp"),
             has_attachment: false,
-        })
+        };
+        EmailSpec {
+            email,
+            to: Vec::new(),
+        }
     }
 
     pub fn from(mut self, name: &str, email: &str) -> Self {
-        self.0.from = Some(vec![EmailAddress {
+        self.email.from = Some(vec![EmailAddress {
             name: Some(name.into()),
             email: email.into(),
         }]);
         self
     }
 
+    /// Adds a `To` address.
+    pub fn to(mut self, name: &str, email: &str) -> Self {
+        self.to.push(EmailAddress {
+            name: Some(name.into()),
+            email: email.into(),
+        });
+        self
+    }
+
     pub fn subject(mut self, subject: &str) -> Self {
-        self.0.subject = Some(subject.into());
+        self.email.subject = Some(subject.into());
         self
     }
 
     pub fn in_mailbox(mut self, mailbox_id: &str) -> Self {
-        self.0.mailbox_ids.insert(mailbox_id.into(), true);
+        self.email.mailbox_ids.insert(mailbox_id.into(), true);
         self
     }
 
     pub fn seen(mut self) -> Self {
-        self.0.keywords.insert("$seen".into(), true);
+        self.email.keywords.insert("$seen".into(), true);
         self
     }
 
     pub fn flagged(mut self) -> Self {
-        self.0.keywords.insert("$flagged".into(), true);
+        self.email.keywords.insert("$flagged".into(), true);
         self
     }
 
     pub fn attachment(mut self) -> Self {
-        self.0.has_attachment = true;
+        self.email.has_attachment = true;
         self
     }
 }
@@ -475,6 +572,115 @@ mod tests {
             .iter()
             .map(|(path, value)| (path.to_string(), value.clone()))
             .collect()
+    }
+
+    #[test]
+    fn a_query_evaluates_the_filter_subset_per_email_and_collapses_threads() {
+        let store = Store::builder()
+            .role_mailbox("mb-inbox", "Inbox", "inbox")
+            .role_mailbox("mb-trash", "Trash", "trash")
+            .mailbox("mb-travel", "Travel")
+            .email(
+                EmailSpec::new("e1", "t1", "2026-10-05T00:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .from("Ana Lopez", "ana@example.invalid")
+                    .to("Kim Park", "kim@example.invalid")
+                    .subject("Lunch on Friday"),
+            )
+            .email(
+                EmailSpec::new("e2", "t2", "2026-10-04T00:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .seen()
+                    .flagged()
+                    .from("Ravi Shah", "ravi@example.invalid")
+                    .to("Ana Lopez", "ana@example.invalid")
+                    .subject("Invoice")
+                    .attachment(),
+            )
+            .email(
+                EmailSpec::new("e3", "t3", "2026-10-03T00:00:00Z")
+                    .in_mailbox("mb-travel")
+                    .seen()
+                    .from("", "bookings@air.example.invalid")
+                    .subject("Your flight"),
+            )
+            .email(
+                EmailSpec::new("e4a", "t4", "2026-10-01T00:00:00Z")
+                    .in_mailbox("mb-trash")
+                    .seen()
+                    .subject("Old news"),
+            )
+            .email(
+                EmailSpec::new("e4b", "t4", "2026-10-02T00:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .subject("Re: Old news"),
+            )
+            .build();
+        for (filter, ids) in [
+            (json!({}), vec!["e1", "e2", "e3", "e4b"]),
+            (json!({"inMailbox": "mb-inbox"}), vec!["e1", "e2", "e4b"]),
+            (
+                json!({"inMailboxOtherThan": ["mb-trash", "mb-travel"]}),
+                vec!["e1", "e2", "e4b"],
+            ),
+            (
+                json!({"inMailboxOtherThan": ["mb-inbox"]}),
+                vec!["e3", "e4a"],
+            ),
+            (json!({"hasKeyword": "$seen"}), vec!["e2", "e3", "e4a"]),
+            (json!({"notKeyword": "$seen"}), vec!["e1", "e4b"]),
+            (json!({"hasKeyword": "$flagged"}), vec!["e2"]),
+            (json!({"from": "ANA"}), vec!["e1"]),
+            (json!({"from": "air.example"}), vec!["e3"]),
+            (json!({"to": "lopez"}), vec!["e2"]),
+            (json!({"subject": "old NEWS"}), vec!["e4b"]),
+            (json!({"text": "ana"}), vec!["e1", "e2"]),
+            (json!({"text": "flight"}), vec!["e3"]),
+            (json!({"hasAttachment": true}), vec!["e2"]),
+            (json!({"hasAttachment": false}), vec!["e1", "e3", "e4b"]),
+            (
+                json!({"operator": "AND", "conditions": [{"inMailbox": "mb-inbox"}, {"hasKeyword": "$seen"}]}),
+                vec!["e2"],
+            ),
+            (
+                json!({"operator": "NOT", "conditions": [{"inMailbox": "mb-inbox"}, {"inMailbox": "mb-trash"}]}),
+                vec!["e3"],
+            ),
+            (
+                json!({"inMailbox": "mb-inbox", "notKeyword": "$seen"}),
+                vec!["e1", "e4b"],
+            ),
+        ] {
+            let query = EmailQuery {
+                filter: filter.clone(),
+                ascending: false,
+                limit: 500,
+            };
+            let (got, total) = store.query_ids(&query).unwrap();
+            assert_eq!(got, ids, "{filter}");
+            assert_eq!(total, ids.len(), "{filter}");
+        }
+    }
+
+    #[test]
+    fn a_query_outside_the_subset_is_unsupported() {
+        let store = inbox(1, 1);
+        for filter in [
+            json!({"header": ["List-Id"]}),
+            json!({"operator": "OR", "conditions": []}),
+            json!({"inMailbox": 1}),
+        ] {
+            let query = EmailQuery {
+                filter: filter.clone(),
+                ascending: false,
+                limit: 500,
+            };
+            assert_eq!(
+                store.query_ids(&query),
+                Err(unsupported_filter()),
+                "{filter}"
+            );
+        }
     }
 
     #[tokio::test]

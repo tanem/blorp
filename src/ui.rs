@@ -11,6 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Msg};
 use crate::mail::Thread;
+use crate::prompt::Key;
 
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -37,7 +38,32 @@ pub fn view(app: &App, frame: &mut Frame) {
         Paragraph::new(status_bar(app, statusline.width)),
         statusline,
     );
-    frame.render_widget(Paragraph::new(bottom_line(app)), bottom);
+    match (app.prompt(), app.prompt_cursor()) {
+        (Some(text), Some(cursor)) => prompt_line(frame, bottom, text, cursor),
+        _ => frame.render_widget(Paragraph::new(bottom_line(app)), bottom),
+    }
+}
+
+/// The `/` prompt on the bottom line, with the terminal cursor at `cursor`
+/// characters into `text`, scrolled so the cursor stays on screen.
+fn prompt_line(frame: &mut Frame, area: Rect, text: &str, cursor: usize) {
+    let line = format!("/{text}");
+    let column = |chars: usize| -> usize {
+        line.chars()
+            .take(chars)
+            .map(|c| c.width().unwrap_or(0))
+            .sum()
+    };
+    let at = column(cursor + 1);
+    let width = usize::from(area.width).max(1);
+    let mut skip = 0;
+    while at - column(skip) >= width {
+        skip += 1;
+    }
+    let shown: String = line.chars().skip(skip).collect();
+    frame.render_widget(Paragraph::new(shown), area);
+    let x = u16::try_from(at - column(skip)).unwrap_or(area.width);
+    frame.set_cursor_position((area.x + x, area.y));
 }
 
 fn rows(app: &App, frame: &mut Frame, area: Rect) {
@@ -122,7 +148,9 @@ fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> 
 }
 
 fn status_bar(app: &App, width: u16) -> Line<'static> {
-    let (mode, colour) = if app.queue().visual().is_some() {
+    let (mode, colour) = if app.prompt().is_some() {
+        (" FILTER ", Color::Green)
+    } else if app.queue().visual().is_some() {
         (" V-LINE ", Color::Yellow)
     } else {
         (" NORMAL ", Color::Blue)
@@ -138,6 +166,10 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         format!(" {} ", app.queue_name()),
         Style::new().fg(Color::White).bg(Color::DarkGray),
     );
+    let filter = match app.filter() {
+        "" => Span::raw(""),
+        filter => Span::raw(format!(" {filter} ")),
+    };
     let queue = app.queue();
     let len = queue.threads().len();
     let row = if len == 0 { 0 } else { queue.cursor() + 1 };
@@ -168,12 +200,17 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         right.push(Span::raw(" "));
     }
     right.push(Span::styled(
+        format!(" {} ", app.sort().name()),
+        Style::new().fg(Color::DarkGray),
+    ));
+    right.push(Span::styled(
         position,
         Style::new().fg(Color::Black).bg(Color::Blue),
     ));
-    let used = mode.width() + name.width() + right.iter().map(Span::width).sum::<usize>();
+    let used =
+        mode.width() + name.width() + filter.width() + right.iter().map(Span::width).sum::<usize>();
     let gap = " ".repeat(usize::from(width).saturating_sub(used));
-    let mut spans = vec![mode, name, Span::raw(gap)];
+    let mut spans = vec![mode, name, filter, Span::raw(gap)];
     spans.extend(right);
     Line::from(spans)
 }
@@ -236,10 +273,13 @@ fn age(now: Timestamp, then: Timestamp) -> String {
     }
 }
 
-/// The message a key press stands for, if any.
-pub fn key_msg(key: KeyEvent) -> Option<Msg> {
+/// The message a key press stands for in `app`'s state, if any.
+pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
     if key.kind != KeyEventKind::Press {
         return None;
+    }
+    if app.prompt().is_some() {
+        return prompt_key(key);
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
@@ -261,10 +301,42 @@ pub fn key_msg(key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('V') => Some(Msg::Visual),
         KeyCode::Char('.') => Some(Msg::Repeat),
         KeyCode::Char('D') => Some(Msg::ToggleDryRun),
+        KeyCode::Char('/') => Some(Msg::OpenFilter),
+        KeyCode::Char('t') => Some(Msg::ToggleSort),
         KeyCode::Esc | KeyCode::Enter => Some(Msg::Cancel),
         KeyCode::Char(c) => c.to_digit(10).map(|d| Msg::Digit(d as u8)),
         _ => None,
     }
+}
+
+/// The message a key press at a prompt stands for: the editing keys, Enter,
+/// and Esc, with Ctrl-c still quitting.
+fn prompt_key(key: KeyEvent) -> Option<Msg> {
+    let key = if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => return Some(Msg::Quit),
+            KeyCode::Char('a') => Key::Home,
+            KeyCode::Char('e') => Key::End,
+            KeyCode::Char('w') => Key::DeleteWord,
+            KeyCode::Char('u') => Key::Clear,
+            _ => return None,
+        }
+    } else {
+        match key.code {
+            KeyCode::Char(c) => Key::Char(c),
+            KeyCode::Backspace => Key::Backspace,
+            KeyCode::Left => Key::Left,
+            KeyCode::Right => Key::Right,
+            KeyCode::Home => Key::Home,
+            KeyCode::End => Key::End,
+            KeyCode::Up => Key::Up,
+            KeyCode::Down => Key::Down,
+            KeyCode::Enter => Key::Enter,
+            KeyCode::Esc => Key::Esc,
+            _ => return None,
+        }
+    };
+    Some(Msg::Prompt(key))
 }
 
 #[cfg(test)]
@@ -423,6 +495,45 @@ mod tests {
 
         let screen = render(&h, 80, 24);
         assert!(screen.contains(" u3 "), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn filter_prompt() {
+        let mut h = Harness::loaded(busy_inbox());
+        let effects = h.keys("/is:unread");
+        h.resolve(effects);
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains(" FILTER "), "{screen}");
+        assert!(screen.contains("/is:unread"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn the_prompt_puts_the_terminal_cursor_after_the_typed_text() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("/from:ana");
+        h.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal.draw(|frame| view(&h.app, frame)).unwrap();
+
+        terminal.backend_mut().assert_cursor_position((8, 23));
+    }
+
+    #[test]
+    fn the_statusline_shows_the_filter_and_the_sort_order() {
+        let mut h = Harness::loaded(busy_inbox());
+        let effects = h.send(Msg::SetFilter("in:archive".into()));
+        h.resolve(effects);
+        let effects = h.keys("t");
+        h.resolve(effects);
+
+        let screen = render(&h, 80, 24);
+        let statusline = screen.lines().nth(22).unwrap();
+        assert!(statusline.contains(" Archive  in:archive "), "{statusline}");
+        assert!(statusline.contains(" oldest "), "{statusline}");
         insta::assert_snapshot!(screen);
     }
 

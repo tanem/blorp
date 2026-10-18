@@ -12,6 +12,7 @@ use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio_util::sync::CancellationToken;
 
 use crate::app::{App, Effect, Msg, update};
 use crate::jmap::{EmailUpdate, Error, Fatal, Jmap};
@@ -92,7 +93,12 @@ where
 {
     let (tx, mut rx) = unbounded_channel();
     let outbox = outbox(jmap.clone(), tx.clone());
-    let executor = Executor { jmap, tx, outbox };
+    let mut executor = Executor {
+        jmap,
+        tx,
+        outbox,
+        query: CancellationToken::new(),
+    };
     let mut spinner = tokio::time::interval(SPINNER_TICK);
     let mut spinning = false;
     let mut next = Some(Msg::Start);
@@ -116,7 +122,7 @@ where
             .map_err(io::Error::other)?;
         next = tokio::select! {
             key = keys.next() => match key {
-                Some(Ok(Event::Key(key))) => ui::key_msg(key),
+                Some(Ok(Event::Key(key))) => ui::key_msg(&app, key),
                 Some(Ok(_)) => None,
                 Some(Err(error)) => return Err(error),
                 None => return Ok(Exit::Quit),
@@ -180,20 +186,29 @@ struct Executor<J> {
     jmap: J,
     tx: UnboundedSender<Msg>,
     outbox: UnboundedSender<(u64, Job)>,
+    /// Cancels the latest queue query, which the next one supersedes.
+    query: CancellationToken,
 }
 
 impl<J: Jmap> Executor<J> {
-    /// Sets the time, runs `update`, and carries out its effects.
-    fn dispatch(&self, app: &mut App, clock: &impl Clock, msg: Msg) -> ControlFlow<Exit> {
+    /// Sets the time, runs `update`, and carries out its effects. A queue
+    /// query aborts the one before it, if that is still running.
+    fn dispatch(&mut self, app: &mut App, clock: &impl Clock, msg: Msg) -> ControlFlow<Exit> {
         app.now = clock.now();
         for effect in update(app, msg) {
             match effect {
                 Effect::Query { generation, query } => {
+                    self.query.cancel();
+                    self.query = CancellationToken::new();
+                    let cancelled = self.query.clone();
                     let jmap = self.jmap.clone();
                     let tx = self.tx.clone();
                     tokio::spawn(async move {
-                        let result = jmap.query(&query).await;
-                        let _ = tx.send(Msg::Loaded { generation, result });
+                        if let Some(result) =
+                            cancelled.run_until_cancelled(jmap.query(&query)).await
+                        {
+                            let _ = tx.send(Msg::Loaded { generation, result });
+                        }
                     });
                 }
                 Effect::SetEmails { job, update } => {
