@@ -514,3 +514,18 @@ fn a_failed_redo_is_rolled_back_and_dropped() {
     assert!(matches!(effects[..], [Effect::Query { .. }]), "{effects:?}");
     assert_eq!(h.app.undo_depth(), 0);
 }
+
+#[test]
+fn a_redo_waits_until_its_undo_is_answered() {
+    let mut h = Harness::loaded(store());
+    archive(&mut h);
+    let undo = h.keys("u");
+
+    assert_eq!(h.ctrl('r'), []);
+    assert_eq!(h.status(), "The undo has not reached Fastmail yet");
+    assert_eq!(h.subjects(), ["Trip", "Lunch", "Invoice"]);
+
+    h.resolve(undo);
+    assert!(matches!(h.ctrl('r')[..], [Effect::SetEmails { .. }]));
+    assert_eq!(h.status(), "Redone: archive 1 thread");
+}

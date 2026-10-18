@@ -79,8 +79,9 @@ impl Step {
     /// The word an undo or redo message starts with.
     fn done(self) -> &'static str {
         match self {
+            Step::Undo => "Undone",
             Step::Redo => "Redone",
-            _ => "Undone",
+            Step::Act => unreachable!("an action's message is its own"),
         }
     }
 }
@@ -358,14 +359,26 @@ impl App {
 
     /// Undoes or redoes up to the pending count of entries, one job each:
     /// an undo is guarded by an `Email/get`, and a redo sends the action's
-    /// patch again.
+    /// patch again. A redo waits until its entry's undo is answered, since
+    /// that answer can narrow the entry.
     fn replay(&mut self, step: Step) -> Vec<Effect> {
         let count = self.take_count().unwrap_or(1);
         let mut effects = Vec::new();
         let mut done: Vec<(Action, usize)> = Vec::new();
         let mut restored = Vec::new();
         let mut went_to = None;
+        let mut waiting = false;
         for _ in 0..count {
+            if step == Step::Redo
+                && let Some(next) = self.history.next_redo()
+                && self
+                    .in_flight
+                    .iter()
+                    .any(|f| f.step == Step::Undo && f.entry.id == next.id)
+            {
+                waiting = true;
+                break;
+            }
             let entry = match step {
                 Step::Undo => self.history.undo(),
                 _ => self.history.redo(),
@@ -403,6 +416,7 @@ impl App {
         }
         if done.is_empty() {
             self.status = String::from(match step {
+                _ if waiting => "The undo has not reached Fastmail yet",
                 Step::Undo => "Nothing to undo",
                 _ => "Nothing to redo",
             });
@@ -477,7 +491,7 @@ impl App {
         })
     }
 
-    /// Handles an action's `Email/set` result.
+    /// Handles an action's or a redo's `Email/set` result.
     fn sent(&mut self, job: u64, result: Result<SetResult, Error>) -> Vec<Effect> {
         let failure = match result {
             Ok(set) if set.not_updated.is_empty() => None,

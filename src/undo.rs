@@ -224,6 +224,11 @@ impl History {
         self.done.last()
     }
 
+    /// The entry a redo would apply next.
+    pub fn next_redo(&self) -> Option<&Entry> {
+        self.undone.last()
+    }
+
     /// Drops the emails `ids` from the entry with `id`, and each of its
     /// threads left with no changed email, so a redo leaves them alone. An
     /// entry left with nothing is dropped.
