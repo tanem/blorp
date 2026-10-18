@@ -35,8 +35,8 @@ pub struct App {
     status: String,
     dry_run: bool,
     history: History,
-    /// The last action and the count it was given, for `.` to repeat.
-    last_action: Option<(Action, Option<usize>)>,
+    /// The last action that recorded an undo entry, for `.` to repeat.
+    last_action: Option<Repeat>,
     /// The last outbox job number given out.
     job: u64,
     /// Actions, undos, and redos sent and not yet answered, oldest first.
@@ -109,6 +109,13 @@ impl Action {
     }
 }
 
+/// An action and the count it was given: what `.` repeats.
+#[derive(Debug, Clone, Copy)]
+struct Repeat {
+    action: Action,
+    count: Option<usize>,
+}
+
 /// Something that happened: a key, a request's result, a timer.
 #[derive(Debug)]
 pub enum Msg {
@@ -135,8 +142,9 @@ pub enum Msg {
     /// `V`: open a visual range on the row under the cursor, or close the
     /// open one.
     Visual,
-    /// `.`: repeat the last action on the selection, with the count typed
-    /// before it, or else the count the action was given.
+    /// `.`: repeat the last action that recorded an undo entry on the
+    /// selection, with the count typed before it, or else the count the
+    /// action was given.
     Repeat,
     /// `u`: undo the latest action, or as many as the count.
     Undo,
@@ -308,19 +316,17 @@ impl App {
         self.load(query)
     }
 
-    /// Does `action` with `count`, and keeps both for `.` to repeat.
-    fn perform(&mut self, action: Action, count: Option<usize>) -> Vec<Effect> {
-        self.last_action = Some((action, count));
-        match action {
-            Action::Archive => self.archive(count),
+    fn perform(&mut self, repeat: Repeat) -> Vec<Effect> {
+        match repeat.action {
+            Action::Archive => self.archive(repeat),
         }
     }
 
-    /// Archives the selection, with `count` rows from the cursor when there
-    /// is neither a visual range nor a mark: each thread's emails a move
-    /// takes out of the queue mailbox. Closes the visual range.
-    fn archive(&mut self, count: Option<usize>) -> Vec<Effect> {
-        let rows = self.queue.selection(count.unwrap_or(1));
+    /// Archives the selection, with the count's rows from the cursor when
+    /// there is neither a visual range nor a mark: each thread's emails a
+    /// move takes out of the queue mailbox. Closes the visual range.
+    fn archive(&mut self, repeat: Repeat) -> Vec<Effect> {
+        let rows = self.queue.selection(repeat.count.unwrap_or(1));
         self.queue.close_visual();
         let Some(from) = self.queue_mailbox.clone() else {
             return Vec::new();
@@ -357,12 +363,15 @@ impl App {
             self.report("Nothing to archive");
             return Vec::new();
         }
-        self.act(Action::Archive, threads, update)
+        self.act(repeat, threads, update)
     }
 
-    /// Records an action on `touched` as one undo entry, applies it to the
-    /// queue, reports it, and sends `update`, or in dry run logs it.
-    fn act(&mut self, action: Action, touched: Vec<Thread>, update: EmailUpdate) -> Vec<Effect> {
+    /// Records an action on `touched` as one undo entry and as what `.`
+    /// repeats, applies it to the queue, reports it, and sends `update`, or
+    /// in dry run logs it.
+    fn act(&mut self, repeat: Repeat, touched: Vec<Thread>, update: EmailUpdate) -> Vec<Effect> {
+        let action = repeat.action;
+        self.last_action = Some(repeat);
         let changes = touched
             .iter()
             .flat_map(|thread| &thread.emails)
@@ -687,12 +696,18 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::Quit => vec![Effect::Quit],
         Msg::Archive => {
             let count = app.take_count();
-            app.perform(Action::Archive, count)
+            app.perform(Repeat {
+                action: Action::Archive,
+                count,
+            })
         }
         Msg::Repeat => {
             let count = app.take_count();
             match app.last_action {
-                Some((action, last)) => app.perform(action, count.or(last)),
+                Some(last) => app.perform(Repeat {
+                    count: count.or(last.count),
+                    ..last
+                }),
                 None => Vec::new(),
             }
         }
@@ -708,11 +723,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         }
         Msg::Visual => {
             app.take_count();
-            if app.queue.visual().is_some() {
-                app.queue.close_visual();
-            } else {
-                app.queue.open_visual();
-            }
+            app.queue.toggle_visual();
             Vec::new()
         }
         Msg::Undo => app.replay(Step::Undo),

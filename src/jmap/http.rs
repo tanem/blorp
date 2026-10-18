@@ -75,6 +75,31 @@ impl HttpJmap {
         Ok((jmap, session))
     }
 
+    /// Sends one `method` call per chunk, with the arguments `args` gives
+    /// it, in requests of at most the session's `maxCallsInRequest` calls
+    /// sent one after another, and returns the responses in chunk order.
+    /// None is sent for no chunks.
+    async fn send_chunked<C: Sync, T: DeserializeOwned>(
+        &self,
+        method: &str,
+        chunks: &[C],
+        args: impl Fn(&C) -> Value + Sync,
+    ) -> Result<Vec<T>, Error> {
+        let mut answers = Vec::with_capacity(chunks.len());
+        for batch in chunks.chunks(self.limits.max_calls_in_request) {
+            let calls = batch
+                .iter()
+                .enumerate()
+                .map(|(i, chunk)| call(method, args(chunk), &i.to_string()))
+                .collect();
+            let responses = self.send(calls).await?;
+            for i in 0..batch.len() {
+                answers.push(response_of(&responses, method, &i.to_string())?);
+            }
+        }
+        Ok(answers)
+    }
+
     /// Sends one request. A method error is reported for the first call
     /// that failed, since later calls that refer back to it fail only as a
     /// consequence.
@@ -169,28 +194,17 @@ impl Jmap for HttpJmap {
     }
 
     async fn get_emails(&self, ids: &[String]) -> Result<Vec<Email>, Error> {
-        let mut emails = Vec::with_capacity(ids.len());
         let chunks: Vec<&[String]> = ids.chunks(self.limits.max_objects_in_get).collect();
-        for batch in chunks.chunks(self.limits.max_calls_in_request) {
-            let calls = batch
-                .iter()
-                .enumerate()
-                .map(|(i, chunk)| {
-                    let args = json!({
-                        "accountId": self.account_id,
-                        "ids": chunk,
-                        "properties": EMAIL_PROPERTIES
-                    });
-                    call("Email/get", args, &i.to_string())
+        let responses: Vec<GetResponse<Email>> = self
+            .send_chunked("Email/get", &chunks, |chunk| {
+                json!({
+                    "accountId": self.account_id,
+                    "ids": chunk,
+                    "properties": EMAIL_PROPERTIES
                 })
-                .collect();
-            let responses = self.send(calls).await?;
-            for i in 0..batch.len() {
-                let got: GetResponse<Email> = response_of(&responses, "Email/get", &i.to_string())?;
-                emails.extend(got.list);
-            }
-        }
-        Ok(emails)
+            })
+            .await?;
+        Ok(responses.into_iter().flat_map(|got| got.list).collect())
     }
 
     async fn set_emails(&self, update: &EmailUpdate) -> Result<SetResult, Error> {
@@ -204,22 +218,17 @@ impl Jmap for HttpJmap {
                     .collect()
             })
             .collect();
-        let mut not_updated = Vec::new();
-        for batch in chunks.chunks(self.limits.max_calls_in_request) {
-            let calls = batch
-                .iter()
-                .enumerate()
-                .map(|(i, chunk)| {
-                    let args = json!({"accountId": self.account_id, "update": chunk});
-                    call("Email/set", args, &i.to_string())
-                })
-                .collect();
-            let responses = self.send(calls).await?;
-            for i in 0..batch.len() {
-                let set: SetResponse = response_of(&responses, "Email/set", &i.to_string())?;
-                not_updated.extend(set.not_updated.unwrap_or_default().into_keys());
-            }
-        }
+        let responses: Vec<SetResponse> = self
+            .send_chunked(
+                "Email/set",
+                &chunks,
+                |chunk| json!({"accountId": self.account_id, "update": chunk}),
+            )
+            .await?;
+        let not_updated = responses
+            .into_iter()
+            .flat_map(|set| set.not_updated.unwrap_or_default().into_keys())
+            .collect();
         Ok(SetResult { not_updated })
     }
 }

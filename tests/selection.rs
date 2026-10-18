@@ -222,28 +222,37 @@ fn a_visual_range_wins_over_marks_and_a_count() {
     assert!(h.app.queue().marked(0));
 }
 
+/// Archives with `e` and checks only the row under the cursor, Two, went.
+fn assert_archives_only_the_cursor_row(h: &mut Harness) {
+    assert_eq!(h.app.queue().visual(), None);
+    let effects = h.keys("e");
+    assert_eq!(
+        effects,
+        [Effect::SetEmails {
+            job: 1,
+            update: archive(&["e2"]),
+        }]
+    );
+}
+
 #[test]
-fn esc_or_shift_v_leaves_the_visual_range() {
-    for leave in ["esc", "V"] {
-        let mut h = Harness::loaded(store());
-        h.keys("Vj");
+fn esc_leaves_the_visual_range() {
+    let mut h = Harness::loaded(store());
+    h.keys("Vj");
 
-        match leave {
-            "esc" => esc(&mut h),
-            _ => drop(h.keys("V")),
-        }
-        let effects = h.keys("e");
+    esc(&mut h);
 
-        assert_eq!(h.app.queue().visual(), None, "{leave}");
-        assert_eq!(
-            effects,
-            [Effect::SetEmails {
-                job: 1,
-                update: archive(&["e2"]),
-            }],
-            "{leave}"
-        );
-    }
+    assert_archives_only_the_cursor_row(&mut h);
+}
+
+#[test]
+fn shift_v_leaves_the_visual_range() {
+    let mut h = Harness::loaded(store());
+    h.keys("Vj");
+
+    h.keys("V");
+
+    assert_archives_only_the_cursor_row(&mut h);
 }
 
 #[test]
@@ -362,4 +371,21 @@ fn dot_before_any_action_does_nothing() {
     assert_eq!(effects, []);
     assert_eq!(h.pending_count(), None);
     assert_eq!(h.subjects().len(), 5);
+}
+
+#[test]
+fn an_action_that_did_nothing_is_not_what_dot_repeats() {
+    let mut h = Harness::loaded(store());
+    let effects = h.keys("2e");
+    h.resolve(effects);
+    let effects = h.send(Msg::Show("mb-archive".into()));
+    h.resolve(effects);
+    h.keys("e");
+    assert_eq!(h.status(), "Already in Archive");
+    let effects = h.send(Msg::Show("mb-inbox".into()));
+    h.resolve(effects);
+
+    h.keys(".");
+
+    assert_eq!(h.subjects(), ["Five"]);
 }

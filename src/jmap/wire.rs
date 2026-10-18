@@ -66,8 +66,9 @@ pub struct Limits {
 
 impl Limits {
     /// Fastmail's values: `maxObjectsInGet` and `maxCallsInRequest` as its
-    /// session advertised them on 2026-10-19, and `maxObjectsInSet` as
-    /// published dumps of its session show it.
+    /// session advertised them on 2026-10-19, and `maxObjectsInSet` as two
+    /// published dumps of its session show it, not yet checked against a
+    /// live session.
     pub const FASTMAIL: Limits = Limits {
         max_objects_in_get: 4096,
         max_objects_in_set: 4096,

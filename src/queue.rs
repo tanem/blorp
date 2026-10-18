@@ -35,12 +35,9 @@ impl Queue {
         self.threads = threads;
         self.cursor = self.cursor.min(self.last());
         let threads = &self.threads;
-        self.marks.retain(|id| threads.iter().any(|t| t.id == *id));
-        if self
-            .anchor
-            .as_ref()
-            .is_some_and(|id| self.index_of(id).is_none())
-        {
+        let present = |id: &String| threads.iter().any(|t| t.id == *id);
+        self.marks.retain(present);
+        if self.anchor.as_ref().is_some_and(|id| !present(id)) {
             self.anchor = None;
         }
     }
@@ -132,9 +129,13 @@ impl Queue {
         self.marks.clear();
     }
 
-    /// Opens a visual range on the row under the cursor.
-    pub fn open_visual(&mut self) {
-        self.anchor = self.current().map(|t| t.id.clone());
+    /// Opens a visual range on the row under the cursor, or closes the open
+    /// one.
+    pub fn toggle_visual(&mut self) {
+        self.anchor = match self.anchor {
+            Some(_) => None,
+            None => self.current().map(|t| t.id.clone()),
+        };
     }
 
     pub fn close_visual(&mut self) {
