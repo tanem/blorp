@@ -90,3 +90,41 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl Error {
+    /// Why blorp must stop, if this failure means Fastmail refuses the
+    /// token: no retry with the same token can succeed.
+    pub fn fatal(&self) -> Option<Fatal> {
+        match self {
+            Error::Status(401) => Some(Fatal::TokenRejected),
+            Error::Status(403) | Error::NoMailCapability => Some(Fatal::NoEmailScope),
+            _ => None,
+        }
+    }
+}
+
+/// A failure that ends blorp with a fixed message and exit status 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fatal {
+    /// HTTP 401: the token is wrong or was removed.
+    TokenRejected,
+    /// HTTP 403, or a session without the mail capability.
+    NoEmailScope,
+}
+
+impl fmt::Display for Fatal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Fatal::TokenRejected => write!(
+                f,
+                "Fastmail rejected the API token. It may have been removed in Settings. \
+                 Run `blorp setup` to store a new one."
+            ),
+            Fatal::NoEmailScope => write!(
+                f,
+                "The API token does not give access to mail. It needs the Email scope. \
+                 Run `blorp setup` to store one that has it."
+            ),
+        }
+    }
+}

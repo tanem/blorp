@@ -4,21 +4,9 @@ use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-fn session(server: &MockServer, capabilities: Value) -> Value {
-    json!({
-        "capabilities": capabilities,
-        "accounts": {"u1a2b3c4": {"name": "kim@example.invalid", "isPersonal": true}},
-        "primaryAccounts": {"urn:ietf:params:jmap:mail": "u1a2b3c4"},
-        "username": "kim@example.invalid",
-        "apiUrl": format!("{}/api/", server.uri()),
-        "eventSourceUrl": format!("{}/event/", server.uri()),
-        "state": "0"
-    })
-}
+mod common;
 
-fn mail_capabilities() -> Value {
-    json!({"urn:ietf:params:jmap:core": {}, "urn:ietf:params:jmap:mail": {}})
-}
+use common::{mail_capabilities, session};
 
 fn token() -> SecretString {
     SecretString::from("test-token-123")

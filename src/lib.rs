@@ -1,6 +1,7 @@
 //! blorp triages a Fastmail account's mailboxes over JMAP.
 
 use std::env;
+use std::io;
 use std::process::ExitCode;
 
 use crossterm::event::EventStream;
@@ -19,44 +20,94 @@ pub mod queue;
 pub mod run;
 pub mod ui;
 
-use cli::{Cli, Command};
-use jmap::HttpJmap;
+use cli::{Cli, Command, CommandError, Keychain, Stdin, StoreError};
 use jmap::http::FASTMAIL_SESSION_URL;
+use jmap::{Fatal, HttpJmap};
+use run::Exit;
 
 /// Runs blorp for parsed arguments and returns the process exit code.
 pub fn run(cli: Cli) -> ExitCode {
-    match cli.command {
+    let result = match cli.command {
         None => tui(),
-        Some(Command::Setup) => not_built("setup"),
-        Some(Command::Logout) => not_built("logout"),
-    }
-}
-
-/// Runs the TUI, printing any error and exiting 1 on failure.
-fn tui() -> ExitCode {
-    match start_tui() {
+        Some(Command::Setup) => setup(),
+        Some(Command::Logout) => logout(),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
+        Err(Failure::Fatal(fatal)) => {
+            eprintln!("{fatal}");
+            ExitCode::FAILURE
+        }
+        Err(Failure::Other(message)) => {
             eprintln!("blorp: {message}");
             ExitCode::FAILURE
         }
     }
 }
 
-/// Everything up to `Mailbox/get` runs on the plain terminal; only then
-/// does the TUI take over.
-fn start_tui() -> Result<(), String> {
-    let token = env_token()
-        .ok_or("a Fastmail API token is needed; set BLORP_API_TOKEN to one with the Email scope")?;
+/// Why blorp exits 1: Fastmail refused the token, printed as the fixed
+/// message, or anything else, printed after `blorp: `.
+enum Failure {
+    Fatal(Fatal),
+    Other(String),
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Failure::Other(message)
+    }
+}
+
+impl From<CommandError> for Failure {
+    fn from(error: CommandError) -> Self {
+        match error.fatal() {
+            Some(fatal) => Failure::Fatal(fatal),
+            None => Failure::Other(error.to_string()),
+        }
+    }
+}
+
+impl From<jmap::Error> for Failure {
+    fn from(error: jmap::Error) -> Self {
+        CommandError::from(error).into()
+    }
+}
+
+impl From<StoreError> for Failure {
+    fn from(error: StoreError) -> Self {
+        CommandError::from(error).into()
+    }
+}
+
+/// `blorp setup`: always prompts, whether or not `BLORP_API_TOKEN` is set.
+fn setup() -> Result<(), Failure> {
+    let store = Keychain::open()?;
     let _log = start_log()?;
-    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-    runtime.block_on(async {
-        let (jmap, _session) = HttpJmap::connect(FASTMAIL_SESSION_URL, token)
-            .await
-            .map_err(|e| e.to_string())?;
-        let app = run::launch(&jmap, Timestamp::now())
-            .await
-            .map_err(|e| e.to_string())?;
+    runtime()?.block_on(async {
+        cli::setup(&store, &mut Stdin, &mut io::stdout(), FASTMAIL_SESSION_URL).await?;
+        Ok(())
+    })
+}
+
+/// `blorp logout`.
+fn logout() -> Result<(), Failure> {
+    let store = Keychain::open()?;
+    cli::logout(&store, env_token().is_some(), &mut io::stdout())?;
+    Ok(())
+}
+
+/// Everything up to `Mailbox/get` runs on the plain terminal, including
+/// setup when no token is found; only then does the TUI take over.
+fn tui() -> Result<(), Failure> {
+    let store = Keychain::open()?;
+    let token = cli::find_token(env_token(), &store)?;
+    let _log = start_log()?;
+    runtime()?.block_on(async {
+        let (jmap, _session) = match token {
+            Some(token) => HttpJmap::connect(FASTMAIL_SESSION_URL, token).await?,
+            None => cli::setup(&store, &mut Stdin, &mut io::stdout(), FASTMAIL_SESSION_URL).await?,
+        };
+        let app = run::launch(&jmap, Timestamp::now()).await?;
         let mut terminal = ratatui::try_init().map_err(|e| {
             ratatui::restore();
             e.to_string()
@@ -70,8 +121,15 @@ fn start_tui() -> Result<(), String> {
         )
         .await;
         ratatui::restore();
-        result.map_err(|e| e.to_string())
+        match result.map_err(|e| e.to_string())? {
+            Exit::Quit => Ok(()),
+            Exit::Fatal(fatal) => Err(Failure::Fatal(fatal)),
+        }
     })
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Runtime::new().map_err(|e| e.to_string())
 }
 
 /// `BLORP_API_TOKEN`, when set and not empty.
@@ -97,9 +155,4 @@ fn start_log() -> Result<Option<WorkerGuard>, String> {
             Ok(None)
         }
     }
-}
-
-fn not_built(what: &str) -> ExitCode {
-    eprintln!("blorp: {what} is not built yet");
-    ExitCode::FAILURE
 }
