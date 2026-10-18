@@ -194,17 +194,33 @@ impl Jmap for HttpJmap {
     }
 
     async fn set_emails(&self, update: &EmailUpdate) -> Result<SetResult, Error> {
-        let responses = self
-            .send(vec![call(
-                "Email/set",
-                json!({"accountId": self.account_id, "update": update}),
-                "0",
-            )])
-            .await?;
-        let set: SetResponse = response_of(&responses, "Email/set", "0")?;
-        Ok(SetResult {
-            not_updated: set.not_updated.unwrap_or_default().into_keys().collect(),
-        })
+        let entries: Vec<_> = update.iter().collect();
+        let chunks: Vec<EmailUpdate> = entries
+            .chunks(self.limits.max_objects_in_set)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|(id, patch)| ((*id).clone(), (*patch).clone()))
+                    .collect()
+            })
+            .collect();
+        let mut not_updated = Vec::new();
+        for batch in chunks.chunks(self.limits.max_calls_in_request) {
+            let calls = batch
+                .iter()
+                .enumerate()
+                .map(|(i, chunk)| {
+                    let args = json!({"accountId": self.account_id, "update": chunk});
+                    call("Email/set", args, &i.to_string())
+                })
+                .collect();
+            let responses = self.send(calls).await?;
+            for i in 0..batch.len() {
+                let set: SetResponse = response_of(&responses, "Email/set", &i.to_string())?;
+                not_updated.extend(set.not_updated.unwrap_or_default().into_keys());
+            }
+        }
+        Ok(SetResult { not_updated })
     }
 }
 

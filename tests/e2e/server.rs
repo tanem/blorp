@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use blorp::jmap::fake::{MAX_OBJECTS_IN_GET, Store, api};
+use blorp::jmap::fake::{MAX_OBJECTS_IN_GET, MAX_OBJECTS_IN_SET, Store, api};
 use blorp::jmap::{CORE, Limits, MAIL};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
@@ -123,10 +123,12 @@ fn api_response(store: &Mutex<Store>, max_calls: usize, request: &Request) -> Re
 }
 
 /// A session resource in Fastmail's shape, advertising Fastmail's
-/// `maxObjectsInGet` and `max_calls` as `maxCallsInRequest`.
+/// `maxObjectsInGet` and `maxObjectsInSet`, and `max_calls` as
+/// `maxCallsInRequest`.
 fn session(base: &str, mail: bool, max_calls: usize) -> Value {
     let mut capabilities = json!({CORE: {
         "maxObjectsInGet": MAX_OBJECTS_IN_GET,
+        "maxObjectsInSet": MAX_OBJECTS_IN_SET,
         "maxCallsInRequest": max_calls
     }});
     let mut primary = json!({CORE: ACCOUNT_ID});

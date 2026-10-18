@@ -530,3 +530,42 @@ fn a_redo_waits_until_its_undo_is_answered() {
     assert!(matches!(h.ctrl('r')[..], [Effect::SetEmails { .. }]));
     assert_eq!(h.status(), "Redone: archive 1 thread");
 }
+
+#[test]
+fn a_bulk_undo_with_a_thread_changed_elsewhere_restores_the_rest_and_a_redo_skips_that_thread() {
+    let mut h = Harness::loaded(store());
+    let effects = h.keys("3e");
+    assert_eq!(h.resolve(effects), []);
+    h.store_mut().set_emails(&to_travel("e2"));
+
+    let effects = h.keys("u");
+    assert_eq!(h.status(), "Undone: archive 3 threads");
+    let effects = h.resolve(effects);
+    assert_eq!(
+        h.status(),
+        "Undone: archive 2 of 3 threads, 1 changed elsewhere"
+    );
+    h.resolve(effects);
+    assert_eq!(h.subjects(), ["Trip", "Invoice"]);
+    assert_eq!(h.app.undo_depth(), 0);
+
+    let effects = h.ctrl('r');
+
+    let to_archive = patch(&[
+        ("mailboxIds/mb-archive", Value::Bool(true)),
+        ("mailboxIds/mb-inbox", Value::Null),
+    ]);
+    assert_eq!(
+        effects,
+        [Effect::SetEmails {
+            job: 3,
+            update: [
+                ("e1b".to_string(), to_archive.clone()),
+                ("e3".to_string(), to_archive),
+            ]
+            .into(),
+        }]
+    );
+    assert_eq!(h.status(), "Redone: archive 2 threads");
+    assert_eq!(h.subjects(), Vec::<String>::new());
+}

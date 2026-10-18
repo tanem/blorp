@@ -35,6 +35,8 @@ pub struct App {
     status: String,
     dry_run: bool,
     history: History,
+    /// The last action and the count it was given, for `.` to repeat.
+    last_action: Option<(Action, Option<usize>)>,
     /// The last outbox job number given out.
     job: u64,
     /// Actions, undos, and redos sent and not yet answered, oldest first.
@@ -120,11 +122,22 @@ pub enum Msg {
     Bottom,
     /// A digit typed as part of a count prefix.
     Digit(u8),
-    /// Esc or Enter: drops a pending count.
+    /// Esc or Enter: drops a pending count and closes the visual range.
     Cancel,
     Quit,
-    /// `e`: archive the thread under the cursor.
+    /// `e`: archive the selection.
     Archive,
+    /// `x`: mark or unmark the row under the cursor, or as many rows as the
+    /// count, and move past them.
+    Mark,
+    /// `X`: clear the marks.
+    ClearMarks,
+    /// `V`: open a visual range on the row under the cursor, or close the
+    /// open one.
+    Visual,
+    /// `.`: repeat the last action on the selection, with the count typed
+    /// before it, or else the count the action was given.
+    Repeat,
     /// `u`: undo the latest action, or as many as the count.
     Undo,
     /// `Ctrl-r`: redo the latest undone action, or as many as the count.
@@ -199,6 +212,7 @@ impl App {
             status: String::new(),
             dry_run: false,
             history: History::default(),
+            last_action: None,
             job: 0,
             in_flight: Vec::new(),
         }
@@ -285,6 +299,7 @@ impl App {
         };
         self.queue_name = mailbox.name.clone();
         self.queue_mailbox = Some(mailbox.id.clone());
+        self.queue.clear_selection();
         let query = EmailQuery {
             filter: json!({"inMailbox": mailbox.id}),
             ascending: false,
@@ -293,40 +308,64 @@ impl App {
         self.load(query)
     }
 
-    fn archive(&mut self) -> Vec<Effect> {
-        self.take_count();
-        let (Some(thread), Some(from)) = (self.queue.current(), &self.queue_mailbox) else {
+    /// Does `action` with `count`, and keeps both for `.` to repeat.
+    fn perform(&mut self, action: Action, count: Option<usize>) -> Vec<Effect> {
+        self.last_action = Some((action, count));
+        match action {
+            Action::Archive => self.archive(count),
+        }
+    }
+
+    /// Archives the selection, with `count` rows from the cursor when there
+    /// is neither a visual range nor a mark: each thread's emails a move
+    /// takes out of the queue mailbox. Closes the visual range.
+    fn archive(&mut self, count: Option<usize>) -> Vec<Effect> {
+        let rows = self.queue.selection(count.unwrap_or(1));
+        self.queue.close_visual();
+        let Some(from) = self.queue_mailbox.clone() else {
             return Vec::new();
         };
+        if rows.is_empty() {
+            return Vec::new();
+        }
         let Some(archive) = self.mailboxes.by_role(Role::Archive) else {
             self.report("No Archive mailbox");
             return Vec::new();
         };
-        if *from == archive.id {
+        if from == archive.id {
             self.report("Already in Archive");
             return Vec::new();
         }
-        let patch = move_patch(from, &archive.id);
-        let update: EmailUpdate = thread
-            .emails
-            .iter()
-            .filter(|email| self.mailboxes.moves(email, from))
-            .map(|email| (email.id.clone(), patch.clone()))
-            .collect();
+        let patch = move_patch(&from, &archive.id);
+        let mut threads = Vec::new();
+        let mut update = EmailUpdate::new();
+        for row in rows {
+            let thread = &self.queue.threads()[row];
+            let before = update.len();
+            update.extend(
+                thread
+                    .emails
+                    .iter()
+                    .filter(|email| self.mailboxes.moves(email, &from))
+                    .map(|email| (email.id.clone(), patch.clone())),
+            );
+            if update.len() > before {
+                threads.push(thread.clone());
+            }
+        }
         if update.is_empty() {
             self.report("Nothing to archive");
             return Vec::new();
         }
-        let thread = thread.clone();
-        self.act(Action::Archive, thread, update)
+        self.act(Action::Archive, threads, update)
     }
 
-    /// Records an action on `thread` as an undo entry, applies it to the
+    /// Records an action on `touched` as one undo entry, applies it to the
     /// queue, reports it, and sends `update`, or in dry run logs it.
-    fn act(&mut self, action: Action, thread: Thread, update: EmailUpdate) -> Vec<Effect> {
-        let changes = thread
-            .emails
+    fn act(&mut self, action: Action, touched: Vec<Thread>, update: EmailUpdate) -> Vec<Effect> {
+        let changes = touched
             .iter()
+            .flat_map(|thread| &thread.emails)
             .filter_map(|email| {
                 let patch = update.get(&email.id)?;
                 let before = State::from(email);
@@ -337,7 +376,7 @@ impl App {
                 })
             })
             .collect();
-        let entry = self.history.record(action, vec![thread], changes).clone();
+        let entry = self.history.record(action, touched, changes).clone();
         self.apply(&entry, Side::After);
         self.report(format!(
             "{} {}",
@@ -642,10 +681,40 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         }
         Msg::Cancel => {
             app.take_count();
+            app.queue.close_visual();
             Vec::new()
         }
         Msg::Quit => vec![Effect::Quit],
-        Msg::Archive => app.archive(),
+        Msg::Archive => {
+            let count = app.take_count();
+            app.perform(Action::Archive, count)
+        }
+        Msg::Repeat => {
+            let count = app.take_count();
+            match app.last_action {
+                Some((action, last)) => app.perform(action, count.or(last)),
+                None => Vec::new(),
+            }
+        }
+        Msg::Mark => {
+            let rows = app.take_count().unwrap_or(1);
+            app.queue.toggle_marks(rows);
+            Vec::new()
+        }
+        Msg::ClearMarks => {
+            app.take_count();
+            app.queue.clear_marks();
+            Vec::new()
+        }
+        Msg::Visual => {
+            app.take_count();
+            if app.queue.visual().is_some() {
+                app.queue.close_visual();
+            } else {
+                app.queue.open_visual();
+            }
+            Vec::new()
+        }
         Msg::Undo => app.replay(Step::Undo),
         Msg::Redo => app.replay(Step::Redo),
         Msg::ToggleDryRun => {

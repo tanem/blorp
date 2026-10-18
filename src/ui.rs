@@ -18,8 +18,8 @@ const NUMBER_WIDTH: usize = 3;
 const SENDER_WIDTH: usize = 20;
 const COUNT_WIDTH: usize = 3;
 const AGE_WIDTH: usize = 4;
-/// Everything in a row but the subject: the number and a space, two flag
-/// columns and a space, the sender and a space, and a space before each of
+/// Everything in a row but the subject: the number and the mark column, two
+/// flag columns and a space, the sender and a space, and a space before each of
 /// the count and the age.
 const FIXED_WIDTH: usize =
     NUMBER_WIDTH + 1 + 3 + SENDER_WIDTH + 1 + 1 + COUNT_WIDTH + 1 + AGE_WIDTH;
@@ -67,15 +67,16 @@ fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> 
     let at_cursor = index == cursor;
     let number = if at_cursor {
         Span::styled(
-            format!("{:>NUMBER_WIDTH$} ", index + 1),
+            format!("{:>NUMBER_WIDTH$}", index + 1),
             Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled(
-            format!("{:>NUMBER_WIDTH$} ", index.abs_diff(cursor)),
+            format!("{:>NUMBER_WIDTH$}", index.abs_diff(cursor)),
             Style::new().fg(Color::DarkGray),
         )
     };
+    let selected = app.queue().selected(index);
     let unread = thread.unread();
     let text = if unread {
         Style::new().add_modifier(Modifier::BOLD)
@@ -93,6 +94,10 @@ fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> 
     };
     let line = Line::from(vec![
         number,
+        Span::styled(
+            if selected { "▌" } else { " " },
+            Style::new().fg(Color::Yellow),
+        ),
         Span::styled(if unread { "●" } else { " " }, Style::new().fg(Color::Blue)),
         Span::styled(
             if thread.flagged() { "⚑" } else { " " },
@@ -109,17 +114,24 @@ fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> 
     ]);
     if at_cursor {
         line.style(Style::new().add_modifier(Modifier::REVERSED))
+    } else if selected {
+        line.style(Style::new().fg(Color::Yellow))
     } else {
         line
     }
 }
 
 fn status_bar(app: &App, width: u16) -> Line<'static> {
+    let (mode, colour) = if app.queue().visual().is_some() {
+        (" V-LINE ", Color::Yellow)
+    } else {
+        (" NORMAL ", Color::Blue)
+    };
     let mode = Span::styled(
-        " NORMAL ",
+        mode,
         Style::new()
             .fg(Color::Black)
-            .bg(Color::Blue)
+            .bg(colour)
             .add_modifier(Modifier::BOLD),
     );
     let name = Span::styled(
@@ -170,6 +182,12 @@ fn bottom_line(app: &App) -> Line<'static> {
     if app.loading() {
         let frame = SPINNER[app.spinner() % SPINNER.len()];
         return Line::raw(format!("{frame} Loading {}", app.queue_name()));
+    }
+    if app.queue().visual().is_some() {
+        return Line::styled(
+            "-- VISUAL LINE --",
+            Style::new().add_modifier(Modifier::BOLD),
+        );
     }
     Line::raw(app.status().to_string())
 }
@@ -238,6 +256,10 @@ pub fn key_msg(key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('q') => Some(Msg::Quit),
         KeyCode::Char('e') => Some(Msg::Archive),
         KeyCode::Char('u') => Some(Msg::Undo),
+        KeyCode::Char('x') => Some(Msg::Mark),
+        KeyCode::Char('X') => Some(Msg::ClearMarks),
+        KeyCode::Char('V') => Some(Msg::Visual),
+        KeyCode::Char('.') => Some(Msg::Repeat),
         KeyCode::Char('D') => Some(Msg::ToggleDryRun),
         KeyCode::Esc | KeyCode::Enter => Some(Msg::Cancel),
         KeyCode::Char(c) => c.to_digit(10).map(|d| Msg::Digit(d as u8)),
@@ -358,6 +380,22 @@ mod tests {
     fn loaded_queue_120x40() {
         let mut h = Harness::loaded(busy_inbox());
         h.keys("2j");
+
+        insta::assert_snapshot!(render(&h, 120, 40));
+    }
+
+    #[test]
+    fn marks_and_a_visual_range_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("xjVj");
+
+        insta::assert_snapshot!(render(&h, 80, 24));
+    }
+
+    #[test]
+    fn marks_and_a_visual_range_120x40() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("xjVj");
 
         insta::assert_snapshot!(render(&h, 120, 40));
     }
