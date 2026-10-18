@@ -248,11 +248,11 @@ fn shift_d_toggles_dry_run() {
 
     h.keys("D");
     assert!(h.app.dry_run());
-    assert_eq!(h.status(), "Dry run on");
+    assert_eq!(h.status(), "Dry run on, undo history cleared");
 
     h.keys("D");
     assert!(!h.app.dry_run());
-    assert_eq!(h.status(), "Dry run off");
+    assert_eq!(h.status(), "Dry run off, undo history cleared");
 }
 
 #[test]

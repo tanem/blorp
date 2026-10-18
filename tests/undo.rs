@@ -193,19 +193,16 @@ fn ctrl_r_redoes_an_undone_archive() {
     assert_eq!(h.app.undo_depth(), 1);
     assert_eq!(
         effects,
-        [Effect::Replay {
+        [Effect::SetEmails {
             job: 3,
-            replay: Replay {
-                expect: [("e2".to_string(), state("mb-inbox", true, false))].into(),
-                update: [(
-                    "e2".to_string(),
-                    patch(&[
-                        ("mailboxIds/mb-archive", Value::Bool(true)),
-                        ("mailboxIds/mb-inbox", Value::Null),
-                    ])
-                )]
-                .into(),
-            },
+            update: [(
+                "e2".to_string(),
+                patch(&[
+                    ("mailboxIds/mb-archive", Value::Bool(true)),
+                    ("mailboxIds/mb-inbox", Value::Null),
+                ])
+            )]
+            .into(),
         }]
     );
     assert_eq!(h.resolve(effects), []);
@@ -321,7 +318,7 @@ fn toggling_dry_run_clears_the_history_and_says_so() {
     assert_eq!(h.status(), "Dry run on, undo history cleared");
     assert_eq!(h.app.undo_depth(), 0);
     h.keys("u");
-    assert_eq!(h.status(), "[dry] Nothing to undo");
+    assert_eq!(h.status(), "Nothing to undo");
 
     h.keys("e");
     h.keys("D");
@@ -444,4 +441,76 @@ fn the_history_is_shared_across_queues() {
     h.resolve(effects);
 
     assert_eq!(h.app.undo_depth(), 1);
+}
+
+#[test]
+fn a_redo_after_a_partial_undo_leaves_the_emails_changed_elsewhere_alone() {
+    let store = Store::builder()
+        .role_mailbox("mb-inbox", "Inbox", "inbox")
+        .role_mailbox("mb-archive", "Archive", "archive")
+        .mailbox("mb-travel", "Travel")
+        .email(EmailSpec::new("e1", "t1", "2026-10-18T08:00:00Z").in_mailbox("mb-inbox"))
+        .email(EmailSpec::new("e2", "t1", "2026-10-18T09:00:00Z").in_mailbox("mb-inbox"))
+        .build();
+    let mut h = Harness::loaded(store);
+    archive(&mut h);
+    h.store_mut().set_emails(&to_travel("e2"));
+    let effects = h.keys("u");
+    h.resolve(effects);
+    assert_eq!(
+        h.status(),
+        "Undone: archive 0 of 1 thread, 1 changed elsewhere"
+    );
+
+    let effects = h.ctrl('r');
+
+    assert_eq!(
+        effects,
+        [Effect::SetEmails {
+            job: 3,
+            update: [(
+                "e1".to_string(),
+                patch(&[
+                    ("mailboxIds/mb-archive", Value::Bool(true)),
+                    ("mailboxIds/mb-inbox", Value::Null),
+                ])
+            )]
+            .into(),
+        }]
+    );
+}
+
+#[test]
+fn an_undo_that_restored_nothing_leaves_nothing_to_redo() {
+    let mut h = Harness::loaded(store());
+    archive(&mut h);
+    h.store_mut().set_emails(&to_travel("e1b"));
+    let effects = h.keys("u");
+    h.resolve(effects);
+
+    assert_eq!(h.ctrl('r'), []);
+    assert_eq!(h.status(), "Nothing to redo");
+}
+
+#[test]
+fn a_failed_redo_is_rolled_back_and_dropped() {
+    let mut h = Harness::loaded(store());
+    h.keys("j");
+    archive(&mut h);
+    let effects = h.keys("u");
+    h.resolve(effects);
+    h.ctrl('r');
+
+    let effects = h.send(Msg::Sent {
+        job: 3,
+        result: Err(Error::Status(503)),
+    });
+
+    assert_eq!(h.subjects(), ["Trip", "Lunch", "Invoice"]);
+    assert_eq!(
+        h.status(),
+        "Could not redo archive 1 thread: Fastmail returned HTTP 503"
+    );
+    assert!(matches!(effects[..], [Effect::Query { .. }]), "{effects:?}");
+    assert_eq!(h.app.undo_depth(), 0);
 }

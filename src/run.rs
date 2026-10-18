@@ -129,9 +129,9 @@ where
 
 /// A job for the outbox.
 enum Job {
-    /// An action's `Email/set`.
+    /// An action's or a redo's `Email/set`.
     Set(EmailUpdate),
-    /// An undo or redo.
+    /// An undo.
     Replay(Replay),
 }
 

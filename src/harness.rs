@@ -56,9 +56,9 @@ impl Harness {
         update(&mut self.app, msg)
     }
 
-    /// Answers every query, `Email/set`, and undo or redo in `effects` from
-    /// the store, in order, and returns the remaining effects, including those the
-    /// answers produce.
+    /// Answers every query, `Email/set`, and undo in `effects` from the
+    /// store, in order, and returns the remaining effects, including those
+    /// the answers produce.
     pub fn resolve(&mut self, effects: Vec<Effect>) -> Vec<Effect> {
         let mut rest = Vec::new();
         for effect in effects {

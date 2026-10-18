@@ -1,5 +1,5 @@
 //! Undo and redo: the snapshot an action records, the linear history, and
-//! the guarded patch an undo or redo sends. Pure.
+//! the patches an undo or redo sends. Pure.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -97,6 +97,7 @@ pub enum Side {
 }
 
 impl Side {
+    /// The opposite side.
     pub fn other(self) -> Side {
         match self {
             Side::Before => Side::After,
@@ -106,6 +107,7 @@ impl Side {
 }
 
 impl Change {
+    /// The email's state on `side` of the action.
     pub fn state(&self, side: Side) -> &State {
         match side {
             Side::Before => &self.before,
@@ -125,18 +127,54 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// The job that moves every changed email to `side`, each only if it is
-    /// still in the state the other side leaves it in.
-    pub fn replay(&self, side: Side) -> Replay {
+    /// The undo job: each changed email back to its state before the
+    /// action, if it is still as the action left it.
+    pub fn undo(&self) -> Replay {
         let mut replay = Replay::default();
         for change in &self.changes {
-            let from = change.state(side.other());
-            replay.expect.insert(change.id.clone(), from.clone());
             replay
-                .update
-                .insert(change.id.clone(), from.patch_to(change.state(side)));
+                .expect
+                .insert(change.id.clone(), change.after.clone());
+            let patch = change.after.patch_to(&change.before);
+            replay.update.insert(change.id.clone(), patch);
         }
         replay
+    }
+
+    /// The redo's `Email/set`: the action's patch for each changed email.
+    pub fn redo(&self) -> EmailUpdate {
+        self.changes
+            .iter()
+            .map(|c| (c.id.clone(), c.before.patch_to(&c.after)))
+            .collect()
+    }
+
+    /// `thread` with each email the entry changed in its `side` state.
+    pub fn thread_at(&self, thread: &Thread, side: Side) -> Thread {
+        let mut thread = thread.clone();
+        for email in &mut thread.emails {
+            if let Some(change) = self.changes.iter().find(|c| c.id == email.id) {
+                let state = change.state(side);
+                email.mailbox_ids = state.mailbox_ids.clone();
+                email.seen = state.seen;
+                email.flagged = state.flagged;
+            }
+        }
+        thread
+    }
+
+    /// The first mailbox an email of `thread` is in on `side` and not on
+    /// the other.
+    pub fn mailbox_gained(&self, thread: &Thread, side: Side) -> Option<String> {
+        self.changes
+            .iter()
+            .filter(|c| thread.emails.iter().any(|e| e.id == c.id))
+            .find_map(|c| {
+                let to = &c.state(side).mailbox_ids;
+                to.difference(&c.state(side.other()).mailbox_ids)
+                    .next()
+                    .cloned()
+            })
     }
 
     /// How many of the entry's threads have an email among `ids`.
@@ -186,12 +224,37 @@ impl History {
         self.done.last()
     }
 
+    /// Drops the emails `ids` from the entry with `id`, and each of its
+    /// threads left with no changed email, so a redo leaves them alone. An
+    /// entry left with nothing is dropped.
+    pub fn narrow(&mut self, id: u64, ids: &[String]) {
+        let Some(entry) = self
+            .done
+            .iter_mut()
+            .chain(self.undone.iter_mut())
+            .find(|e| e.id == id)
+        else {
+            return;
+        };
+        entry.changes.retain(|c| !ids.contains(&c.id));
+        let changes = &entry.changes;
+        entry.threads.retain(|t| {
+            t.emails
+                .iter()
+                .any(|e| changes.iter().any(|c| c.id == e.id))
+        });
+        if entry.changes.is_empty() {
+            self.forget(id);
+        }
+    }
+
     /// Drops the entry with `id`, wherever it is.
     pub fn forget(&mut self, id: u64) {
         self.done.retain(|e| e.id != id);
         self.undone.retain(|e| e.id != id);
     }
 
+    /// Drops every entry.
     pub fn clear(&mut self) {
         self.done.clear();
         self.undone.clear();
@@ -201,14 +264,9 @@ impl History {
     pub fn depth(&self) -> usize {
         self.done.len()
     }
-
-    /// True when there is nothing to undo or redo.
-    pub fn is_empty(&self) -> bool {
-        self.done.is_empty() && self.undone.is_empty()
-    }
 }
 
-/// An undo or redo as one outbox job: `Email/get` on the ids of `expect`,
+/// An undo as one outbox job: `Email/get` on the ids of `expect`,
 /// then an `Email/set` of `update` for those still in their expected state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Replay {
@@ -218,6 +276,7 @@ pub struct Replay {
 }
 
 impl Replay {
+    /// The ids the `Email/get` asks for.
     pub fn ids(&self) -> Vec<String> {
         self.expect.keys().cloned().collect()
     }
