@@ -28,10 +28,12 @@ async fn session_mailboxes_and_an_inbox_query_have_the_expected_shapes() {
         .expect("session with the mail capability");
     assert!(session.mail_account().is_some());
     for limit in ["maxObjectsInGet", "maxCallsInRequest"] {
-        let value = &session.capabilities[CORE][limit];
+        // The message leaves out the value, which comes from the live session.
         assert!(
-            value.as_u64().is_some_and(|n| n > 0),
-            "the core capability advertises {limit} as a positive integer, not {value}"
+            session.capabilities[CORE][limit]
+                .as_u64()
+                .is_some_and(|n| n > 0),
+            "the core capability advertises {limit} as a positive integer"
         );
     }
 
