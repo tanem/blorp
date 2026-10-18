@@ -1,17 +1,17 @@
-use std::process::{Command, Output};
+use std::process::Output;
 
-/// Runs blorp with no API token in the environment, so nothing reaches the
-/// network.
+use blorp::cli::{Cli, Command};
+use clap::Parser;
+
+/// Runs blorp with no API token in the environment. Only arguments that
+/// clap answers on its own are safe here: anything else reads the keychain.
 fn blorp(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_blorp"))
+    std::process::Command::new(env!("CARGO_BIN_EXE_blorp"))
         .args(args)
         .env_remove("BLORP_API_TOKEN")
         .output()
         .expect("run blorp")
 }
-
-const NO_TOKEN: &str =
-    "blorp: a Fastmail API token is needed; set BLORP_API_TOKEN to one with the Email scope\n";
 
 fn text(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).expect("utf-8 output")
@@ -23,50 +23,6 @@ fn version_prints_the_name_and_version() {
 
     assert!(output.status.success());
     assert_eq!(text(&output.stdout), "blorp 0.1.0\n");
-}
-
-#[test]
-fn bare_command_without_a_token_says_one_is_needed() {
-    let output = blorp(&[]);
-
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(text(&output.stdout), "");
-    assert_eq!(text(&output.stderr), NO_TOKEN);
-}
-
-#[test]
-fn an_empty_token_counts_as_none() {
-    let output = Command::new(env!("CARGO_BIN_EXE_blorp"))
-        .env("BLORP_API_TOKEN", "")
-        .output()
-        .expect("run blorp");
-
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(text(&output.stderr), NO_TOKEN);
-}
-
-#[test]
-fn dry_run_is_accepted_and_still_needs_a_token() {
-    let output = blorp(&["--dry-run"]);
-
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(text(&output.stderr), NO_TOKEN);
-}
-
-#[test]
-fn setup_says_it_is_not_built_yet() {
-    let output = blorp(&["setup"]);
-
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(text(&output.stderr), "blorp: setup is not built yet\n");
-}
-
-#[test]
-fn logout_says_it_is_not_built_yet() {
-    let output = blorp(&["logout"]);
-
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(text(&output.stderr), "blorp: logout is not built yet\n");
 }
 
 #[test]
@@ -91,4 +47,21 @@ fn help_lists_the_commands_and_flags() {
     for item in ["setup", "logout", "--dry-run", "--version", "--help"] {
         assert!(help.contains(item), "help is missing {item}:\n{help}");
     }
+}
+
+#[test]
+fn dry_run_is_accepted_on_the_bare_command() {
+    let cli = Cli::try_parse_from(["blorp", "--dry-run"]).unwrap();
+
+    assert!(cli.dry_run);
+    assert!(cli.command.is_none());
+}
+
+#[test]
+fn setup_and_logout_are_commands() {
+    let setup = Cli::try_parse_from(["blorp", "setup"]).unwrap();
+    let logout = Cli::try_parse_from(["blorp", "logout"]).unwrap();
+
+    assert!(matches!(setup.command, Some(Command::Setup)));
+    assert!(matches!(logout.command, Some(Command::Logout)));
 }

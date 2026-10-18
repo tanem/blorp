@@ -2,8 +2,8 @@ use std::io;
 use std::time::Duration;
 
 use blorp::jmap::fake::{Call, EmailSpec, FakeJmap, Store};
-use blorp::jmap::{EmailQuery, Error};
-use blorp::run::{TestClock, launch, run};
+use blorp::jmap::{EmailQuery, Error, Fatal};
+use blorp::run::{Exit, TestClock, launch, run};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use futures::{Stream, StreamExt, stream};
 use jiff::Timestamp;
@@ -157,4 +157,45 @@ async fn launch_fails_when_mailbox_get_fails() {
     let result = launch(&jmap, at("2026-10-18T00:00:00Z")).await;
 
     assert_eq!(result.err(), Some(Error::Status(500)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rejected_token_stops_the_state_task_with_the_fatal_exit() {
+    let jmap = FakeJmap::new(inbox());
+    let app = launch(&jmap, at("2026-10-18T00:00:00Z")).await.unwrap();
+    jmap.fail_next(1, Error::Status(401));
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let clock = TestClock::new(at("2026-10-18T10:00:00Z"));
+
+    let exit = run(
+        &mut terminal,
+        script("jjjq", Duration::from_secs(1)),
+        jmap,
+        clock,
+        app,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(exit, Exit::Fatal(Fatal::TokenRejected));
+}
+
+#[tokio::test(start_paused = true)]
+async fn q_stops_the_state_task_with_the_quit_exit() {
+    let jmap = FakeJmap::new(inbox());
+    let app = launch(&jmap, at("2026-10-18T00:00:00Z")).await.unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let clock = TestClock::new(at("2026-10-18T10:00:00Z"));
+
+    let exit = run(
+        &mut terminal,
+        script("q", Duration::from_secs(1)),
+        jmap,
+        clock,
+        app,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(exit, Exit::Quit);
 }

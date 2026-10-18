@@ -4,7 +4,7 @@
 use jiff::Timestamp;
 use serde_json::json;
 
-use crate::jmap::{EmailQuery, Error, QueryResult};
+use crate::jmap::{EmailQuery, Error, Fatal, QueryResult};
 use crate::mail::{Mailboxes, Role, Thread};
 use crate::queue::Queue;
 
@@ -62,6 +62,8 @@ pub enum Effect {
         query: EmailQuery,
     },
     Quit,
+    /// Restore the terminal, print the fixed message, and exit 1.
+    Fatal(Fatal),
 }
 
 impl App {
@@ -188,6 +190,11 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
                 return Vec::new();
             }
             app.loading = false;
+            if let Err(error) = &result
+                && let Some(fatal) = error.fatal()
+            {
+                return vec![Effect::Fatal(fatal)];
+            }
             match result {
                 Ok(result) => {
                     app.total = result.total;

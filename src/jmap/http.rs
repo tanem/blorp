@@ -46,14 +46,14 @@ impl HttpJmap {
     /// a loopback address, since the token is sent to both.
     pub async fn connect(
         session_url: &str,
-        token: SecretString,
+        token: impl Into<Arc<SecretString>>,
     ) -> Result<(HttpJmap, Session), Error> {
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(transport)?;
-        let token = Arc::new(token);
+        let token = token.into();
         require_secure(session_url)?;
         let response = authorize(http.get(session_url), &token)
             .send()

@@ -14,7 +14,7 @@ use ratatui::backend::Backend;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::app::{App, Effect, Msg, update};
-use crate::jmap::{Error, Jmap};
+use crate::jmap::{Error, Fatal, Jmap};
 use crate::mail::Mailboxes;
 use crate::ui;
 
@@ -54,6 +54,16 @@ impl Clock for TestClock {
     }
 }
 
+/// Why the state task stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    /// The user quit, or the key stream ended.
+    Quit,
+    /// Fastmail refused the token; the caller restores the terminal and
+    /// prints the message.
+    Fatal(Fatal),
+}
+
 /// The launch steps that need Fastmail before the TUI starts: `Mailbox/get`,
 /// giving the app the state task starts from.
 pub async fn launch<J: Jmap>(jmap: &J, now: Timestamp) -> Result<App, Error> {
@@ -61,7 +71,8 @@ pub async fn launch<J: Jmap>(jmap: &J, now: Timestamp) -> Result<App, Error> {
     Ok(App::new(Mailboxes::from(mailboxes), now))
 }
 
-/// Runs the state task until a quit effect or the end of `keys`: sends the
+/// Runs the state task until a quit or fatal effect or the end of `keys`,
+/// and says which: sends the
 /// launch message, then turns key events, request results, and spinner ticks
 /// into messages, redrawing once after everything ready is handled.
 pub async fn run<B, K, J, C>(
@@ -70,7 +81,7 @@ pub async fn run<B, K, J, C>(
     jmap: J,
     clock: C,
     mut app: App,
-) -> io::Result<()>
+) -> io::Result<Exit>
 where
     B: Backend,
     B::Error: Send + Sync + 'static,
@@ -85,13 +96,13 @@ where
     let mut next = Some(Msg::Start);
     loop {
         if let Some(msg) = next.take()
-            && executor.dispatch(&mut app, &clock, msg).is_break()
+            && let ControlFlow::Break(exit) = executor.dispatch(&mut app, &clock, msg)
         {
-            return Ok(());
+            return Ok(exit);
         }
         while let Ok(msg) = rx.try_recv() {
-            if executor.dispatch(&mut app, &clock, msg).is_break() {
-                return Ok(());
+            if let ControlFlow::Break(exit) = executor.dispatch(&mut app, &clock, msg) {
+                return Ok(exit);
             }
         }
         if app.loading() && !spinning {
@@ -106,7 +117,7 @@ where
                 Some(Ok(Event::Key(key))) => ui::key_msg(key),
                 Some(Ok(_)) => None,
                 Some(Err(error)) => return Err(error),
-                None => return Ok(()),
+                None => return Ok(Exit::Quit),
             },
             Some(msg) = rx.recv() => Some(msg),
             _ = spinner.tick(), if spinning => Some(Msg::Tick),
@@ -121,7 +132,7 @@ struct Executor<J> {
 
 impl<J: Jmap> Executor<J> {
     /// Sets the time, runs `update`, and carries out its effects.
-    fn dispatch(&self, app: &mut App, clock: &impl Clock, msg: Msg) -> ControlFlow<()> {
+    fn dispatch(&self, app: &mut App, clock: &impl Clock, msg: Msg) -> ControlFlow<Exit> {
         app.now = clock.now();
         for effect in update(app, msg) {
             match effect {
@@ -133,7 +144,8 @@ impl<J: Jmap> Executor<J> {
                         let _ = tx.send(Msg::Loaded { generation, result });
                     });
                 }
-                Effect::Quit => return ControlFlow::Break(()),
+                Effect::Quit => return ControlFlow::Break(Exit::Quit),
+                Effect::Fatal(fatal) => return ControlFlow::Break(Exit::Fatal(fatal)),
             }
         }
         ControlFlow::Continue(())
