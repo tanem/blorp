@@ -57,14 +57,20 @@ impl fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
-/// The generic-password item with service `blorp` and account `fastmail`
-/// in the macOS login keychain.
+/// A generic-password item with account `fastmail` in the macOS login
+/// keychain: service `blorp` for blorp's token, or another for a test.
 pub struct Keychain(Entry);
 
 impl Keychain {
     /// The item, which is not read or written until the store is used.
     pub fn open() -> Result<Keychain, StoreError> {
-        Cred::build(MacKeychainDomain::User, "blorp", "fastmail")
+        Keychain::for_service("blorp")
+    }
+
+    /// The item with account `fastmail` under `service`, so a test can use
+    /// one that is not blorp's.
+    pub fn for_service(service: &str) -> Result<Keychain, StoreError> {
+        Cred::build(MacKeychainDomain::User, service, "fastmail")
             .map(Keychain)
             .map_err(store_error)
     }
