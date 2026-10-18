@@ -26,3 +26,17 @@ fn a_rejected_token_ends_the_session() {
         assert_eq!(effects, [Effect::Fatal(fatal)], "{error:?}");
     }
 }
+
+#[test]
+fn a_rejected_token_ends_the_session_even_on_a_superseded_query() {
+    let mut h = Harness::new(inbox());
+    h.start();
+    h.start();
+
+    let effects = h.send(Msg::Loaded {
+        generation: 1,
+        result: Err(Error::Status(401)),
+    });
+
+    assert_eq!(effects, [Effect::Fatal(Fatal::TokenRejected)]);
+}

@@ -20,9 +20,9 @@ pub mod queue;
 pub mod run;
 pub mod ui;
 
-use cli::{Cli, Command, CommandError, Keychain, Stdin};
-use jmap::HttpJmap;
+use cli::{Cli, Command, CommandError, Keychain, Stdin, StoreError};
 use jmap::http::FASTMAIL_SESSION_URL;
+use jmap::{Fatal, HttpJmap};
 use run::Exit;
 
 /// Runs blorp for parsed arguments and returns the process exit code.
@@ -34,47 +34,80 @@ pub fn run(cli: Cli) -> ExitCode {
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
+        Err(Failure::Fatal(fatal)) => {
+            eprintln!("{fatal}");
+            ExitCode::FAILURE
+        }
+        Err(Failure::Other(message)) => {
             eprintln!("blorp: {message}");
             ExitCode::FAILURE
         }
     }
 }
 
+/// Why blorp exits 1: Fastmail refused the token, printed as the fixed
+/// message, or anything else, printed after `blorp: `.
+enum Failure {
+    Fatal(Fatal),
+    Other(String),
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Failure::Other(message)
+    }
+}
+
+impl From<CommandError> for Failure {
+    fn from(error: CommandError) -> Self {
+        match error.fatal() {
+            Some(fatal) => Failure::Fatal(fatal),
+            None => Failure::Other(error.to_string()),
+        }
+    }
+}
+
+impl From<jmap::Error> for Failure {
+    fn from(error: jmap::Error) -> Self {
+        CommandError::from(error).into()
+    }
+}
+
+impl From<StoreError> for Failure {
+    fn from(error: StoreError) -> Self {
+        CommandError::from(error).into()
+    }
+}
+
 /// `blorp setup`: always prompts, whether or not `BLORP_API_TOKEN` is set.
-fn setup() -> Result<(), String> {
-    let store = Keychain::open().map_err(|e| e.to_string())?;
+fn setup() -> Result<(), Failure> {
+    let store = Keychain::open()?;
     let _log = start_log()?;
     runtime()?.block_on(async {
-        cli::setup(&store, &mut Stdin, &mut io::stdout(), FASTMAIL_SESSION_URL)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        cli::setup(&store, &mut Stdin, &mut io::stdout(), FASTMAIL_SESSION_URL).await?;
+        Ok(())
     })
 }
 
-fn logout() -> Result<(), String> {
-    let store = Keychain::open().map_err(|e| e.to_string())?;
-    cli::logout(&store, env_token().is_some(), &mut io::stdout()).map_err(|e| e.to_string())
+/// `blorp logout`.
+fn logout() -> Result<(), Failure> {
+    let store = Keychain::open()?;
+    cli::logout(&store, env_token().is_some(), &mut io::stdout())?;
+    Ok(())
 }
 
 /// Everything up to `Mailbox/get` runs on the plain terminal, including
 /// setup when no token is found; only then does the TUI take over.
-fn tui() -> Result<(), String> {
-    let store = Keychain::open().map_err(|e| e.to_string())?;
-    let token = cli::find_token(env_token(), &store).map_err(|e| e.to_string())?;
+fn tui() -> Result<(), Failure> {
+    let store = Keychain::open()?;
+    let token = cli::find_token(env_token(), &store)?;
     let _log = start_log()?;
     runtime()?.block_on(async {
         let (jmap, _session) = match token {
-            Some(token) => HttpJmap::connect(FASTMAIL_SESSION_URL, token)
-                .await
-                .map_err(CommandError::from),
-            None => cli::setup(&store, &mut Stdin, &mut io::stdout(), FASTMAIL_SESSION_URL).await,
-        }
-        .map_err(|e| e.to_string())?;
-        let app = run::launch(&jmap, Timestamp::now())
-            .await
-            .map_err(|e| CommandError::from(e).to_string())?;
+            Some(token) => HttpJmap::connect(FASTMAIL_SESSION_URL, token).await?,
+            None => cli::setup(&store, &mut Stdin, &mut io::stdout(), FASTMAIL_SESSION_URL).await?,
+        };
+        let app = run::launch(&jmap, Timestamp::now()).await?;
         let mut terminal = ratatui::try_init().map_err(|e| {
             ratatui::restore();
             e.to_string()
@@ -90,7 +123,7 @@ fn tui() -> Result<(), String> {
         ratatui::restore();
         match result.map_err(|e| e.to_string())? {
             Exit::Quit => Ok(()),
-            Exit::Fatal(fatal) => Err(fatal.to_string()),
+            Exit::Fatal(fatal) => Err(Failure::Fatal(fatal)),
         }
     })
 }

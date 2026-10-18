@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use blorp::cli::{Lines, StoreError, TokenStore, setup};
+use blorp::cli::{FirstLine, StoreError, TokenStore, setup};
 use blorp::jmap::{EmailQuery, HttpJmap, Jmap};
 use blorp::run::{Exit, launch, run};
 use crossterm::event::Event;
@@ -17,6 +17,10 @@ use serde_json::json;
 use tracing_subscriber::fmt::MakeWriter;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+mod common;
+
+use common::{mail_capabilities, session};
 
 const TOKEN: &str = "fmu1-secret-test-token-0123456789";
 
@@ -66,18 +70,6 @@ impl TokenStore for NoStore {
     }
 }
 
-fn session(server: &MockServer) -> serde_json::Value {
-    json!({
-        "capabilities": {"urn:ietf:params:jmap:core": {}, "urn:ietf:params:jmap:mail": {}},
-        "accounts": {"u1a2b3c4": {"name": "kim@example.invalid", "isPersonal": true}},
-        "primaryAccounts": {"urn:ietf:params:jmap:mail": "u1a2b3c4"},
-        "username": "kim@example.invalid",
-        "apiUrl": format!("{}/api/", server.uri()),
-        "eventSourceUrl": format!("{}/event/", server.uri()),
-        "state": "0"
-    })
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
     let capture = Capture::default();
@@ -90,7 +82,9 @@ async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/jmap/session"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(session(&server)))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(session(&server, mail_capabilities())),
+        )
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -122,7 +116,7 @@ async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
     let input = format!("{TOKEN}\n");
     let (jmap, _) = setup(
         &NoStore,
-        &mut Lines(input.as_bytes()),
+        &mut FirstLine(input.as_bytes()),
         &mut out,
         &session_url,
     )

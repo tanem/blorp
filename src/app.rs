@@ -186,15 +186,15 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             Vec::new()
         }
         Msg::Loaded { generation, result } => {
-            if generation != app.generation {
-                return Vec::new();
-            }
-            app.loading = false;
             if let Err(error) = &result
                 && let Some(fatal) = error.fatal()
             {
                 return vec![Effect::Fatal(fatal)];
             }
+            if generation != app.generation {
+                return Vec::new();
+            }
+            app.loading = false;
             match result {
                 Ok(result) => {
                     app.total = result.total;

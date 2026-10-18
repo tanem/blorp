@@ -10,7 +10,7 @@ use keyring_core::Entry;
 use secrecy::zeroize::Zeroize;
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::jmap::{self, HttpJmap, Session};
+use crate::jmap::{self, Fatal, HttpJmap, Session};
 
 /// A terminal UI for triaging a Fastmail account's mailboxes over JMAP.
 #[derive(Debug, Parser)]
@@ -62,6 +62,7 @@ impl std::error::Error for StoreError {}
 pub struct Keychain(Entry);
 
 impl Keychain {
+    /// The item, which is not read or written until the store is used.
     pub fn open() -> Result<Keychain, StoreError> {
         Cred::build(MacKeychainDomain::User, "blorp", "fastmail")
             .map(Keychain)
@@ -119,9 +120,9 @@ pub trait Prompt {
 
 /// The token as the first line of a reader, with no prompt: stdin when it
 /// is not a terminal, or scripted input in tests.
-pub struct Lines<R>(pub R);
+pub struct FirstLine<R>(pub R);
 
-impl<R: BufRead> Prompt for Lines<R> {
+impl<R: BufRead> Prompt for FirstLine<R> {
     fn read_token(&mut self, _prompt: &str) -> io::Result<String> {
         let mut line = String::new();
         self.0.read_line(&mut line)?;
@@ -138,7 +139,7 @@ impl Prompt for Stdin {
         if io::stdin().is_terminal() {
             rpassword::prompt_password(prompt)
         } else {
-            Lines(io::stdin().lock()).read_token(prompt)
+            FirstLine(io::stdin().lock()).read_token(prompt)
         }
     }
 }
@@ -161,9 +162,10 @@ pub async fn setup(
     )?;
     out.flush()?;
     let mut typed = prompt.read_token("API token: ")?;
+    let entered = !typed.trim().is_empty();
     let token = Arc::new(SecretString::from(typed.trim()));
     typed.zeroize();
-    if token.expose_secret().is_empty() {
+    if !entered {
         return Err(CommandError::NoToken);
     }
     let (jmap, session) = HttpJmap::connect(session_url, token.clone()).await?;
@@ -196,6 +198,16 @@ impl fmt::Display for CommandError {
                 None => error.fmt(f),
             },
             CommandError::NoToken => write!(f, "no API token was entered"),
+        }
+    }
+}
+
+impl CommandError {
+    /// Why blorp must stop, if Fastmail refused the token.
+    pub fn fatal(&self) -> Option<Fatal> {
+        match self {
+            CommandError::Jmap(error) => error.fatal(),
+            _ => None,
         }
     }
 }

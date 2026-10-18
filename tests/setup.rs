@@ -1,11 +1,15 @@
 use std::cell::RefCell;
 
-use blorp::cli::{Lines, StoreError, TokenStore, find_token, logout, setup};
+use blorp::cli::{FirstLine, StoreError, TokenStore, find_token, logout, setup};
 use blorp::jmap::Jmap;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+mod common;
+
+use common::{mail_capabilities, session};
 
 /// A token store held in memory.
 #[derive(Default)]
@@ -79,22 +83,6 @@ fn logout_warns_that_the_environment_token_is_still_used() {
     );
 }
 
-fn session(server: &MockServer, capabilities: Value) -> Value {
-    json!({
-        "capabilities": capabilities,
-        "accounts": {"u1a2b3c4": {"name": "kim@example.invalid", "isPersonal": true}},
-        "primaryAccounts": {"urn:ietf:params:jmap:mail": "u1a2b3c4"},
-        "username": "kim@example.invalid",
-        "apiUrl": format!("{}/api/", server.uri()),
-        "eventSourceUrl": format!("{}/event/", server.uri()),
-        "state": "0"
-    })
-}
-
-fn mail_capabilities() -> Value {
-    json!({"urn:ietf:params:jmap:core": {}, "urn:ietf:params:jmap:mail": {}})
-}
-
 /// Serves a session with `capabilities` to requests bearing `token`.
 async fn serve_session(server: &MockServer, token: &str, capabilities: Value) {
     Mock::given(method("GET"))
@@ -133,7 +121,7 @@ async fn setup_checks_the_token_then_stores_it_and_names_the_account() {
 
     let (jmap, session) = setup(
         &store,
-        &mut Lines(&b"  new-token \n"[..]),
+        &mut FirstLine(&b"  new-token \n"[..]),
         &mut out,
         &session_url(&server),
     )
@@ -167,7 +155,7 @@ async fn setup_keeps_the_stored_token_when_fastmail_rejects_the_new_one() {
 
     let error = setup(
         &store,
-        &mut Lines(&b"new-token\n"[..]),
+        &mut FirstLine(&b"new-token\n"[..]),
         &mut out,
         &session_url(&server),
     )
@@ -193,7 +181,7 @@ async fn setup_keeps_the_stored_token_when_the_new_one_lacks_the_email_scope() {
 
     let error = setup(
         &store,
-        &mut Lines(&b"new-token\n"[..]),
+        &mut FirstLine(&b"new-token\n"[..]),
         &mut out,
         &session_url(&server),
     )
@@ -217,7 +205,7 @@ async fn setup_stops_without_a_request_when_no_token_is_entered() {
 
     let error = setup(
         &store,
-        &mut Lines(&b"  \n"[..]),
+        &mut FirstLine(&b"  \n"[..]),
         &mut out,
         &session_url(&server),
     )
