@@ -63,7 +63,7 @@ fn thread(
     }
 }
 
-const BODY_LONG: &str = "Hi Tane,\n\nThanks for the quick turnaround on the draft. A few things from my read:\n\n1. The intro assumes the reader already knows what JMAP is. One sentence would fix it.\n2. Section 3 has two paragraphs that say the same thing in different words.\n3. The table in section 5 overflows on a narrow screen.\n\nI have attached the marked-up PDF. Happy to go through it on a call if that is easier.\n\nSam\n\n> On 13 Oct 2026, at 17:02, Tane Morgan wrote:\n>\n> Here is the draft I promised. It is rough in places but the shape is there.\n> Let me know what you think before Friday.\n>\n> Tane";
+const BODY_LONG: &str = "Hi Jo,\n\nThanks for the quick turnaround on the draft. A few things from my read:\n\n1. The intro assumes the reader already knows what JMAP is. One sentence would fix it.\n2. Section 3 has two paragraphs that say the same thing in different words.\n3. The table in section 5 overflows on a narrow screen.\n\nI have attached the marked-up PDF. Happy to go through it on a call if that is easier.\n\nSam\n\n> On 13 Oct 2026, at 17:02, Jo Bennett wrote:\n>\n> Here is the draft I promised. It is rough in places but the shape is there.\n> Let me know what you think before Friday.\n>\n> Jo";
 
 const BODY_NEWSLETTER: &str = "This week in Rust\n\nratatui 0.30.2 is out with a fix to the table layout engine and a new termina backend. html2text 0.17.3 adds CSS display:none handling.\n\nIn the ecosystem, reqwest 0.13 moved to hyper 1.x throughout. The eventsource-stream crate had a maintenance release.\n\nCrate of the week: secrecy, for keeping tokens out of your Debug output.\n\nCall for participation: 14 issues tagged good-first-issue across tokio, serde, and clap.\n\nUnsubscribe: https://example.com/u/abc123";
 
@@ -610,7 +610,7 @@ fn reading_pane(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = vec![
         Line::from(t.subject).bold(),
         Line::from(vec!["From: ".dim(), t.from.into()]),
-        Line::from(vec!["To:   ".dim(), "Tane Morgan".into()]),
+        Line::from(vec!["To:   ".dim(), "Jo Bennett".into()]),
         Line::from(vec!["Date: ".dim(), full_date(t.date).into()]),
     ];
     if t.count > 1 {
