@@ -23,8 +23,8 @@ pub struct App {
     queue_name: String,
     /// The id of the mailbox the queue shows.
     queue_mailbox: Option<String>,
-    /// The `Email/query` the queue was loaded with, which the filter
-    /// produced, re-run after a failed action.
+    /// The `Email/query` the queue was loaded with, re-run after a failed
+    /// action.
     queue_query: Option<EmailQuery>,
     total: usize,
     generation: u64,

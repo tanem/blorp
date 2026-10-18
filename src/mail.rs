@@ -206,6 +206,7 @@ mod tests {
         };
         Mailboxes(vec![
             mailbox("inbox", Some(Role::Inbox)),
+            mailbox("archive", Some(Role::Archive)),
             mailbox("trash", Some(Role::Trash)),
             mailbox("junk", Some(Role::Junk)),
             mailbox("drafts", Some(Role::Drafts)),
@@ -238,6 +239,9 @@ mod tests {
             (&["inbox", "trash"], "inbox", false),
             (&["inbox", "junk"], "inbox", false),
             (&["trash"], "trash", true),
+            (&["trash", "inbox"], "trash", true),
+            (&["trash", "junk"], "trash", false),
+            (&["archive", "inbox"], "archive", true),
             (&["junk"], "junk", true),
             (&["trash", "sent"], "trash", false),
             (&["sent"], "sent", false),
