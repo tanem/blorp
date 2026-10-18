@@ -2,7 +2,7 @@
 
 A terminal UI for triaging a Fastmail account's mailboxes over JMAP. Rust, ratatui.
 
-Status: in development. `blorp` shows the Inbox: `j`, `k`, `g`, `G`, and count prefixes move the cursor, `e` archives the thread under the cursor, and `q` quits. `blorp --dry-run`, or `D` while running, turns on dry run: actions change the queue on screen and are written to the log at `~/.local/state/blorp/blorp.log` instead of being sent to Fastmail.
+Status: in development. `blorp` shows the Inbox: `j`, `k`, `g`, `G`, and count prefixes move the cursor, `e` archives the thread under the cursor, `u` undoes the last action and `Ctrl-r` redoes it, and `q` quits. `blorp --dry-run`, or `D` while running, turns on dry run: actions change the queue on screen and are written to the log at `~/.local/state/blorp/blorp.log` instead of being sent to Fastmail.
 
 blorp needs a Fastmail API token with the Email scope only (not read-only, and not Email submission), created in Fastmail under Settings, Privacy & Security, Connected apps & API tokens. On the first launch blorp asks for one, checks it with Fastmail, and stores it in the macOS login keychain (service `blorp`, account `fastmail`). `blorp setup` replaces the stored token and `blorp logout` deletes it; neither revokes the token, which is done in Fastmail Settings. `BLORP_API_TOKEN`, when set, is used in place of the keychain, for CI and scripted runs. A rebuilt development binary asks once for keychain access; that is expected.
 

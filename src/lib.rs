@@ -20,6 +20,7 @@ pub mod private_file;
 pub mod queue;
 pub mod run;
 pub mod ui;
+pub mod undo;
 
 use cli::{Cli, Command, CommandError, Keychain, Stdin, StoreError, TokenFile, TokenStore};
 use config::DebugOverrides;

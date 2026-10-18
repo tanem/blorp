@@ -21,6 +21,7 @@ use super::{Mailbox, QueryResult, SetResult, Thread};
 pub enum Call {
     GetMailboxes,
     Query(EmailQuery),
+    GetEmails(Vec<String>),
     SetEmails(EmailUpdate),
 }
 
@@ -102,6 +103,17 @@ impl Jmap for FakeJmap {
     async fn query(&self, query: &EmailQuery) -> Result<QueryResult, Error> {
         self.call(Call::Query(query.clone()), |store| store.query(query))
             .await
+    }
+
+    async fn get_emails(&self, ids: &[String]) -> Result<Vec<Email>, Error> {
+        self.call(Call::GetEmails(ids.to_vec()), |store| {
+            let mut emails = Vec::new();
+            for chunk in ids.chunks(MAX_OBJECTS_IN_GET) {
+                emails.extend(store.get_emails(chunk)?.0);
+            }
+            Ok(emails)
+        })
+        .await
     }
 
     async fn set_emails(&self, update: &EmailUpdate) -> Result<SetResult, Error> {

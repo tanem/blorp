@@ -17,6 +17,7 @@ use crate::app::{App, Effect, Msg, update};
 use crate::jmap::{EmailUpdate, Error, Fatal, Jmap};
 use crate::mail::Mailboxes;
 use crate::ui;
+use crate::undo::{Replay, Replayed};
 
 const SPINNER_TICK: Duration = Duration::from_millis(250);
 
@@ -126,15 +127,32 @@ where
     }
 }
 
-/// Starts the outbox task: it sends each job's `Email/set` once the job
-/// before it has been answered, reports it back as [`Msg::Sent`], and stops
-/// when the sender is dropped.
-fn outbox<J: Jmap>(jmap: J, tx: UnboundedSender<Msg>) -> UnboundedSender<(u64, EmailUpdate)> {
-    let (outbox, mut jobs) = unbounded_channel::<(u64, EmailUpdate)>();
+/// A job for the outbox.
+enum Job {
+    /// An action's or a redo's `Email/set`.
+    Set(EmailUpdate),
+    /// An undo.
+    Replay(Replay),
+}
+
+/// Starts the outbox task: it runs each job once the job before it has
+/// been answered, reports it back as [`Msg::Sent`] or [`Msg::Replayed`],
+/// and stops when the sender is dropped.
+fn outbox<J: Jmap>(jmap: J, tx: UnboundedSender<Msg>) -> UnboundedSender<(u64, Job)> {
+    let (outbox, mut jobs) = unbounded_channel::<(u64, Job)>();
     tokio::spawn(async move {
-        while let Some((job, update)) = jobs.recv().await {
-            let result = jmap.set_emails(&update).await;
-            if tx.send(Msg::Sent { job, result }).is_err() {
+        while let Some((job, work)) = jobs.recv().await {
+            let msg = match work {
+                Job::Set(update) => Msg::Sent {
+                    job,
+                    result: jmap.set_emails(&update).await,
+                },
+                Job::Replay(replay) => Msg::Replayed {
+                    job,
+                    result: replay_emails(&jmap, &replay).await,
+                },
+            };
+            if tx.send(msg).is_err() {
                 break;
             }
         }
@@ -142,10 +160,26 @@ fn outbox<J: Jmap>(jmap: J, tx: UnboundedSender<Msg>) -> UnboundedSender<(u64, E
     outbox
 }
 
+/// `Email/get` on the replay's emails, then one `Email/set` for those still
+/// as expected, or none when no email is.
+async fn replay_emails<J: Jmap>(jmap: &J, replay: &Replay) -> Result<Replayed, Error> {
+    let got = jmap.get_emails(&replay.ids()).await?;
+    let (update, skipped) = replay.split(&got);
+    let not_updated = if update.is_empty() {
+        Vec::new()
+    } else {
+        jmap.set_emails(&update).await?.not_updated
+    };
+    Ok(Replayed {
+        skipped,
+        not_updated,
+    })
+}
+
 struct Executor<J> {
     jmap: J,
     tx: UnboundedSender<Msg>,
-    outbox: UnboundedSender<(u64, EmailUpdate)>,
+    outbox: UnboundedSender<(u64, Job)>,
 }
 
 impl<J: Jmap> Executor<J> {
@@ -163,12 +197,20 @@ impl<J: Jmap> Executor<J> {
                     });
                 }
                 Effect::SetEmails { job, update } => {
-                    let _ = self.outbox.send((job, update));
+                    let _ = self.outbox.send((job, Job::Set(update)));
                 }
-                Effect::LogDryRun { action, thread_ids } => {
+                Effect::Replay { job, replay } => {
+                    let _ = self.outbox.send((job, Job::Replay(replay)));
+                }
+                Effect::LogDryRun {
+                    step,
+                    action,
+                    thread_ids,
+                } => {
                     tracing::info!(
                         target: "blorp::dry_run",
-                        "{} {}",
+                        "{}{} {}",
+                        step.prefix(),
                         action.name(),
                         thread_ids.join(" ")
                     );
