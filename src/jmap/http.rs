@@ -78,7 +78,7 @@ impl HttpJmap {
     /// Sends one `method` call per chunk, with the arguments `args` gives
     /// it, in requests of at most the session's `maxCallsInRequest` calls
     /// sent one after another, and returns the responses in chunk order.
-    /// None is sent for no chunks.
+    /// Nothing is sent for no chunks.
     async fn send_chunked<C: Sync, T: DeserializeOwned>(
         &self,
         method: &str,

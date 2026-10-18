@@ -389,3 +389,20 @@ fn an_action_that_did_nothing_is_not_what_dot_repeats() {
 
     assert_eq!(h.subjects(), ["Five"]);
 }
+
+#[test]
+fn a_count_before_a_dot_that_did_nothing_does_not_replace_the_original_count() {
+    let mut h = Harness::loaded(store());
+    let effects = h.keys("2e");
+    h.resolve(effects);
+    let effects = h.send(Msg::Show("mb-archive".into()));
+    h.resolve(effects);
+    h.keys("5.");
+    assert_eq!(h.status(), "Already in Archive");
+    let effects = h.send(Msg::Show("mb-inbox".into()));
+    h.resolve(effects);
+
+    h.keys(".");
+
+    assert_eq!(h.subjects(), ["Five"]);
+}
