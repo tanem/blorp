@@ -79,7 +79,7 @@ impl<'de> Deserialize<'de> for Invocation {
 }
 
 /// A mailbox, with the properties blorp requests.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Mailbox {
     pub id: String,
@@ -89,7 +89,7 @@ pub struct Mailbox {
 }
 
 /// A thread: its id and its emails' ids, oldest first.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
     pub id: String,
@@ -97,7 +97,7 @@ pub struct Thread {
 }
 
 /// An email, with the properties blorp requests.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Email {
     pub id: String,
@@ -111,7 +111,7 @@ pub struct Email {
 }
 
 /// A name and address from a header such as `From`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmailAddress {
     pub name: Option<String>,
     pub email: String,

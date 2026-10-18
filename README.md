@@ -8,4 +8,4 @@ blorp needs a Fastmail API token with the Email scope only (not read-only, and n
 
 The log is `~/.local/state/blorp/blorp.log` (or under `$XDG_STATE_HOME`), filtered by `BLORP_LOG` in `RUST_LOG` syntax.
 
-`cargo test` needs no network or secrets. `cargo test --test live -- --ignored` runs a read-only smoke test against Fastmail with `BLORP_API_TOKEN` set. `cargo test --test keychain -- --ignored` checks the keychain adapter against the real login keychain under a throwaway service name; it needs no token.
+`cargo test` needs no network beyond localhost and no secrets. The end-to-end tests run the binary in a pseudo-terminal against a local JMAP server, through two variables that only debug builds read: `BLORP_SESSION_URL` replaces Fastmail's session URL, and `BLORP_TOKEN_STORE=<path>` replaces the keychain with a file. `cargo test --test live -- --ignored` runs read-only smoke tests against Fastmail with `BLORP_API_TOKEN` set, one of them the end-to-end harness in a pseudo-terminal. `cargo test --test keychain -- --ignored` checks the keychain adapter against the real login keychain under a throwaway service name; it needs no token.

@@ -1,7 +1,8 @@
-//! The live smoke test against Fastmail. Ignored by default; run with
-//! `BLORP_API_TOKEN` set and `cargo test --test live -- --ignored`. It reads
-//! and writes nothing beyond the session, the mailbox list, and one Inbox
-//! query, and asserts on shapes only.
+//! The live smoke tests against Fastmail. Ignored by default; run with
+//! `BLORP_API_TOKEN` set and `cargo test --test live -- --ignored`. They
+//! read nothing beyond the session, the mailbox list, and the Inbox query,
+//! write nothing, and assert on shapes only. Failure messages leave out
+//! mail content.
 
 use std::collections::HashSet;
 
@@ -11,12 +12,18 @@ use blorp::mail::{Mailboxes, Role};
 use secrecy::SecretString;
 use serde_json::json;
 
+mod e2e;
+
+use e2e::{Modes, Sandbox, statusline};
+
+fn token() -> String {
+    std::env::var("BLORP_API_TOKEN").expect("BLORP_API_TOKEN is set")
+}
+
 #[tokio::test]
 #[ignore = "talks to Fastmail; needs BLORP_API_TOKEN"]
 async fn session_mailboxes_and_an_inbox_query_have_the_expected_shapes() {
-    let token = std::env::var("BLORP_API_TOKEN").expect("BLORP_API_TOKEN is set");
-
-    let (jmap, session) = HttpJmap::connect(FASTMAIL_SESSION_URL, SecretString::from(token))
+    let (jmap, session) = HttpJmap::connect(FASTMAIL_SESSION_URL, SecretString::from(token()))
         .await
         .expect("session with the mail capability");
     assert!(session.mail_account().is_some());
@@ -58,4 +65,52 @@ async fn session_mailboxes_and_an_inbox_query_have_the_expected_shapes() {
             );
         }
     }
+}
+
+/// The cursor row and the queue length from a statusline such as
+/// ` NORMAL  Inbox    1/500 of 6443`.
+fn position(statusline: &str) -> Option<(usize, usize)> {
+    let words: Vec<&str> = statusline.split_whitespace().collect();
+    let position = match words.as_slice() {
+        [.., position, "of", _total] => position,
+        [.., position] => position,
+        [] => return None,
+    };
+    let (row, len) = position.split_once('/')?;
+    Some((row.parse().ok()?, len.parse().ok()?))
+}
+
+#[test]
+fn position_reads_the_row_and_length_with_or_without_a_total() {
+    assert_eq!(
+        position(" NORMAL  Inbox      1/500 of 6443"),
+        Some((1, 500))
+    );
+    assert_eq!(position(" NORMAL  Inbox      2/37"), Some((2, 37)));
+    assert_eq!(position(" NORMAL  Inbox"), None);
+}
+
+#[test]
+#[ignore = "talks to Fastmail; needs BLORP_API_TOKEN"]
+fn the_inbox_opens_in_a_terminal_moves_and_quits_cleanly() {
+    let sandbox = Sandbox::new().env("BLORP_API_TOKEN", &token()).redacted();
+    let mut blorp = sandbox.spawn(&[], 80, 24);
+
+    blorp.wait_for("the statusline to show the loaded queue", |screen| {
+        position(&statusline(screen)).is_some_and(|(row, _)| row == 1)
+    });
+    let (_, len) = position(&blorp.statusline()).unwrap();
+    if len > 1 {
+        blorp.keys("j");
+        blorp.wait_for("the cursor on row 2", |screen| {
+            position(&statusline(screen)).is_some_and(|(row, _)| row == 2)
+        });
+    }
+    blorp.keys("q");
+
+    assert_eq!(blorp.wait_exit().exit_code(), 0);
+    assert!(!blorp.on_alternate_screen());
+    assert_eq!(blorp.modes(), Modes::COOKED);
+    // Not assert_eq!, which would print a stored token.
+    assert!(sandbox.stored_token().is_none(), "nothing was stored");
 }
