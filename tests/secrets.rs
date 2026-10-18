@@ -175,8 +175,9 @@ async fn the_token_appears_nowhere_after_an_action_a_failed_request_and_a_fatal_
         .unwrap_err();
     errors.push_str(&format!("{failed}\n{failed:?}\n"));
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    // `e` once the queue has loaded: the archive fails with a 500, and the
-    // query re-run after the rollback is refused with a 401.
+    // `e` once the queue has loaded, after four requests: `Mailbox/get`, the
+    // failed query above, and the queue query's two stages. The archive
+    // fails with a 500, and the query re-run after it is refused with a 401.
     let keys = Box::pin(
         stream::once({
             let server = &server;

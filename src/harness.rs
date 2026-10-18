@@ -20,9 +20,13 @@ pub struct Harness {
 impl Harness {
     /// An app over `store`'s mailboxes, not yet started.
     pub fn new(store: Store) -> Self {
+        Harness::with_dry_run(store, false)
+    }
+
+    fn with_dry_run(store: Store, dry_run: bool) -> Self {
         let now: Timestamp = NOW.parse().expect("valid timestamp");
         Harness {
-            app: App::new(Mailboxes::from(store.mailboxes()), now),
+            app: App::new(Mailboxes::from(store.mailboxes()), now).with_dry_run(dry_run),
             store,
         }
     }
@@ -37,12 +41,7 @@ impl Harness {
 
     /// An app over `store` started with `--dry-run`, its queue loaded.
     pub fn loaded_dry(store: Store) -> Self {
-        let mut harness = Harness::new(store);
-        harness.app = std::mem::replace(
-            &mut harness.app,
-            App::new(Mailboxes::default(), Timestamp::UNIX_EPOCH),
-        )
-        .with_dry_run(true);
+        let mut harness = Harness::with_dry_run(store, true);
         let effects = harness.start();
         harness.resolve(effects);
         harness

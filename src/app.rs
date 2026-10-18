@@ -23,8 +23,9 @@ pub struct App {
     queue_name: String,
     /// The id of the mailbox the queue shows.
     queue_mailbox: Option<String>,
-    /// The query the queue was loaded with, re-run after a failed action.
-    query: Option<EmailQuery>,
+    /// The `Email/query` the queue was loaded with, which the filter
+    /// produced, re-run after a failed action.
+    queue_query: Option<EmailQuery>,
     total: usize,
     generation: u64,
     loading: bool,
@@ -136,7 +137,7 @@ impl App {
             queue: Queue::default(),
             queue_name: String::new(),
             queue_mailbox: None,
-            query: None,
+            queue_query: None,
             total: 0,
             generation: 0,
             loading: false,
@@ -202,7 +203,7 @@ impl App {
     fn load(&mut self, query: EmailQuery) -> Vec<Effect> {
         self.generation += 1;
         self.loading = true;
-        self.query = Some(query.clone());
+        self.queue_query = Some(query.clone());
         vec![Effect::Query {
             generation: self.generation,
             query,
@@ -320,7 +321,7 @@ impl App {
             self.total += 1;
         }
         self.status = format!("Could not {} 1 thread: {reason}", flight.action.name());
-        match self.query.clone() {
+        match self.queue_query.clone() {
             Some(query) => self.load(query),
             None => Vec::new(),
         }
