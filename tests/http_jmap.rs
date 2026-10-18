@@ -319,8 +319,8 @@ async fn an_email_removed_before_the_second_request_is_left_out() {
     let result = inbox_query(&jmap).await.unwrap();
 
     assert_eq!(result.threads[0].email_ids, ["Me1", "Me2"]);
-    let ids: Vec<&str> = result.emails.iter().map(|e| e.id.as_str()).collect();
-    assert_eq!(ids, ["Me2"]);
+    let emails: Vec<&str> = result.emails.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(emails, ["Me2"]);
 }
 
 #[tokio::test]

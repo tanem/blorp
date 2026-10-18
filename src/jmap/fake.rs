@@ -12,7 +12,7 @@ use serde_json::Value;
 
 pub mod api;
 
-use super::{Email, EmailAddress, EmailQuery, Error, Jmap, Mailbox, QueryResult, Thread};
+use super::{Email, EmailAddress, EmailQuery, Error, Jmap, Limits, Mailbox, QueryResult, Thread};
 
 /// A call made to a [`FakeJmap`], in the order made.
 #[derive(Debug, Clone, PartialEq)]
@@ -209,11 +209,7 @@ impl Store {
 
 /// Fastmail's `maxObjectsInGet`: a get for more objects than this fails with
 /// `requestTooLarge`.
-pub const MAX_OBJECTS_IN_GET: usize = 4096;
-
-/// Fastmail's `maxCallsInRequest`, which the local test server enforces on
-/// each request it answers.
-pub const MAX_CALLS_IN_REQUEST: usize = 50;
+pub const MAX_OBJECTS_IN_GET: usize = Limits::FASTMAIL.max_objects_in_get;
 
 fn check_size(method: &str, requested: usize) -> Result<(), Error> {
     if requested > MAX_OBJECTS_IN_GET {

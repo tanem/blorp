@@ -33,7 +33,8 @@ impl Session {
     }
 
     /// The request limits the core capability advertises. A limit that is
-    /// missing, or not a positive integer, takes its [`Limits::default`].
+    /// missing, or not a positive integer, takes its value in
+    /// [`Limits::FASTMAIL`].
     pub fn limits(&self) -> Limits {
         let core = self.capabilities.get(CORE);
         let limit = |name: &str| {
@@ -42,7 +43,7 @@ impl Session {
                 .filter(|&n| n > 0)
                 .and_then(|n| usize::try_from(n).ok())
         };
-        let default = Limits::default();
+        let default = Limits::FASTMAIL;
         Limits {
             max_objects_in_get: limit("maxObjectsInGet").unwrap_or(default.max_objects_in_get),
             max_calls_in_request: limit("maxCallsInRequest")
@@ -60,14 +61,12 @@ pub struct Limits {
     pub max_calls_in_request: usize,
 }
 
-impl Default for Limits {
+impl Limits {
     /// The values Fastmail's session advertised on 2026-10-19.
-    fn default() -> Self {
-        Limits {
-            max_objects_in_get: 4096,
-            max_calls_in_request: 50,
-        }
-    }
+    pub const FASTMAIL: Limits = Limits {
+        max_objects_in_get: 4096,
+        max_calls_in_request: 50,
+    };
 }
 
 /// A request envelope (RFC 8620 section 3.3).

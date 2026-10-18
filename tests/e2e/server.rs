@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use blorp::jmap::fake::{MAX_CALLS_IN_REQUEST, MAX_OBJECTS_IN_GET, Store, api};
-use blorp::jmap::{CORE, MAIL};
+use blorp::jmap::fake::{MAX_OBJECTS_IN_GET, Store, api};
+use blorp::jmap::{CORE, Limits, MAIL};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -22,7 +22,7 @@ pub struct LocalJmap {
 impl LocalJmap {
     /// Serves `store` to requests bearing `token`.
     pub async fn start(store: Store, token: &str) -> LocalJmap {
-        LocalJmap::serve(store, token, true, MAX_CALLS_IN_REQUEST).await
+        LocalJmap::serve(store, token, true, Limits::FASTMAIL.max_calls_in_request).await
     }
 
     /// Serves `store`, advertising and enforcing `max_calls` as the
@@ -33,7 +33,13 @@ impl LocalJmap {
 
     /// Serves a session that does not advertise the mail capability.
     pub async fn start_without_mail(token: &str) -> LocalJmap {
-        LocalJmap::serve(Store::builder().build(), token, false, MAX_CALLS_IN_REQUEST).await
+        LocalJmap::serve(
+            Store::builder().build(),
+            token,
+            false,
+            Limits::FASTMAIL.max_calls_in_request,
+        )
+        .await
     }
 
     async fn serve(store: Store, token: &str, mail: bool, max_calls: usize) -> LocalJmap {
@@ -64,6 +70,7 @@ impl LocalJmap {
         format!("{}/jmap/session", self.server.uri())
     }
 
+    /// The API URL the session names.
     pub fn api_url(&self) -> String {
         format!("{}/jmap/api/", self.server.uri())
     }

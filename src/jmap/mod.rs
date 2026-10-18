@@ -27,7 +27,7 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// by back-reference. Then the threads' emails are fetched with
     /// `Email/get` calls of at most the session's `maxObjectsInGet` ids, in
     /// requests of at most its `maxCallsInRequest` calls, sent one after
-    /// another; none is sent when the threads have no emails. An email gone
+    /// another; none is sent for an empty queue. An email gone
     /// by the second stage is left out. A method error in any request fails
     /// the whole query.
     fn query(&self, query: &EmailQuery) -> impl Future<Output = Result<QueryResult, Error>> + Send;

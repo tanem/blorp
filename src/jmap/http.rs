@@ -104,6 +104,34 @@ impl HttpJmap {
         }
         Ok(response.method_responses)
     }
+
+    /// `Email/get` for `ids`, in calls of at most `maxObjectsInGet` ids and
+    /// requests of at most `maxCallsInRequest` calls, sent one after
+    /// another. Ids not found are left out.
+    async fn get_emails(&self, ids: &[String]) -> Result<Vec<Email>, Error> {
+        let mut emails = Vec::with_capacity(ids.len());
+        let chunks: Vec<&[String]> = ids.chunks(self.limits.max_objects_in_get).collect();
+        for batch in chunks.chunks(self.limits.max_calls_in_request) {
+            let calls = batch
+                .iter()
+                .enumerate()
+                .map(|(i, chunk)| {
+                    let args = json!({
+                        "accountId": self.account_id,
+                        "ids": chunk,
+                        "properties": EMAIL_PROPERTIES
+                    });
+                    call("Email/get", args, &i.to_string())
+                })
+                .collect();
+            let responses = self.send(calls).await?;
+            for i in 0..batch.len() {
+                let got: GetResponse<Email> = response_of(&responses, "Email/get", &i.to_string())?;
+                emails.extend(got.list);
+            }
+        }
+        Ok(emails)
+    }
 }
 
 impl Jmap for HttpJmap {
@@ -165,36 +193,6 @@ impl Jmap for HttpJmap {
             threads: threads.list,
             emails,
         })
-    }
-}
-
-impl HttpJmap {
-    /// `Email/get` for `ids`, in calls of at most `maxObjectsInGet` ids and
-    /// requests of at most `maxCallsInRequest` calls, sent one after
-    /// another. Ids not found are left out.
-    async fn get_emails(&self, ids: &[String]) -> Result<Vec<Email>, Error> {
-        let mut emails = Vec::with_capacity(ids.len());
-        let chunks: Vec<&[String]> = ids.chunks(self.limits.max_objects_in_get).collect();
-        for request in chunks.chunks(self.limits.max_calls_in_request) {
-            let calls = request
-                .iter()
-                .enumerate()
-                .map(|(i, ids)| {
-                    let args = json!({
-                        "accountId": self.account_id,
-                        "ids": ids,
-                        "properties": EMAIL_PROPERTIES
-                    });
-                    call("Email/get", args, &i.to_string())
-                })
-                .collect();
-            let responses = self.send(calls).await?;
-            for i in 0..request.len() {
-                let got: GetResponse<Email> = response_of(&responses, "Email/get", &i.to_string())?;
-                emails.extend(got.list);
-            }
-        }
-        Ok(emails)
     }
 }
 
