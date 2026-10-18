@@ -7,14 +7,14 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::Store;
-use crate::jmap::{CORE, EmailQuery, Error, MAIL};
+use crate::jmap::{CORE, EmailQuery, EmailUpdate, Error, MAIL};
 
 /// Answers a JMAP request envelope with its response envelope. A
 /// request-level error is returned as its problem details, to be sent with
 /// HTTP 400 (RFC 8620 section 3.6.1). A request of more than
 /// `max_calls_in_request` method calls is refused with the `limit` error.
 pub fn respond(
-    store: &Store,
+    store: &mut Store,
     account_id: &str,
     max_calls_in_request: usize,
     request: &Value,
@@ -120,7 +120,7 @@ fn pointer(value: &Value, tokens: &[String]) -> Option<Value> {
 
 /// Runs one method call, returning its response arguments or an error type.
 fn method(
-    store: &Store,
+    store: &mut Store,
     account_id: &str,
     name: &str,
     args: &Map<String, Value>,
@@ -146,6 +146,7 @@ fn method(
             get_response(account_id, &list, &not_found, args)
         }
         "Email/query" => email_query(store, account_id, args),
+        "Email/set" => email_set(store, account_id, args),
         _ => Err("unknownMethod".into()),
     }
 }
@@ -195,6 +196,50 @@ fn get_response<T: Serialize>(
         })
         .collect();
     Ok(json!({"accountId": account_id, "state": "0", "list": list, "notFound": not_found}))
+}
+
+/// `Email/set` with `update` only. An id the store does not hold is
+/// `notFound`; a patch the store does not apply is `invalidPatch`.
+fn email_set(
+    store: &mut Store,
+    account_id: &str,
+    args: &Map<String, Value>,
+) -> Result<Value, String> {
+    for unsupported in ["create", "destroy", "ifInState"] {
+        if !args.get(unsupported).is_none_or(Value::is_null) {
+            return Err("invalidArguments".into());
+        }
+    }
+    let update: EmailUpdate = args
+        .get("update")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| "invalidArguments")?
+        .unwrap_or_default();
+    let result = store.set_emails(&update);
+    let mut updated = Map::new();
+    let mut not_updated = Map::new();
+    for id in update.keys() {
+        if !result.not_updated.contains(id) {
+            updated.insert(id.clone(), Value::Null);
+            continue;
+        }
+        let (_, not_found) = store.get_emails(std::slice::from_ref(id)).map_err(kind)?;
+        let kind = if not_found.is_empty() {
+            "invalidPatch"
+        } else {
+            "notFound"
+        };
+        not_updated.insert(id.clone(), json!({"type": kind}));
+    }
+    Ok(json!({
+        "accountId": account_id,
+        "oldState": "0",
+        "newState": "0",
+        "updated": updated,
+        "notUpdated": not_updated,
+    }))
 }
 
 /// `Email/query`, sorted by `receivedAt` with threads collapsed, which is

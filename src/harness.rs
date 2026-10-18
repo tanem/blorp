@@ -35,6 +35,19 @@ impl Harness {
         harness
     }
 
+    /// An app over `store` started with `--dry-run`, its queue loaded.
+    pub fn loaded_dry(store: Store) -> Self {
+        let mut harness = Harness::new(store);
+        harness.app = std::mem::replace(
+            &mut harness.app,
+            App::new(Mailboxes::default(), Timestamp::UNIX_EPOCH),
+        )
+        .with_dry_run(true);
+        let effects = harness.start();
+        harness.resolve(effects);
+        harness
+    }
+
     pub fn start(&mut self) -> Vec<Effect> {
         self.send(Msg::Start)
     }
@@ -43,8 +56,9 @@ impl Harness {
         update(&mut self.app, msg)
     }
 
-    /// Answers every query in `effects` from the store and returns the
-    /// remaining effects.
+    /// Answers every query and `Email/set` in `effects` from the store, in
+    /// order, and returns the remaining effects, including those the
+    /// answers produce.
     pub fn resolve(&mut self, effects: Vec<Effect>) -> Vec<Effect> {
         let mut rest = Vec::new();
         for effect in effects {
@@ -52,6 +66,10 @@ impl Harness {
                 Effect::Query { generation, query } => {
                     let result = self.store.query(&query);
                     rest.extend(self.send(Msg::Loaded { generation, result }));
+                }
+                Effect::SetEmails { job, update } => {
+                    let result = Ok(self.store.set_emails(&update));
+                    rest.extend(self.send(Msg::Sent { job, result }));
                 }
                 other => rest.push(other),
             }

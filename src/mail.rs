@@ -50,6 +50,23 @@ impl Mailboxes {
     pub fn by_role(&self, role: Role) -> Option<&Mailbox> {
         self.0.iter().find(|m| m.role == Some(role))
     }
+
+    pub fn by_id(&self, id: &str) -> Option<&Mailbox> {
+        self.0.iter().find(|m| m.id == id)
+    }
+
+    /// Whether a move action out of the queue mailbox `from` moves `email`:
+    /// it is in `from`, and in no Trash, Junk, Drafts, or Sent mailbox
+    /// other than `from`.
+    pub fn moves(&self, email: &Email, from: &str) -> bool {
+        email.mailbox_ids.contains(from)
+            && !email.mailbox_ids.iter().any(|id| {
+                id != from
+                    && self.by_id(id).and_then(|m| m.role).is_some_and(|role| {
+                        matches!(role, Role::Trash | Role::Junk | Role::Drafts | Role::Sent)
+                    })
+            })
+    }
 }
 
 impl From<Vec<jmap::Mailbox>> for Mailboxes {

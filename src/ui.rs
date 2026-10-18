@@ -138,15 +138,26 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         Some(count) => format!("{count} "),
         None => String::new(),
     };
-    let used = mode.width() + name.width() + count.width() + position.width();
+    let mut right = vec![Span::raw(count)];
+    if app.dry_run() {
+        right.push(Span::styled(
+            " DRY RUN ",
+            Style::new()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        right.push(Span::raw(" "));
+    }
+    right.push(Span::styled(
+        position,
+        Style::new().fg(Color::Black).bg(Color::Blue),
+    ));
+    let used = mode.width() + name.width() + right.iter().map(Span::width).sum::<usize>();
     let gap = " ".repeat(usize::from(width).saturating_sub(used));
-    Line::from(vec![
-        mode,
-        name,
-        Span::raw(gap),
-        Span::raw(count),
-        Span::styled(position, Style::new().fg(Color::Black).bg(Color::Blue)),
-    ])
+    let mut spans = vec![mode, name, Span::raw(gap)];
+    spans.extend(right);
+    Line::from(spans)
 }
 
 fn bottom_line(app: &App) -> Line<'static> {
@@ -218,6 +229,8 @@ pub fn key_msg(key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('g') => Some(Msg::Top),
         KeyCode::Char('G') => Some(Msg::Bottom),
         KeyCode::Char('q') => Some(Msg::Quit),
+        KeyCode::Char('e') => Some(Msg::Archive),
+        KeyCode::Char('D') => Some(Msg::ToggleDryRun),
         KeyCode::Esc | KeyCode::Enter => Some(Msg::Cancel),
         KeyCode::Char(c) => c.to_digit(10).map(|d| Msg::Digit(d as u8)),
         _ => None,
@@ -345,6 +358,14 @@ mod tests {
     fn pending_count() {
         let mut h = Harness::loaded(busy_inbox());
         h.keys("12");
+
+        insta::assert_snapshot!(render(&h, 80, 24));
+    }
+
+    #[test]
+    fn dry_run_badge() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("De");
 
         insta::assert_snapshot!(render(&h, 80, 24));
     }

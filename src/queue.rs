@@ -26,6 +26,34 @@ impl Queue {
         self.cursor = self.cursor.min(self.last());
     }
 
+    /// The thread under the cursor.
+    pub fn current(&self) -> Option<&Thread> {
+        self.threads.get(self.cursor)
+    }
+
+    /// Removes the thread under the cursor, keeping the cursor on the same
+    /// row number so the next thread slides into place.
+    pub fn remove_current(&mut self) -> Option<Thread> {
+        if self.cursor >= self.threads.len() {
+            return None;
+        }
+        let thread = self.threads.remove(self.cursor);
+        self.cursor = self.cursor.min(self.last());
+        Some(thread)
+    }
+
+    /// Puts `thread` back at row `index`, or last if there are fewer rows,
+    /// unless a thread with its id is already in the queue, and says
+    /// whether it did. The cursor keeps its row number.
+    pub fn restore(&mut self, index: usize, thread: Thread) -> bool {
+        if self.threads.iter().any(|t| t.id == thread.id) {
+            return false;
+        }
+        let index = index.min(self.threads.len());
+        self.threads.insert(index, thread);
+        true
+    }
+
     pub fn down(&mut self, rows: usize) {
         self.cursor = self.cursor.saturating_add(rows).min(self.last());
     }

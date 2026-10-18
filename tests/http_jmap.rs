@@ -1,4 +1,4 @@
-use blorp::jmap::{EmailQuery, Error, HttpJmap, Jmap, Mailbox, QueryResult};
+use blorp::jmap::{EmailQuery, EmailUpdate, Error, HttpJmap, Jmap, Mailbox, QueryResult};
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path};
@@ -353,6 +353,87 @@ async fn a_method_error_in_the_second_request_fails_the_query() {
             kind: "serverUnavailable".into(),
         })
     );
+}
+
+#[tokio::test]
+async fn set_emails_sends_one_email_set_and_reads_not_updated() {
+    let server = MockServer::start().await;
+    serve_session(&server, mail_capabilities()).await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(header("authorization", "Bearer test-token-123"))
+        .and(body_json(json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "methodCalls": [[
+                "Email/set",
+                {"accountId": "u1a2b3c4", "update": {
+                    "Me1": {"mailboxIds/mb1": null, "mailboxIds/mb5": true},
+                    "Me2": {"mailboxIds/mb1": null, "mailboxIds/mb5": true}
+                }},
+                "0"
+            ]]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [[
+                "Email/set",
+                {
+                    "accountId": "u1a2b3c4",
+                    "oldState": "1",
+                    "newState": "2",
+                    "updated": {"Me1": null},
+                    "notUpdated": {"Me2": {"type": "notFound"}},
+                    "created": null,
+                    "notCreated": null,
+                    "destroyed": null,
+                    "notDestroyed": null
+                },
+                "0"
+            ]],
+            "sessionState": "0"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let jmap = connect(&server).await.unwrap();
+    let to_archive = || {
+        [
+            ("mailboxIds/mb1".to_string(), Value::Null),
+            ("mailboxIds/mb5".to_string(), Value::Bool(true)),
+        ]
+        .into()
+    };
+    let update = EmailUpdate::from([("Me1".into(), to_archive()), ("Me2".into(), to_archive())]);
+
+    let result = jmap.set_emails(&update).await.unwrap();
+
+    assert_eq!(result.not_updated, ["Me2"]);
+}
+
+#[tokio::test]
+async fn set_emails_reads_a_null_not_updated_as_none() {
+    let server = MockServer::start().await;
+    serve_session(&server, mail_capabilities()).await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [[
+                "Email/set",
+                {"accountId": "u1a2b3c4", "newState": "2", "updated": {"Me1": null}, "notUpdated": null},
+                "0"
+            ]],
+            "sessionState": "0"
+        })))
+        .mount(&server)
+        .await;
+    let jmap = connect(&server).await.unwrap();
+    let update = EmailUpdate::from([(
+        "Me1".into(),
+        [("keywords/$seen".to_string(), Value::Bool(true))].into(),
+    )]);
+
+    let result = jmap.set_emails(&update).await.unwrap();
+
+    assert!(result.not_updated.is_empty());
 }
 
 #[tokio::test]

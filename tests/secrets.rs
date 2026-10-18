@@ -7,15 +7,15 @@ use std::time::Duration;
 use blorp::cli::{FirstLine, StoreError, TokenStore, setup};
 use blorp::jmap::{EmailQuery, HttpJmap, Jmap};
 use blorp::run::{Exit, launch, run};
-use crossterm::event::Event;
-use futures::stream;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use futures::{StreamExt, stream};
 use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use secrecy::SecretString;
 use serde_json::json;
 use tracing_subscriber::fmt::MakeWriter;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 mod common;
@@ -71,7 +71,7 @@ impl TokenStore for NoStore {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
+async fn the_token_appears_nowhere_after_an_action_a_failed_request_and_a_fatal_401() {
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(capture.clone())
@@ -91,7 +91,8 @@ async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
         .and(path("/api/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "methodResponses": [["Mailbox/get", {"list": [
-                {"id": "mb-inbox", "name": "Inbox", "parentId": null, "role": "inbox"}
+                {"id": "mb-inbox", "name": "Inbox", "parentId": null, "role": "inbox"},
+                {"id": "mb-archive", "name": "Archive", "parentId": null, "role": "archive"}
             ]}, "0"]],
             "sessionState": "0"
         })))
@@ -100,6 +101,46 @@ async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
         .await;
     Mock::given(method("POST"))
         .and(path("/api/"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(body_string_contains("Email/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [
+                ["Email/query", {"ids": ["Me1"], "total": 1}, "0"],
+                ["Email/get", {"list": [{"id": "Me1", "threadId": "Tt1"}]}, "1"],
+                ["Thread/get", {"list": [{"id": "Tt1", "emailIds": ["Me1"]}]}, "2"]
+            ],
+            "sessionState": "0"
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(body_string_contains("Email/get"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [["Email/get", {"list": [{
+                "id": "Me1",
+                "threadId": "Tt1",
+                "mailboxIds": {"mb-inbox": true},
+                "keywords": {},
+                "from": null,
+                "subject": "Lunch",
+                "receivedAt": "2026-10-18T09:00:00Z",
+                "hasAttachment": false
+            }]}, "0"]],
+            "sessionState": "0"
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(body_string_contains("Email/set"))
         .respond_with(ResponseTemplate::new(500))
         .up_to_n_times(1)
         .mount(&server)
@@ -134,7 +175,24 @@ async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
         .unwrap_err();
     errors.push_str(&format!("{failed}\n{failed:?}\n"));
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    let keys = stream::pending::<io::Result<Event>>();
+    // `e` once the queue has loaded: the archive fails with a 500, and the
+    // query re-run after the rollback is refused with a 401.
+    let keys = Box::pin(
+        stream::once({
+            let server = &server;
+            async move {
+                while server.received_requests().await.unwrap().len() < 4 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Ok(Event::Key(KeyEvent::new(
+                    KeyCode::Char('e'),
+                    KeyModifiers::NONE,
+                )))
+            }
+        })
+        .chain(stream::pending::<io::Result<Event>>()),
+    );
     let exit = tokio::time::timeout(
         Duration::from_secs(10),
         run(&mut terminal, keys, jmap, blorp::run::SystemClock, app),
@@ -145,6 +203,17 @@ async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
     let Exit::Fatal(fatal) = exit else {
         panic!("expected a fatal exit, got {exit:?}");
     };
+    let bodies: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .collect();
+    assert!(
+        bodies.iter().any(|body| body.contains("Email/set")),
+        "the archive was sent: {bodies:#?}"
+    );
     errors.push_str(&format!("{fatal}\n{fatal:?}\n"));
     let rejected = HttpJmap::connect(
         &format!("{}/missing", server.uri()),
