@@ -50,8 +50,8 @@ pub const SNOOZE_MAILBOX: &str = "Snoozed (blorp)";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueMailbox {
     One(String),
-    /// Every mailbox except these ids.
-    Any(BTreeSet<String>),
+    /// Every mailbox except these ids, in the order the server listed them.
+    Any(Vec<String>),
 }
 
 impl QueueMailbox {
@@ -59,7 +59,7 @@ impl QueueMailbox {
     pub fn contains(&self, id: &str) -> bool {
         match self {
             QueueMailbox::One(one) => one == id,
-            QueueMailbox::Any(excluded) => !excluded.contains(id),
+            QueueMailbox::Any(excluded) => !excluded.iter().any(|e| e == id),
         }
     }
 }

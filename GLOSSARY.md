@@ -25,7 +25,7 @@ The threads an action applies to: the visual range if one is open, else the mark
 _Avoid_: Highlighted, checked
 
 **Mark**:
-A flag on a row, set and cleared with `x`, that puts its thread in the selection while no visual range is open. A mark lasts until `X` clears it, its thread leaves the queue, or the filter changes.
+A flag on a row, set and cleared with `x`, that puts its thread in the selection while no visual range is open. A mark lasts until `X` clears it, its thread leaves the queue, or a new filter or sort reloads the queue.
 _Avoid_: Tag, check
 
 **Visual range**:

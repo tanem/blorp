@@ -1,5 +1,5 @@
-//! The filter language: filter text to an AST, and the AST to the
-//! `Email/query` filter and queue mailbox it selects, resolving mailbox
+//! The filter language: filter text to terms, and the terms to the
+//! `Email/query` filter and queue mailbox they select, resolving mailbox
 //! names through [`crate::mail`]. Pure.
 
 use std::fmt;
@@ -118,7 +118,7 @@ impl Filter {
                     json!({"inMailbox": mailbox.id})
                 }
                 Condition::InAny => {
-                    let excluded: Vec<&str> = mailboxes
+                    let excluded = mailboxes
                         .iter()
                         .filter(|m| {
                             matches!(
@@ -126,9 +126,9 @@ impl Filter {
                                 Some(Role::Trash | Role::Junk | Role::Drafts | Role::Sent)
                             ) || (m.parent_id.is_none() && m.name == SNOOZE_MAILBOX)
                         })
-                        .map(|m| m.id.as_str())
+                        .map(|m| m.id.clone())
                         .collect();
-                    let mailbox = QueueMailbox::Any(excluded.iter().map(|&id| id.into()).collect());
+                    let mailbox = QueueMailbox::Any(excluded);
                     queue = Some((mailbox, "All mail".into()));
                     continue;
                 }
@@ -157,14 +157,7 @@ impl Filter {
         };
         let first = match &mailbox {
             QueueMailbox::One(id) => json!({"inMailbox": id}),
-            QueueMailbox::Any(excluded) => {
-                let ids: Vec<&str> = mailboxes
-                    .iter()
-                    .map(|m| m.id.as_str())
-                    .filter(|id| excluded.contains(*id))
-                    .collect();
-                json!({"inMailboxOtherThan": ids})
-            }
+            QueueMailbox::Any(excluded) => json!({"inMailboxOtherThan": excluded}),
         };
         conditions.insert(0, first);
         let condition = if conditions.len() == 1 {

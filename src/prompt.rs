@@ -152,10 +152,11 @@ impl Prompt {
 pub struct History(Vec<String>);
 
 impl History {
-    /// Adds `entry` as the newest, moving it there if it is already held.
-    /// Blank entries are not kept.
+    /// Adds `entry`, trimmed, as the newest, moving it there if it is
+    /// already held. Blank entries are not kept.
     pub fn push(&mut self, entry: &str) {
-        if entry.trim().is_empty() {
+        let entry = entry.trim();
+        if entry.is_empty() {
             return;
         }
         self.0.retain(|e| e != entry);

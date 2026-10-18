@@ -66,6 +66,11 @@ pub enum Sort {
 }
 
 impl Sort {
+    /// Whether the query sorts oldest first.
+    fn ascending(self) -> bool {
+        self == Sort::Oldest
+    }
+
     /// `newest` or `oldest`, as the statusline shows it.
     pub fn name(self) -> &'static str {
         match self {
@@ -83,6 +88,8 @@ struct FilterPrompt {
     shown: Option<Shown>,
     queue: Queue,
     total: usize,
+    /// Whether an edit has run a query, which changes the rows.
+    queried: bool,
 }
 
 /// A job in the outbox: the entry it applies, kept to put back if it
@@ -379,7 +386,7 @@ impl App {
             mailbox: resolved.mailbox,
             query: EmailQuery {
                 filter: resolved.condition,
-                ascending: self.sort == Sort::Oldest,
+                ascending: self.sort.ascending(),
                 limit: QUEUE_LIMIT,
             },
         })
@@ -407,9 +414,23 @@ impl App {
         if same {
             return Vec::new();
         }
+        self.load_new(query)
+    }
+
+    /// Clears the selection, puts the cursor on the first row, and runs
+    /// `query`, for a queue whose filter or sort has changed.
+    fn load_new(&mut self, query: EmailQuery) -> Vec<Effect> {
         self.queue.clear_selection();
         self.queue.to_first();
         self.load(query)
+    }
+
+    /// Runs the shown queue's query again, if a queue is shown.
+    fn reload(&mut self) -> Vec<Effect> {
+        match self.shown.as_ref().map(|s| s.query.clone()) {
+            Some(query) => self.load(query),
+            None => Vec::new(),
+        }
     }
 
     /// Flips the sort and reloads the queue in it, clearing the selection
@@ -422,23 +443,23 @@ impl App {
         let Some(shown) = &mut self.shown else {
             return Vec::new();
         };
-        shown.query.ascending = self.sort == Sort::Oldest;
+        shown.query.ascending = self.sort.ascending();
         let query = shown.query.clone();
-        self.queue.clear_selection();
-        self.queue.to_first();
-        self.load(query)
+        self.load_new(query)
     }
 
     /// Opens the `/` prompt holding the current filter, dropping a pending
-    /// count and closing the visual range.
+    /// count, closing the visual range, and clearing the status message.
     fn open_filter(&mut self) {
         self.take_count();
         self.queue.close_visual();
+        self.status.clear();
         self.filter_prompt = Some(FilterPrompt {
             prompt: Prompt::new(self.filter()),
             shown: self.shown.clone(),
             queue: self.queue.clone(),
             total: self.total,
+            queried: false,
         });
     }
 
@@ -447,12 +468,11 @@ impl App {
     /// nothing puts the earlier queue back and reports why; either way the
     /// text goes into the prompt's history. Esc puts the earlier queue back.
     fn filter_key(&mut self, key: Key) -> Vec<Effect> {
-        let Some(open) = &mut self.filter_prompt else {
-            return Vec::new();
-        };
         match key {
             Key::Enter => {
-                let open = self.filter_prompt.take().expect("the prompt is open");
+                let Some(open) = self.filter_prompt.take() else {
+                    return Vec::new();
+                };
                 let text = open.prompt.text();
                 self.filter_history.push(text);
                 match self.select(text) {
@@ -467,37 +487,39 @@ impl App {
                     }
                 }
             }
-            Key::Esc => {
-                let open = self.filter_prompt.take().expect("the prompt is open");
-                self.restore(open)
-            }
+            Key::Esc => match self.filter_prompt.take() {
+                Some(open) => self.restore(open),
+                None => Vec::new(),
+            },
             key => {
+                let Some(open) = &mut self.filter_prompt else {
+                    return Vec::new();
+                };
                 open.prompt.edit(key, &self.filter_history);
                 let text = open.prompt.text().to_string();
-                match self.select(&text) {
-                    Ok(shown) => self.show(shown),
-                    Err(_) => Vec::new(),
+                let Ok(shown) = self.select(&text) else {
+                    return Vec::new();
+                };
+                let effects = self.show(shown);
+                if let Some(open) = &mut self.filter_prompt {
+                    open.queried |= !effects.is_empty();
                 }
+                effects
             }
         }
     }
 
-    /// Puts back the queue as it was when the prompt opened. When the
-    /// prompt changed it, the earlier rows, cursor, and marks come back at
-    /// once and the earlier query is run again.
+    /// Puts back the queue as it was when the prompt opened. When an edit
+    /// ran a query, the earlier rows, cursor, and marks come back at once
+    /// and the earlier query is run again.
     fn restore(&mut self, open: FilterPrompt) -> Vec<Effect> {
-        let query = |shown: &Option<Shown>| shown.as_ref().map(|s| s.query.clone());
-        let changed = query(&self.shown) != query(&open.shown);
         self.shown = open.shown;
-        if !changed {
+        if !open.queried {
             return Vec::new();
         }
         self.queue = open.queue;
         self.total = open.total;
-        match query(&self.shown) {
-            Some(query) => self.load(query),
-            None => Vec::new(),
-        }
+        self.reload()
     }
 
     fn perform(&mut self, repeat: Repeat) -> Vec<Effect> {
@@ -682,7 +704,7 @@ impl App {
     /// whether it belongs there. A thread belongs in the queue when a move
     /// action would take one of its emails out of the queue mailbox.
     fn apply(&mut self, entry: &Entry, side: Side) -> Placed {
-        let ascending = self.sort == Sort::Oldest;
+        let ascending = self.sort.ascending();
         let mut placed = Placed::default();
         for snapshot in &entry.threads {
             let index = self.queue.index_of(&snapshot.id);
@@ -785,10 +807,7 @@ impl App {
                 threads(n)
             );
         }
-        match self.shown.as_ref().map(|s| s.query.clone()) {
-            Some(query) => self.load(query),
-            None => Vec::new(),
-        }
+        self.reload()
     }
 }
 

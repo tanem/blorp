@@ -5,8 +5,9 @@
 //! `hasAttachment`, and `from`, `to`, `subject`, and `text` as
 //! case-insensitive substring matches, where `text` covers from, to, and
 //! subject; the operators `AND` and `NOT`; sorting by `receivedAt` in either
-//! direction; collapsing threads; `limit`; and `calculateTotal`. Every get is held to Fastmail's `maxObjectsInGet`, and
-//! the local test server holds every `Email/set` to its `maxObjectsInSet`.
+//! direction; collapsing threads; `limit`; and `calculateTotal`. Every get
+//! is held to Fastmail's `maxObjectsInGet`, and the local test server holds
+//! every `Email/set` to its `maxObjectsInSet`.
 //! `Email/set` applies `mailboxIds/<id>` and `keywords/<keyword>` patches.
 
 use std::collections::{HashMap, HashSet, VecDeque};

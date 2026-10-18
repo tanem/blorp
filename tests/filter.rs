@@ -163,6 +163,22 @@ fn esc_restores_the_previous_queue_with_its_cursor_and_marks() {
 }
 
 #[test]
+fn esc_after_typing_a_change_and_taking_it_back_restores_the_cursor_and_marks() {
+    let mut h = Harness::loaded(store());
+    h.keys("jx");
+    let mut effects = h.keys("/x");
+    effects.extend(press(&mut h, KeyCode::Backspace));
+    h.resolve(effects);
+
+    let effects = press(&mut h, KeyCode::Esc);
+    h.resolve(effects);
+
+    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
+    assert_eq!(h.cursor(), 1);
+    assert!(h.app.queue().marked(1));
+}
+
+#[test]
 fn esc_before_the_queue_changed_sends_no_query() {
     let mut h = Harness::loaded(store());
 
@@ -367,6 +383,35 @@ fn a_failed_filter_stays_in_history_and_a_repeated_one_moves_to_the_end() {
     assert_eq!(h.app.prompt(), Some("is:unread"));
     press(&mut h, KeyCode::Up);
     assert_eq!(h.app.prompt(), Some("is:unread"));
+}
+
+#[test]
+fn history_keeps_a_filter_once_whatever_spaces_surround_it() {
+    let mut h = Harness::loaded(store());
+    filter(&mut h, "is:unread");
+    filter(&mut h, "  in:travel ");
+    filter(&mut h, "in:travel");
+    h.keys("/");
+    h.ctrl('u');
+
+    press(&mut h, KeyCode::Up);
+    assert_eq!(h.app.prompt(), Some("in:travel"));
+    press(&mut h, KeyCode::Up);
+    assert_eq!(h.app.prompt(), Some("is:unread"));
+}
+
+#[test]
+fn slash_clears_an_earlier_error_from_the_status_line() {
+    let mut h = Harness::loaded(store());
+    let mut effects = h.keys("/\"");
+    effects.extend(press(&mut h, KeyCode::Enter));
+    h.resolve(effects);
+    assert_eq!(h.status(), "Unbalanced quote");
+
+    h.keys("/");
+    press(&mut h, KeyCode::Esc);
+
+    assert_eq!(h.status(), "");
 }
 
 #[test]
