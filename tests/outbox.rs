@@ -92,3 +92,60 @@ async fn the_outbox_sends_one_job_at_a_time_in_the_order_acted() {
     assert_eq!(sets(&jmap), [archive("e1"), archive("e2")]);
     state.abort();
 }
+
+/// The calls after launch's query: the outbox's gets and sets.
+fn jobs(jmap: &FakeJmap) -> Vec<Call> {
+    jmap.calls()
+        .into_iter()
+        .filter(|call| matches!(call, Call::GetEmails(_) | Call::SetEmails(_)))
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_undo_waits_for_its_action_then_gets_before_it_sets() {
+    let jmap = FakeJmap::new(inbox());
+    let app = launch(&jmap, at("2026-10-18T10:00:00Z")).await.unwrap();
+    let clock = TestClock::new(at("2026-10-18T10:00:00Z"));
+    let state = tokio::spawn({
+        let jmap = jmap.clone();
+        async move {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            run(
+                &mut terminal,
+                script("eu", Duration::from_secs(1)),
+                jmap,
+                clock,
+                app,
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    jmap.delay_next(1, Duration::from_secs(10));
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        jobs(&jmap),
+        [Call::SetEmails(archive("e1"))],
+        "the undo waits for the archive"
+    );
+
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let undo = EmailUpdate::from([(
+        "e1".to_string(),
+        [
+            ("mailboxIds/mb-archive".to_string(), Value::Null),
+            ("mailboxIds/mb-inbox".to_string(), Value::Bool(true)),
+        ]
+        .into(),
+    )]);
+    assert_eq!(
+        jobs(&jmap),
+        [
+            Call::SetEmails(archive("e1")),
+            Call::GetEmails(vec!["e1".into()]),
+            Call::SetEmails(undo),
+        ]
+    );
+    state.abort();
+}

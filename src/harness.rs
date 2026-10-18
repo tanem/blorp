@@ -8,6 +8,7 @@ use crate::app::{App, Effect, Msg, update};
 use crate::jmap::fake::Store;
 use crate::mail::Mailboxes;
 use crate::ui;
+use crate::undo::Replayed;
 
 /// The time a harness starts at.
 pub const NOW: &str = "2026-10-18T12:00:00Z";
@@ -55,8 +56,8 @@ impl Harness {
         update(&mut self.app, msg)
     }
 
-    /// Answers every query and `Email/set` in `effects` from the store, in
-    /// order, and returns the remaining effects, including those the
+    /// Answers every query, `Email/set`, and undo or redo in `effects` from
+    /// the store, in order, and returns the remaining effects, including those the
     /// answers produce.
     pub fn resolve(&mut self, effects: Vec<Effect>) -> Vec<Effect> {
         let mut rest = Vec::new();
@@ -69,6 +70,21 @@ impl Harness {
                 Effect::SetEmails { job, update } => {
                     let result = Ok(self.store.set_emails(&update));
                     rest.extend(self.send(Msg::Sent { job, result }));
+                }
+                Effect::Replay { job, replay } => {
+                    let result = self.store.get_emails(&replay.ids()).map(|(got, _)| {
+                        let (update, skipped) = replay.split(&got);
+                        let not_updated = if update.is_empty() {
+                            Vec::new()
+                        } else {
+                            self.store.set_emails(&update).not_updated
+                        };
+                        Replayed {
+                            skipped,
+                            not_updated,
+                        }
+                    });
+                    rest.extend(self.send(Msg::Replayed { job, result }));
                 }
                 other => rest.push(other),
             }
@@ -108,6 +124,11 @@ impl Harness {
 
     pub fn pending_count(&self) -> Option<usize> {
         self.app.pending_count()
+    }
+
+    /// Changes the store behind blorp's back, as the web client would.
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
     }
 
     pub fn status(&self) -> &str {

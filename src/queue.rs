@@ -31,27 +31,42 @@ impl Queue {
         self.threads.get(self.cursor)
     }
 
-    /// Removes the thread under the cursor, keeping the cursor on the same
-    /// row number so the next thread slides into place.
-    pub fn remove_current(&mut self) -> Option<Thread> {
-        if self.cursor >= self.threads.len() {
-            return None;
-        }
-        let thread = self.threads.remove(self.cursor);
-        self.cursor = self.cursor.min(self.last());
-        Some(thread)
+    /// The row of the thread with `id`.
+    pub fn index_of(&self, id: &str) -> Option<usize> {
+        self.threads.iter().position(|t| t.id == id)
     }
 
-    /// Puts `thread` back at row `index`, or last if there are fewer rows,
-    /// unless a thread with its id is already in the queue, and says
-    /// whether it did. The cursor keeps its row number.
-    pub fn restore(&mut self, index: usize, thread: Thread) -> bool {
-        if self.threads.iter().any(|t| t.id == thread.id) {
-            return false;
+    /// Removes the thread at row `index`, keeping the cursor on the thread
+    /// it was on, or on the same row number when that is the one removed,
+    /// so the next thread slides into place.
+    pub fn remove(&mut self, index: usize) -> Thread {
+        let thread = self.threads.remove(index);
+        if index < self.cursor {
+            self.cursor -= 1;
         }
-        let index = index.min(self.threads.len());
+        self.cursor = self.cursor.min(self.last());
+        thread
+    }
+
+    /// Replaces the thread at row `index`.
+    pub fn set(&mut self, index: usize, thread: Thread) {
+        self.threads[index] = thread;
+    }
+
+    /// Inserts `thread` where its matching email sorts by `receivedAt`,
+    /// oldest first when `ascending`, after any that tie. The cursor keeps
+    /// its row number.
+    pub fn insert_sorted(&mut self, thread: Thread, ascending: bool) {
+        let at = thread.hit().received_at;
+        let index = self
+            .threads
+            .iter()
+            .position(|t| {
+                let other = t.hit().received_at;
+                if ascending { other > at } else { other < at }
+            })
+            .unwrap_or(self.threads.len());
         self.threads.insert(index, thread);
-        true
     }
 
     pub fn down(&mut self, rows: usize) {

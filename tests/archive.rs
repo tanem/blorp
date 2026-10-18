@@ -1,6 +1,6 @@
 //! `e` archives the thread under the cursor, and dry run.
 
-use blorp::app::{Action, Effect, Msg};
+use blorp::app::{Action, Effect, Msg, Step};
 use blorp::harness::Harness;
 use blorp::jmap::fake::{EmailSpec, Store};
 use blorp::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, SetResult};
@@ -265,6 +265,7 @@ fn a_dry_run_archive_changes_the_queue_and_logs_instead_of_sending() {
     assert_eq!(
         effects,
         [Effect::LogDryRun {
+            step: Step::Act,
             action: Action::Archive,
             thread_ids: vec!["t1".into()],
         }]

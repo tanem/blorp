@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use crate::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, QueryResult, SetResult};
 use crate::mail::{Mailboxes, Role, Thread};
 use crate::queue::Queue;
+use crate::undo::{Change, Entry, History, Replay, Replayed, Side, State};
 
 /// The most threads a queue holds: the newest, or oldest, this many of the
 /// threads that match. The query fetches every email of each thread, so the
@@ -33,21 +34,47 @@ pub struct App {
     spinner: usize,
     status: String,
     dry_run: bool,
+    history: History,
     /// The last outbox job number given out.
     job: u64,
-    /// Actions sent and not yet answered, oldest first.
+    /// Actions, undos, and redos sent and not yet answered, oldest first.
     in_flight: Vec<InFlight>,
 }
 
-/// An action whose `Email/set` is in the outbox: what to put back if it
+/// A job in the outbox: the entry it applies, kept to put back if it
 /// fails.
 #[derive(Debug)]
 struct InFlight {
     job: u64,
-    action: Action,
-    /// The row the thread was on.
-    index: usize,
-    thread: Thread,
+    step: Step,
+    entry: Entry,
+}
+
+/// Whether a job or a dry-run log line is an action, its undo, or its redo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Act,
+    Undo,
+    Redo,
+}
+
+impl Step {
+    /// The side of the entry the step moves the emails to.
+    fn side(self) -> Side {
+        match self {
+            Step::Act | Step::Redo => Side::After,
+            Step::Undo => Side::Before,
+        }
+    }
+
+    /// The step's name before an action's, as in the dry-run log.
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Step::Act => "",
+            Step::Undo => "undo ",
+            Step::Redo => "redo ",
+        }
+    }
 }
 
 /// An action on a thread.
@@ -89,6 +116,10 @@ pub enum Msg {
     Quit,
     /// `e`: archive the thread under the cursor.
     Archive,
+    /// `u`: undo the latest action, or as many as the count.
+    Undo,
+    /// `Ctrl-r`: redo the latest undone action, or as many as the count.
+    Redo,
     /// `D`: turn dry run on or off.
     ToggleDryRun,
     /// The spinner's tick while a request is in flight.
@@ -102,6 +133,11 @@ pub enum Msg {
     Sent {
         job: u64,
         result: Result<SetResult, Error>,
+    },
+    /// An undo or redo job's result.
+    Replayed {
+        job: u64,
+        result: Result<Replayed, Error>,
     },
 }
 
@@ -119,8 +155,16 @@ pub enum Effect {
         job: u64,
         update: EmailUpdate,
     },
-    /// Log a dry-run action to the `blorp::dry_run` target at info.
+    /// Send an undo or redo through the outbox, after every job before it,
+    /// and report it back as [`Msg::Replayed`].
+    Replay {
+        job: u64,
+        replay: Replay,
+    },
+    /// Log a dry-run action, undo, or redo to the `blorp::dry_run` target at
+    /// info.
     LogDryRun {
+        step: Step,
         action: Action,
         thread_ids: Vec<String>,
     },
@@ -145,6 +189,7 @@ impl App {
             spinner: 0,
             status: String::new(),
             dry_run: false,
+            history: History::default(),
             job: 0,
             in_flight: Vec::new(),
         }
@@ -188,6 +233,11 @@ impl App {
     /// Advances on every tick while a request is in flight.
     pub fn spinner(&self) -> usize {
         self.spinner
+    }
+
+    /// How many actions `u` can undo.
+    pub fn undo_depth(&self) -> usize {
+        self.history.depth()
     }
 
     /// The status message on the bottom line.
@@ -258,73 +308,280 @@ impl App {
             self.report("Nothing to archive");
             return Vec::new();
         }
-        let index = self.queue.cursor();
-        let thread = self
-            .queue
-            .remove_current()
-            .expect("a thread is under the cursor");
-        self.total = self.total.saturating_sub(1);
-        self.act(Action::Archive, index, thread, update)
+        let thread = thread.clone();
+        self.act(Action::Archive, thread, update)
     }
 
-    /// Reports an action whose queue mutation is done, and sends it, or in
-    /// dry run logs it.
-    fn act(
-        &mut self,
-        action: Action,
-        index: usize,
-        thread: Thread,
-        update: EmailUpdate,
-    ) -> Vec<Effect> {
-        self.report(format!("{} 1 thread", action.done()));
+    /// Records an action on `thread` as an undo entry, applies it to the
+    /// queue, reports it, and sends `update`, or in dry run logs it.
+    fn act(&mut self, action: Action, thread: Thread, update: EmailUpdate) -> Vec<Effect> {
+        let changes = thread
+            .emails
+            .iter()
+            .filter_map(|email| {
+                let patch = update.get(&email.id)?;
+                let before = State::from(email);
+                Some(Change {
+                    id: email.id.clone(),
+                    after: before.patched(patch),
+                    before,
+                })
+            })
+            .collect();
+        let entry = self.history.record(action, vec![thread], changes).clone();
+        self.apply(&entry, Side::After);
+        self.report(format!(
+            "{} {}",
+            action.done(),
+            threads(entry.threads.len())
+        ));
         if self.dry_run {
-            return vec![Effect::LogDryRun {
-                action,
-                thread_ids: vec![thread.id],
-            }];
+            return vec![log_dry_run(Step::Act, &entry)];
         }
         self.job += 1;
+        let job = self.job;
         self.in_flight.push(InFlight {
-            job: self.job,
-            action,
-            index,
-            thread,
+            job,
+            step: Step::Act,
+            entry,
         });
-        vec![Effect::SetEmails {
-            job: self.job,
-            update,
-        }]
+        vec![Effect::SetEmails { job, update }]
     }
 
-    /// Handles an outbox job's result: nothing more on success, and on
-    /// failure the queue mutation is rolled back, reported, and the queue's
-    /// query re-run.
-    fn sent(&mut self, job: u64, result: Result<SetResult, Error>) -> Vec<Effect> {
-        if let Err(error) = &result
-            && let Some(fatal) = error.fatal()
-        {
-            return vec![Effect::Fatal(fatal)];
+    /// Undoes or redoes up to the pending count of entries, one job each.
+    fn replay(&mut self, step: Step) -> Vec<Effect> {
+        let count = self.take_count().unwrap_or(1);
+        let mut effects = Vec::new();
+        let mut done: Vec<(Action, usize)> = Vec::new();
+        let mut restored = Vec::new();
+        let mut went = None;
+        for _ in 0..count {
+            let entry = match step {
+                Step::Undo => self.history.undo(),
+                _ => self.history.redo(),
+            };
+            let Some(entry) = entry.cloned() else {
+                break;
+            };
+            let placed = self.apply(&entry, step.side());
+            restored.extend(placed.inside);
+            went = went.or(placed.went);
+            match done.iter_mut().find(|(action, _)| *action == entry.action) {
+                Some((_, n)) => *n += entry.threads.len(),
+                None => done.push((entry.action, entry.threads.len())),
+            }
+            if self.dry_run {
+                effects.push(log_dry_run(step, &entry));
+                continue;
+            }
+            self.job += 1;
+            effects.push(Effect::Replay {
+                job: self.job,
+                replay: entry.replay(step.side()),
+            });
+            self.in_flight.push(InFlight {
+                job: self.job,
+                step,
+                entry,
+            });
         }
+        if done.is_empty() {
+            self.report(match step {
+                Step::Undo => "Nothing to undo",
+                _ => "Nothing to redo",
+            });
+            return effects;
+        }
+        if step == Step::Undo
+            && let Some(row) = restored
+                .iter()
+                .filter_map(|id| self.queue.index_of(id))
+                .min()
+        {
+            self.queue.to_line(row + 1);
+        }
+        let parts: Vec<String> = done
+            .iter()
+            .map(|(action, n)| format!("{} {}", action.name(), threads(*n)))
+            .collect();
+        let went = went
+            .filter(|_| step == Step::Undo)
+            .and_then(|id| self.mailboxes.by_id(&id))
+            .map(|m| format!(" (in {})", m.name))
+            .unwrap_or_default();
+        self.report(format!("{}: {}{went}", replayed(step), parts.join(", ")));
+        effects
+    }
+
+    /// Puts each email `entry` changed in its `side` state in memory, and
+    /// moves each of its threads into or out of the queue when that changes
+    /// whether it belongs there. A thread belongs in the queue when a move
+    /// action would take one of its emails out of the queue mailbox.
+    fn apply(&mut self, entry: &Entry, side: Side) -> Placed {
+        let ascending = self.queue_query.as_ref().is_some_and(|q| q.ascending);
+        let mut placed = Placed::default();
+        for snapshot in &entry.threads {
+            let index = self.queue.index_of(&snapshot.id);
+            let base = match index {
+                Some(i) => self.queue.threads()[i].clone(),
+                None => with_states(snapshot, entry, side.other()),
+            };
+            let was = self.belongs(&base);
+            let thread = with_states(&base, entry, side);
+            let is = self.belongs(&thread);
+            match index {
+                Some(i) if was && !is => {
+                    self.queue.remove(i);
+                    self.total = self.total.saturating_sub(1);
+                }
+                Some(i) => self.queue.set(i, thread),
+                None if is && !was => {
+                    self.queue.insert_sorted(thread, ascending);
+                    self.total += 1;
+                }
+                None => {}
+            }
+            if self.queue.index_of(&snapshot.id).is_some() {
+                placed.inside.push(snapshot.id.clone());
+            } else if placed.went.is_none() {
+                placed.went = entry
+                    .changes
+                    .iter()
+                    .filter(|c| snapshot.emails.iter().any(|e| e.id == c.id))
+                    .find_map(|c| {
+                        let to = &c.state(side).mailbox_ids;
+                        to.difference(&c.state(side.other()).mailbox_ids)
+                            .next()
+                            .cloned()
+                    });
+            }
+        }
+        placed
+    }
+
+    fn belongs(&self, thread: &Thread) -> bool {
+        self.queue_mailbox.as_ref().is_some_and(|from| {
+            thread
+                .emails
+                .iter()
+                .any(|email| self.mailboxes.moves(email, from))
+        })
+    }
+
+    /// Handles an action's `Email/set` result.
+    fn sent(&mut self, job: u64, result: Result<SetResult, Error>) -> Vec<Effect> {
+        let failure = match result {
+            Ok(set) if set.not_updated.is_empty() => None,
+            Ok(set) => Some(not_updated(set.not_updated.len())),
+            Err(error) => match error.fatal() {
+                Some(fatal) => return vec![Effect::Fatal(fatal)],
+                None => Some(error.to_string()),
+            },
+        };
+        self.answered(job, failure, Vec::new())
+    }
+
+    /// Handles an undo or redo job's result.
+    fn replayed(&mut self, job: u64, result: Result<Replayed, Error>) -> Vec<Effect> {
+        match result {
+            Ok(r) if r.not_updated.is_empty() => self.answered(job, None, r.skipped),
+            Ok(r) => self.answered(job, Some(not_updated(r.not_updated.len())), Vec::new()),
+            Err(error) => match error.fatal() {
+                Some(fatal) => vec![Effect::Fatal(fatal)],
+                None => self.answered(job, Some(error.to_string()), Vec::new()),
+            },
+        }
+    }
+
+    /// Finishes job `job`. On failure its change to the queue is rolled
+    /// back, its entry dropped, and the failure reported; when emails were
+    /// skipped as changed elsewhere the partial result is reported. Either
+    /// way the queue's query is re-run.
+    fn answered(&mut self, job: u64, failure: Option<String>, skipped: Vec<String>) -> Vec<Effect> {
         let Some(position) = self.in_flight.iter().position(|f| f.job == job) else {
             return Vec::new();
         };
-        let flight = self.in_flight.remove(position);
-        let reason = match result {
-            Ok(set) if set.not_updated.is_empty() => return Vec::new(),
-            Ok(set) => match set.not_updated.len() {
-                1 => "1 email not updated".to_string(),
-                n => format!("{n} emails not updated"),
-            },
-            Err(error) => error.to_string(),
-        };
-        if self.queue.restore(flight.index, flight.thread) {
-            self.total += 1;
+        let InFlight { step, entry, .. } = self.in_flight.remove(position);
+        let n = entry.threads.len();
+        if let Some(reason) = failure {
+            self.apply(&entry, step.side().other());
+            self.history.forget(entry.id);
+            self.status = format!(
+                "Could not {}{} {}: {reason}",
+                step.prefix(),
+                entry.action.name(),
+                threads(n)
+            );
+        } else if skipped.is_empty() {
+            return Vec::new();
+        } else {
+            let changed = entry.threads_with(&skipped);
+            self.status = format!(
+                "{}: {} {} of {}, {changed} changed elsewhere",
+                replayed(step),
+                entry.action.name(),
+                n - changed,
+                threads(n)
+            );
         }
-        self.status = format!("Could not {} 1 thread: {reason}", flight.action.name());
         match self.queue_query.clone() {
             Some(query) => self.load(query),
             None => Vec::new(),
         }
+    }
+}
+
+/// Where [`App::apply`] left an entry's threads.
+#[derive(Default)]
+struct Placed {
+    /// The threads in the queue afterwards.
+    inside: Vec<String>,
+    /// A mailbox the first thread outside the queue went into.
+    went: Option<String>,
+}
+
+/// `thread` with each email `entry` changed in its `side` state.
+fn with_states(thread: &Thread, entry: &Entry, side: Side) -> Thread {
+    let mut thread = thread.clone();
+    for email in &mut thread.emails {
+        if let Some(change) = entry.changes.iter().find(|c| c.id == email.id) {
+            let state = change.state(side);
+            email.mailbox_ids = state.mailbox_ids.clone();
+            email.seen = state.seen;
+            email.flagged = state.flagged;
+        }
+    }
+    thread
+}
+
+fn log_dry_run(step: Step, entry: &Entry) -> Effect {
+    Effect::LogDryRun {
+        step,
+        action: entry.action,
+        thread_ids: entry.threads.iter().map(|t| t.id.clone()).collect(),
+    }
+}
+
+/// `1 thread`, `3 threads`.
+fn threads(n: usize) -> String {
+    match n {
+        1 => "1 thread".into(),
+        n => format!("{n} threads"),
+    }
+}
+
+fn not_updated(n: usize) -> String {
+    match n {
+        1 => "1 email not updated".into(),
+        n => format!("{n} emails not updated"),
+    }
+}
+
+/// The word an undo or redo message starts with.
+fn replayed(step: Step) -> &'static str {
+    match step {
+        Step::Redo => "Redone",
+        _ => "Undone",
     }
 }
 
@@ -383,17 +640,25 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         }
         Msg::Quit => vec![Effect::Quit],
         Msg::Archive => app.archive(),
+        Msg::Undo => app.replay(Step::Undo),
+        Msg::Redo => app.replay(Step::Redo),
         Msg::ToggleDryRun => {
             app.dry_run = !app.dry_run;
-            app.status = if app.dry_run {
+            let mode = if app.dry_run {
                 "Dry run on"
             } else {
                 "Dry run off"
-            }
-            .into();
+            };
+            app.status = if app.history.is_empty() {
+                mode.into()
+            } else {
+                app.history.clear();
+                format!("{mode}, undo history cleared")
+            };
             Vec::new()
         }
         Msg::Sent { job, result } => app.sent(job, result),
+        Msg::Replayed { job, result } => app.replayed(job, result),
         Msg::Tick => {
             app.spinner = app.spinner.wrapping_add(1);
             Vec::new()

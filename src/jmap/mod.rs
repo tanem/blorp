@@ -33,6 +33,12 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// the whole query.
     fn query(&self, query: &EmailQuery) -> impl Future<Output = Result<QueryResult, Error>> + Send;
 
+    /// The emails with `ids`, in `Email/get` calls of at most the session's
+    /// `maxObjectsInGet` ids, in requests of at most its
+    /// `maxCallsInRequest` calls, sent one after another. Ids not found are
+    /// left out.
+    fn get_emails(&self, ids: &[String]) -> impl Future<Output = Result<Vec<Email>, Error>> + Send;
+
     /// One `Email/set` applying `update`. An email the server did not
     /// update is listed in the result, not reported as an error.
     fn set_emails(

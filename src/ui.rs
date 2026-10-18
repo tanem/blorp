@@ -139,6 +139,12 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         None => String::new(),
     };
     let mut right = vec![Span::raw(count)];
+    if app.undo_depth() > 0 {
+        right.push(Span::styled(
+            format!("u{} ", app.undo_depth()),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
     if app.dry_run() {
         right.push(Span::styled(
             " DRY RUN ",
@@ -220,6 +226,7 @@ pub fn key_msg(key: KeyEvent) -> Option<Msg> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') => Some(Msg::Quit),
+            KeyCode::Char('r') => Some(Msg::Redo),
             _ => None,
         };
     }
@@ -230,6 +237,7 @@ pub fn key_msg(key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('G') => Some(Msg::Bottom),
         KeyCode::Char('q') => Some(Msg::Quit),
         KeyCode::Char('e') => Some(Msg::Archive),
+        KeyCode::Char('u') => Some(Msg::Undo),
         KeyCode::Char('D') => Some(Msg::ToggleDryRun),
         KeyCode::Esc | KeyCode::Enter => Some(Msg::Cancel),
         KeyCode::Char(c) => c.to_digit(10).map(|d| Msg::Digit(d as u8)),
@@ -368,6 +376,16 @@ mod tests {
         h.keys("De");
 
         insta::assert_snapshot!(render(&h, 80, 24));
+    }
+
+    #[test]
+    fn undo_depth() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("eee");
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains(" u3 "), "{screen}");
+        insta::assert_snapshot!(screen);
     }
 
     #[test]
