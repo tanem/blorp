@@ -22,7 +22,8 @@ pub const TOKEN: &str = "fake-token-1";
 pub const REJECTED: &str = "Fastmail rejected the API token. It may have been removed in \
 Settings. Run `blorp setup` to store a new one.";
 
-/// How long a wait for the screen or for blorp to exit may take.
+/// How long a wait for the screen, for blorp to exit, or for a request to
+/// reach the local server may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The bytes that switch a terminal to the alternate screen.

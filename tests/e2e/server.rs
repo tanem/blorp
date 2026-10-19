@@ -2,6 +2,7 @@
 //! from a fake store on a loopback port.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use blorp::jmap::fake::{MAX_OBJECTS_IN_GET, MAX_OBJECTS_IN_SET, Store, api};
 use blorp::jmap::{CORE, Limits, MAIL};
@@ -85,6 +86,31 @@ impl LocalJmap {
             .filter(|request| request.url.path() == "/jmap/api/")
             .map(|request| serde_json::from_slice(&request.body).expect("a JSON request"))
             .collect()
+    }
+
+    /// Waits until the API requests received hold `n` calls of `method`.
+    /// The screen shows an action before its request is sent, and `q`
+    /// does not yet wait for the outbox, so a test waits here before
+    /// quitting.
+    pub async fn wait_for_calls(&self, method: &str, n: usize) {
+        let deadline = Instant::now() + super::TIMEOUT;
+        loop {
+            let calls = self
+                .api_requests()
+                .await
+                .iter()
+                .flat_map(|request| request["methodCalls"].as_array().unwrap().clone())
+                .filter(|call| call[0] == method)
+                .count();
+            if calls >= n {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {n} {method} calls; saw {calls}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }
 
