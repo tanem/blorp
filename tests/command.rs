@@ -7,11 +7,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Four single-email Inbox threads, newest first: "One" to "Four". Travel
 /// has "Flight". Work has Receipts and Reports, Home has Receipts, and Old
-/// Stuff has a space in its name.
+/// Stuff has a space in its name. Drafts and Sent cannot be a queue.
 fn store() -> Store {
     let mut store = Store::builder()
         .role_mailbox("mb-inbox", "Inbox", "inbox")
         .role_mailbox("mb-archive", "Archive", "archive")
+        .role_mailbox("mb-drafts", "Drafts", "drafts")
+        .role_mailbox("mb-sent", "Sent", "sent")
         .mailbox("mb-travel", "Travel")
         .mailbox("mb-work", "Work")
         .child_mailbox("mb-work-receipts", "Receipts", "mb-work")
@@ -437,6 +439,9 @@ fn tab_completes_the_word_under_the_cursor() {
     for (text, completed, shown) in [
         ("sort o", "sort oldest", vec!["oldest"]),
         ("sort newest o", "sort newest o", vec![]),
+        ("filter in:d", "filter in:d", vec![]),
+        ("filter in:s", "filter in:s", vec![]),
+        ("filter -in:d", "filter -in:Drafts", vec!["-in:Drafts"]),
         ("arc", "archive", vec!["archive"]),
         ("xyz", "xyz", vec![]),
         ("Ar", "Ar", vec![]),
@@ -519,8 +524,7 @@ fn tab_completes_the_word_under_the_cursor() {
         ),
     ] {
         let (text_after, candidates) = tab(text);
-        let expected = if shown.is_empty() { text } else { completed };
-        assert_eq!(text_after, expected, "{text:?}");
+        assert_eq!(text_after, completed, "{text:?}");
         assert_eq!(candidates, shown, "{text:?}");
     }
 }

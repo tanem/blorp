@@ -5,7 +5,8 @@ use std::fmt;
 use std::ops::Range;
 
 use crate::app::Sort;
-use crate::mail::Mailboxes;
+use crate::filter::{HAS_VALUES, IS_VALUES, KEYS};
+use crate::mail::{Mailboxes, Role};
 
 /// Each command name followed by its aliases, in the order Tab offers
 /// them.
@@ -13,22 +14,17 @@ const NAMES: [&str; 10] = [
     "archive", "e", "undo", "u", "redo", "filter", "sort", "dry", "quit", "q",
 ];
 
-/// The filter token keys, in the order Tab offers them.
-const KEYS: [&str; 6] = ["in:", "from:", "to:", "subject:", "is:", "has:"];
-
-/// The `is:` values, in the order Tab offers them.
-const IS: [&str; 4] = ["unread", "read", "flagged", "list"];
-
 /// A command typed at the `:` prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// `:archive`, `:e`.
     Archive,
-    /// `:undo [count]`, `:u [count]`.
+    /// `:undo [count]`, `:u [count]`. The count given here is used in place
+    /// of one typed before the colon.
     Undo(Option<usize>),
     /// `:redo`.
     Redo,
-    /// `:filter [query]`: the query, empty for the Inbox.
+    /// `:filter [text]`: the filter text, empty for the Inbox.
     Filter(String),
     /// `:sort [newest|oldest]`: toggles with no argument.
     Sort(Option<Sort>),
@@ -133,20 +129,25 @@ pub fn complete(text: &str, cursor: usize, mailboxes: &Mailboxes) -> (Range<usiz
     let typed: String = chars[start..cursor].iter().collect();
     let name = text.split_whitespace().next().unwrap_or("");
     let candidates = match (words, name) {
-        (0, _) => matching(&NAMES, "", &typed),
-        (1, "sort") => matching(&["newest", "oldest"], "", &typed),
+        (0, _) => matching(NAMES, "", "", &typed),
+        (1, "sort") => matching(["newest", "oldest"], "", "", &typed),
         (_, "filter") => filter_token(&typed, mailboxes),
         _ => Vec::new(),
     };
     (start..end, candidates)
 }
 
-/// Each of `words` that starts with `typed`, after `before`.
-fn matching(words: &[&str], before: &str, typed: &str) -> Vec<String> {
+/// Each of `words` that starts with `typed`, between `before` and `after`.
+fn matching<'a>(
+    words: impl IntoIterator<Item = &'a str>,
+    before: &str,
+    after: &str,
+    typed: &str,
+) -> Vec<String> {
     words
-        .iter()
+        .into_iter()
         .filter(|word| word.starts_with(typed))
-        .map(|word| format!("{before}{word}"))
+        .map(|word| format!("{before}{word}{after}"))
         .collect()
 }
 
@@ -157,12 +158,14 @@ fn filter_token(typed: &str, mailboxes: &Mailboxes) -> Vec<String> {
         None => ("", typed),
     };
     let Some((key, value)) = token.split_once(':') else {
-        return matching(&KEYS, minus, token);
+        return matching(KEYS, minus, ":", token);
     };
+    let names =
+        |values: &[(&'static str, _)]| values.iter().map(|(name, _)| *name).collect::<Vec<_>>();
     match key {
-        "is" => matching(&IS, &format!("{minus}is:"), value),
-        "has" => matching(&["attachment"], &format!("{minus}has:"), value),
-        "in" => mailbox_paths(value, mailboxes)
+        "is" => matching(names(&IS_VALUES), &format!("{minus}is:"), "", value),
+        "has" => matching(names(&HAS_VALUES), &format!("{minus}has:"), "", value),
+        "in" => mailbox_paths(value, !minus.is_empty(), mailboxes)
             .into_iter()
             .map(|path| format!("{minus}in:{path}"))
             .collect(),
@@ -172,27 +175,23 @@ fn filter_token(typed: &str, mailboxes: &Mailboxes) -> Vec<String> {
 
 /// The mailbox paths `typed` can complete to, sorted: those under the
 /// parent path it names whose last segment starts with its last segment,
-/// both matched case-insensitively. A path is quoted when it holds a space
-/// or `typed` opens a quote.
-fn mailbox_paths(typed: &str, mailboxes: &Mailboxes) -> Vec<String> {
+/// both matched case-insensitively. Drafts and Sent are left out unless
+/// the token is `negated`, since they cannot be a queue. A path is quoted
+/// when it holds a space or `typed` opens a quote.
+fn mailbox_paths(typed: &str, negated: bool, mailboxes: &Mailboxes) -> Vec<String> {
     let (quote, typed) = match typed.strip_prefix('"') {
         Some(rest) => (true, rest.trim_end_matches('"')),
         None => (false, typed),
     };
     let typed = typed.to_lowercase();
-    let (parent, segment) = match typed.rsplit_once('/') {
-        Some((parent, segment)) => (Some(parent), segment),
-        None => (None, typed.as_str()),
-    };
+    let (parent, segment) = split_path(&typed);
     let mut paths: Vec<String> = mailboxes
         .iter()
+        .filter(|m| negated || !matches!(m.role, Some(Role::Drafts | Role::Sent)))
         .map(|m| mailboxes.path(m))
         .filter(|path| {
             let lower = path.to_lowercase();
-            let (p, s) = match lower.rsplit_once('/') {
-                Some((p, s)) => (Some(p), s),
-                None => (None, lower.as_str()),
-            };
+            let (p, s) = split_path(&lower);
             p == parent && s.starts_with(segment)
         })
         .collect();
@@ -207,4 +206,12 @@ fn mailbox_paths(typed: &str, mailboxes: &Mailboxes) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// A mailbox path's parent path, if it has one, and its last segment.
+fn split_path(path: &str) -> (Option<&str>, &str) {
+    match path.rsplit_once('/') {
+        Some((parent, segment)) => (Some(parent), segment),
+        None => (None, path),
+    }
 }

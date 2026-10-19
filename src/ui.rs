@@ -47,14 +47,20 @@ pub fn view(app: &App, frame: &mut Frame) {
             candidates,
         );
     }
-    let prefix = if app.mode() == Mode::Command {
-        ':'
-    } else {
-        '/'
-    };
-    match (app.prompt(), app.prompt_cursor()) {
-        (Some(text), Some(cursor)) => prompt_line(frame, bottom, prefix, text, cursor),
+    match (prompt_prefix(app.mode()), app.prompt(), app.prompt_cursor()) {
+        (Some(prefix), Some(text), Some(cursor)) => {
+            prompt_line(frame, bottom, prefix, text, cursor)
+        }
         _ => frame.render_widget(Paragraph::new(bottom_line(app)), bottom),
+    }
+}
+
+/// The character before the prompt in `mode`, when it is a prompt.
+fn prompt_prefix(mode: Mode) -> Option<char> {
+    match mode {
+        Mode::Filter => Some('/'),
+        Mode::Command => Some(':'),
+        Mode::Normal | Mode::Visual => None,
     }
 }
 
@@ -319,7 +325,7 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
-    if matches!(app.mode(), Mode::Filter | Mode::Command) {
+    if prompt_prefix(app.mode()).is_some() {
         return prompt_key(key);
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
