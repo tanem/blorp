@@ -160,11 +160,19 @@ fn filter_token(typed: &str, mailboxes: &Mailboxes) -> Vec<String> {
     let Some((key, value)) = token.split_once(':') else {
         return matching(KEYS, minus, ":", token);
     };
-    let names =
-        |values: &[(&'static str, _)]| values.iter().map(|(name, _)| *name).collect::<Vec<_>>();
     match key {
-        "is" => matching(names(&IS_VALUES), &format!("{minus}is:"), "", value),
-        "has" => matching(names(&HAS_VALUES), &format!("{minus}has:"), "", value),
+        "is" => matching(
+            IS_VALUES.iter().map(|(name, _)| *name),
+            &format!("{minus}is:"),
+            "",
+            value,
+        ),
+        "has" => matching(
+            HAS_VALUES.iter().map(|(name, _)| *name),
+            &format!("{minus}has:"),
+            "",
+            value,
+        ),
         "in" => mailbox_paths(value, !minus.is_empty(), mailboxes)
             .into_iter()
             .map(|path| format!("{minus}in:{path}"))
