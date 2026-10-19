@@ -170,6 +170,7 @@ async fn the_token_appears_nowhere_after_an_action_a_failed_request_and_a_fatal_
             filter: json!({"inMailbox": "mb-inbox"}),
             ascending: false,
             limit: 500,
+            extra_threads: Vec::new(),
         })
         .await
         .unwrap_err();

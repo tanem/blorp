@@ -103,6 +103,24 @@ impl Mailboxes {
         self.0.iter().find(|m| m.id == id)
     }
 
+    /// The snooze mailbox: the top-level `Snoozed (blorp)` with no role,
+    /// once blorp has created it.
+    pub fn snooze(&self) -> Option<&Mailbox> {
+        self.0
+            .iter()
+            .find(|m| m.parent_id.is_none() && m.role.is_none() && m.name == SNOOZE_MAILBOX)
+    }
+
+    /// Adds `mailbox`, as one just created.
+    pub fn add(&mut self, mailbox: jmap::Mailbox) {
+        self.0.extend(Mailboxes::from(vec![mailbox]).0);
+    }
+
+    /// Removes the mailbox with `id`.
+    pub fn remove(&mut self, id: &str) {
+        self.0.retain(|m| m.id != id);
+    }
+
     /// Every mailbox, in the order the server listed them.
     pub fn iter(&self) -> impl Iterator<Item = &Mailbox> {
         self.0.iter()
@@ -278,6 +296,43 @@ impl Thread {
             });
         }
         queue
+    }
+
+    /// The threads of a query result, in query order, then its extra
+    /// threads not among them, each standing for itself by its newest
+    /// email.
+    pub fn all_from_query(mut result: QueryResult) -> Vec<Thread> {
+        let extra = std::mem::take(&mut result.extra_threads);
+        let mut emails: HashMap<String, jmap::Email> = result
+            .emails
+            .iter()
+            .filter(|e| extra.iter().any(|t| t.email_ids.contains(&e.id)))
+            .map(|e| (e.id.clone(), e.clone()))
+            .collect();
+        let mut threads = Thread::from_query(result);
+        for thread in extra {
+            if threads.iter().any(|t| t.id == thread.id) {
+                continue;
+            }
+            let members: Vec<Email> = thread
+                .email_ids
+                .iter()
+                .filter_map(|id| emails.remove(id))
+                .map(Email::from)
+                .collect();
+            if let Some(newest) = members.iter().max_by_key(|e| e.received_at) {
+                let hit = newest.id.clone();
+                threads.extend(Thread::new(thread.id, members, &hit));
+            }
+        }
+        threads
+    }
+
+    /// A thread of `emails`, oldest first, standing for itself in its row
+    /// by the one with `hit_id`, or none when no email has that id.
+    pub fn new(id: String, emails: Vec<Email>, hit_id: &str) -> Option<Thread> {
+        let hit = emails.iter().position(|e| e.id == hit_id)?;
+        Some(Thread { id, emails, hit })
     }
 
     /// The email the query matched.

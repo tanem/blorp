@@ -56,6 +56,7 @@ fn inbox_query() -> EmailQuery {
         filter: json!({"inMailbox": "mb-inbox"}),
         ascending: false,
         limit: 500,
+        extra_threads: Vec::new(),
     }
 }
 

@@ -7,11 +7,13 @@ use std::ops::Range;
 use crate::app::Sort;
 use crate::filter::{HAS_VALUES, IS_VALUES, KEYS};
 use crate::mail::{Mailboxes, Role};
+use crate::snooze::{self, When};
 
 /// Each command name followed by its aliases, in the order Tab offers
 /// them.
-const NAMES: [&str; 11] = [
-    "archive", "e", "undo", "u", "redo", "filter", "sort", "refresh", "dry", "quit", "q",
+const NAMES: [&str; 13] = [
+    "archive", "e", "snooze", "z", "undo", "u", "redo", "filter", "sort", "refresh", "dry", "quit",
+    "q",
 ];
 
 /// A command typed at the `:` prompt.
@@ -19,6 +21,8 @@ const NAMES: [&str; 11] = [
 pub enum Command {
     /// `:archive`, `:e`.
     Archive,
+    /// `:snooze <time>`, `:z <time>`.
+    Snooze(When),
     /// `:undo [count]`, `:u [count]`. The count given here is used in place
     /// of one typed before the colon.
     Undo(Option<usize>),
@@ -43,6 +47,8 @@ pub enum Error {
     Unknown(String),
     /// Missing or extra arguments; holds the command's usage.
     Usage(&'static str),
+    /// Holds the snooze time as written.
+    SnoozeTime(String),
 }
 
 impl fmt::Display for Error {
@@ -50,6 +56,7 @@ impl fmt::Display for Error {
         match self {
             Error::Unknown(name) => write!(f, "Unknown command: {name}"),
             Error::Usage(usage) => write!(f, "Usage: {usage}"),
+            Error::SnoozeTime(text) => write!(f, "Snooze time not understood: \"{text}\""),
         }
     }
 }
@@ -72,6 +79,12 @@ pub fn parse(text: &str) -> Result<Option<Command>, Error> {
     let command = match name {
         "" => return Ok(None),
         "archive" | "e" => bare(Command::Archive, ":archive")?,
+        "snooze" | "z" => match rest {
+            "" => return Err(Error::Usage(":snooze <time>")),
+            time => {
+                Command::Snooze(When::parse(time).ok_or_else(|| Error::SnoozeTime(time.into()))?)
+            }
+        },
         "undo" | "u" => match rest {
             "" => Command::Undo(None),
             count => match count.parse() {
@@ -105,7 +118,8 @@ pub fn parse(text: &str) -> Result<Option<Command>, Error> {
 /// between spaces outside double quotes. The first word completes command
 /// names and aliases; the words after `filter` complete token keys, `is:`
 /// and `has:` values, and `in:` mailbox paths by segment; the word after
-/// `sort` completes `newest` and `oldest`.
+/// `sort` completes `newest` and `oldest`; the word after `snooze` or `z`
+/// completes the preset names and weekdays.
 pub fn complete(text: &str, cursor: usize, mailboxes: &Mailboxes) -> (Range<usize>, Vec<String>) {
     let chars: Vec<char> = text.chars().collect();
     let cursor = cursor.min(chars.len());
@@ -134,6 +148,7 @@ pub fn complete(text: &str, cursor: usize, mailboxes: &Mailboxes) -> (Range<usiz
     let candidates = match (words, name) {
         (0, _) => matching(NAMES, "", "", &typed),
         (1, "sort") => matching(["newest", "oldest"], "", "", &typed),
+        (1, "snooze" | "z") => matching(snooze::completions(), "", "", &typed.to_lowercase()),
         (_, "filter") => filter_token(&typed, mailboxes),
         _ => Vec::new(),
     };

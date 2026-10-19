@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use crossterm::event::EventStream;
 use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use secrecy::SecretString;
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -22,6 +23,7 @@ pub mod private_file;
 pub mod prompt;
 pub mod queue;
 pub mod run;
+pub mod snooze;
 pub mod sync;
 pub mod ui;
 pub mod undo;
@@ -124,14 +126,28 @@ fn tui(dry_run: bool) -> Result<(), Failure> {
     let token = cli::find_token(env_token(), &*store)?;
     let session_url = session_url(&overrides);
     let _log = start_log()?;
+    let schedule_file =
+        config::state_dir(|name| env::var_os(name)).map(|dir| dir.join(snooze::FILE_NAME));
     runtime()?.block_on(async {
         let (jmap, _session) = match token {
             Some(token) => HttpJmap::connect(&session_url, token).await?,
             None => cli::setup(&*store, &mut Stdin, &mut io::stdout(), &session_url).await?,
         };
-        let app = run::launch(&jmap, Timestamp::now())
+        let mut app = run::launch(&jmap, Timestamp::now())
             .await?
-            .with_dry_run(dry_run);
+            .with_time_zone(TimeZone::system());
+        if let Some(file) = &schedule_file {
+            let loaded = snooze::load(file, Timestamp::now())
+                .map_err(|e| format!("could not read {}: {e}", file.display()))?;
+            app = app.with_schedule(file.clone(), loaded.schedule);
+            if let Some(broken) = loaded.broken {
+                app = app.with_status(format!(
+                    "The snooze schedule did not parse; it was moved to {}",
+                    broken.display()
+                ));
+            }
+        }
+        let app = app.with_dry_run(dry_run);
         if dry_run {
             println!("Dry run: actions are logged, not sent to Fastmail.");
         }

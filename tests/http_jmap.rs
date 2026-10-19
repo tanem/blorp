@@ -201,6 +201,7 @@ async fn inbox_query(jmap: &HttpJmap) -> Result<QueryResult, Error> {
         filter: json!({"inMailbox": "mb1"}),
         ascending: false,
         limit: 500,
+        extra_threads: Vec::new(),
     })
     .await
 }
@@ -515,6 +516,7 @@ async fn the_first_failing_call_in_a_chain_is_reported() {
             filter: json!({"inMailbox": "mb1"}),
             ascending: false,
             limit: 500,
+            extra_threads: Vec::new(),
         })
         .await;
 
@@ -611,6 +613,7 @@ async fn reconcile_puts_mailbox_get_in_the_query_s_first_request() {
             filter: json!({"inMailbox": "mb1"}),
             ascending: false,
             limit: 500,
+            extra_threads: Vec::new(),
         })
         .await
         .unwrap();

@@ -147,6 +147,7 @@ fn method(
         }
         "Email/query" => email_query(store, account_id, args),
         "Email/set" => email_set(store, account_id, args),
+        "Mailbox/set" => mailbox_set(store, account_id, args),
         _ => Err("unknownMethod".into()),
     }
 }
@@ -246,6 +247,51 @@ fn email_set(
     }))
 }
 
+/// `Mailbox/set` with `create` only, of top-level mailboxes with a name.
+fn mailbox_set(
+    store: &mut Store,
+    account_id: &str,
+    args: &Map<String, Value>,
+) -> Result<Value, String> {
+    for unsupported in ["update", "destroy", "ifInState"] {
+        if !args.get(unsupported).is_none_or(Value::is_null) {
+            return Err("invalidArguments".into());
+        }
+    }
+    let create = match args.get("create") {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(create)) => create.clone(),
+        Some(_) => return Err("invalidArguments".into()),
+    };
+    let mut created = Map::new();
+    let mut not_created = Map::new();
+    for (creation_id, mailbox) in create {
+        let name = mailbox["name"].as_str();
+        let top_level = mailbox.get("parentId").is_none_or(Value::is_null);
+        match name
+            .filter(|_| top_level)
+            .map(|name| store.create_mailbox(name))
+        {
+            Some(Ok(m)) => {
+                created.insert(creation_id, json!({"id": m.id}));
+            }
+            Some(Err(error)) => {
+                not_created.insert(creation_id, json!({"type": kind(error)}));
+            }
+            None => {
+                not_created.insert(creation_id, json!({"type": "invalidProperties"}));
+            }
+        }
+    }
+    Ok(json!({
+        "accountId": account_id,
+        "oldState": "0",
+        "newState": "0",
+        "created": created,
+        "notCreated": not_created,
+    }))
+}
+
 /// `Email/query`, sorted by `receivedAt` with threads collapsed, which is
 /// the only form the store evaluates.
 fn email_query(
@@ -275,6 +321,7 @@ fn email_query(
         filter: args.get("filter").cloned().unwrap_or(json!({})),
         ascending,
         limit,
+        extra_threads: Vec::new(),
     };
     let (ids, total) = store.query_ids(&query).map_err(kind)?;
     let mut response = json!({

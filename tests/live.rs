@@ -47,6 +47,7 @@ async fn session_mailboxes_and_an_inbox_query_have_the_expected_shapes() {
             filter: json!({"inMailbox": inbox.id}),
             ascending: false,
             limit: 500,
+            extra_threads: Vec::new(),
         })
         .await
         .expect("the two-stage Inbox query");

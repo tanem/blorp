@@ -106,6 +106,7 @@ fn the_queue_follows_the_filter_as_it_is_typed() {
             filter: json!({"inMailbox": "mb-travel"}),
             ascending: false,
             limit: 500,
+            extra_threads: Vec::new(),
         })
     );
 }
@@ -153,6 +154,7 @@ fn esc_restores_the_previous_queue_with_its_cursor_and_marks() {
             filter: json!({"inMailbox": "mb-inbox"}),
             ascending: false,
             limit: 500,
+            extra_threads: Vec::new(),
         }],
         "the previous queue is fetched again"
     );
@@ -451,6 +453,7 @@ fn t_toggles_newest_and_oldest_first() {
             filter: json!({"inMailbox": "mb-inbox"}),
             ascending: true,
             limit: 500,
+            extra_threads: Vec::new(),
         }]
     );
     h.resolve(effects);
