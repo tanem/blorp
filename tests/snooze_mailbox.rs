@@ -342,6 +342,7 @@ fn z_in_the_snooze_mailbox_reschedules_and_moves_nothing() {
         Some(&entry("e1", "mb-inbox", "2026-10-30T08:00:00Z"))
     );
     assert_eq!(h.subjects(), ["Flights", "Re: Hotel", "Renewal"]);
+    assert_eq!(h.cursor(), 0, "the next thread slides into place");
     assert_eq!(h.app.undo_depth(), 1);
 }
 

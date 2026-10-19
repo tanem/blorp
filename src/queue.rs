@@ -130,14 +130,10 @@ impl Queue {
         self.threads.insert(index, thread);
     }
 
-    /// Puts the rows in the order `sort` leaves them. The cursor stays on
-    /// its thread.
+    /// Puts the rows in the order `sort` leaves them. The cursor keeps its
+    /// row number.
     pub fn resort(&mut self, sort: impl FnOnce(&mut [Thread])) {
-        let current = self.current().map(|t| t.id.clone());
         sort(&mut self.threads);
-        if let Some(id) = current {
-            self.to_thread(&id);
-        }
     }
 
     /// Moves to the thread with `id`, if it is in the queue.
