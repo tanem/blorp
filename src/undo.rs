@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::app::Action;
 use crate::jmap::{self, EmailPatch, EmailUpdate};
 use crate::mail::{self, Thread};
+use crate::snooze;
 
 /// An email's mailboxes and the two keywords actions change.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,14 +117,34 @@ impl Change {
     }
 }
 
+/// What an action did to one thread's snooze schedule entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleChange {
+    pub thread_id: String,
+    pub before: Option<snooze::Entry>,
+    pub after: Option<snooze::Entry>,
+}
+
+impl ScheduleChange {
+    /// The thread's entry on `side` of the action.
+    pub fn state(&self, side: Side) -> Option<&snooze::Entry> {
+        match side {
+            Side::Before => self.before.as_ref(),
+            Side::After => self.after.as_ref(),
+        }
+    }
+}
+
 /// One action on the history: the threads it touched as they were in
-/// memory before it, and what it did to each email it changed.
+/// memory before it, what it did to each email it changed, and what it did
+/// to their snooze schedule entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub id: u64,
     pub action: Action,
     pub threads: Vec<Thread>,
     pub changes: Vec<Change>,
+    pub schedule: Vec<ScheduleChange>,
 }
 
 impl Entry {
@@ -197,7 +218,13 @@ pub struct History {
 
 impl History {
     /// Pushes a new action and discards the redo entries.
-    pub fn record(&mut self, action: Action, threads: Vec<Thread>, changes: Vec<Change>) -> &Entry {
+    pub fn record(
+        &mut self,
+        action: Action,
+        threads: Vec<Thread>,
+        changes: Vec<Change>,
+        schedule: Vec<ScheduleChange>,
+    ) -> &Entry {
         self.last_id += 1;
         self.undone.clear();
         self.done.push(Entry {
@@ -205,6 +232,7 @@ impl History {
             action,
             threads,
             changes,
+            schedule,
         });
         self.done.last().expect("just pushed")
     }

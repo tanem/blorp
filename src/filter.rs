@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde_json::{Value, json};
 
-use crate::mail::{Mailboxes, NameError, QueueMailbox, Role, SNOOZE_MAILBOX};
+use crate::mail::{Mailboxes, NameError, QueueMailbox, Role};
 
 /// A parsed filter: terms that must all match.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +106,9 @@ pub struct Resolved {
     pub name: String,
     /// The `filter` argument of the `Email/query`.
     pub condition: Value,
+    /// Whether the filter selects the whole queue mailbox, with no token
+    /// but `in:`.
+    pub plain: bool,
 }
 
 impl Filter {
@@ -133,13 +136,14 @@ impl Filter {
                     json!({"inMailbox": mailbox.id})
                 }
                 Condition::InAny => {
+                    let snooze = mailboxes.snooze().map(|m| &m.id);
                     let excluded = mailboxes
                         .iter()
                         .filter(|m| {
                             matches!(
                                 m.role,
                                 Some(Role::Trash | Role::Junk | Role::Drafts | Role::Sent)
-                            ) || (m.parent_id.is_none() && m.name == SNOOZE_MAILBOX)
+                            ) || Some(&m.id) == snooze
                         })
                         .map(|m| m.id.clone())
                         .collect();
@@ -174,6 +178,7 @@ impl Filter {
             QueueMailbox::One(id) => json!({"inMailbox": id}),
             QueueMailbox::Any(excluded) => json!({"inMailboxOtherThan": excluded}),
         };
+        let plain = conditions.is_empty();
         conditions.insert(0, first);
         let condition = if conditions.len() == 1 {
             conditions.remove(0)
@@ -184,6 +189,7 @@ impl Filter {
             mailbox,
             name,
             condition,
+            plain,
         })
     }
 }
@@ -513,12 +519,16 @@ mod tests {
             ),
         ] {
             let resolved = parse(filter).unwrap().resolve(&mailboxes());
+            // A filter of its mailbox alone queries that mailbox and nothing
+            // else.
+            let plain = condition.get("operator").is_none();
             assert_eq!(
                 resolved,
                 Ok(Resolved {
                     mailbox,
                     name: name.into(),
                     condition,
+                    plain,
                 }),
                 "{filter:?}"
             );

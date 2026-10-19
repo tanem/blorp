@@ -3,6 +3,8 @@
 use std::collections::BTreeSet;
 use std::ops::RangeInclusive;
 
+use jiff::Timestamp;
+
 use crate::mail::Thread;
 
 /// The threads of the current filter, in order, the cursor row, the marked
@@ -108,16 +110,20 @@ impl Queue {
         self.threads[index] = thread;
     }
 
-    /// Inserts `thread` where its matching email sorts by `receivedAt`,
-    /// oldest first when `ascending`, after any that tie. The cursor keeps
-    /// its row number.
-    pub fn insert_sorted(&mut self, thread: Thread, ascending: bool) {
-        let at = thread.hit().received_at;
+    /// Inserts `thread` where it sorts by `key`, lowest first when
+    /// `ascending`, after any that tie. The cursor keeps its row number.
+    pub fn insert_sorted(
+        &mut self,
+        thread: Thread,
+        ascending: bool,
+        key: impl Fn(&Thread) -> Timestamp,
+    ) {
+        let at = key(&thread);
         let index = self
             .threads
             .iter()
             .position(|t| {
-                let other = t.hit().received_at;
+                let other = key(t);
                 if ascending { other > at } else { other < at }
             })
             .unwrap_or(self.threads.len());

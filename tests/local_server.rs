@@ -40,6 +40,7 @@ fn inbox(limit: usize) -> EmailQuery {
         filter: json!({"inMailbox": "mb-inbox"}),
         ascending: false,
         limit,
+        extra_threads: Vec::new(),
     }
 }
 
@@ -363,5 +364,56 @@ async fn set_chunks_beyond_max_calls_in_request_go_in_further_requests() {
             vec!["Email/set", "Email/set", "Email/set"],
             vec!["Email/set"],
         ]
+    );
+}
+
+#[tokio::test]
+async fn a_query_fetches_its_extra_threads_by_id_with_their_emails() {
+    let server = LocalJmap::start(store(), TOKEN).await;
+    let jmap = connect(&server, TOKEN).await.unwrap();
+
+    let result = jmap
+        .query(&EmailQuery {
+            extra_threads: vec!["t3".into(), "t1".into(), "t-gone".into()],
+            ..inbox(1)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.ids, ["e1"]);
+    let extra: Vec<&str> = result.extra_threads.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(extra, ["t3", "t1"]);
+    let emails: Vec<&str> = result.emails.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(emails, ["e1", "e3"]);
+}
+
+#[tokio::test]
+async fn create_mailbox_makes_a_top_level_mailbox_with_no_role() {
+    let server = LocalJmap::start(store(), TOKEN).await;
+    let jmap = connect(&server, TOKEN).await.unwrap();
+
+    let created = jmap.create_mailbox("Snoozed (blorp)").await.unwrap();
+
+    assert_eq!(created.name, "Snoozed (blorp)");
+    assert_eq!(created.parent_id, None);
+    assert_eq!(created.role, None);
+    let mailboxes = jmap.get_mailboxes().await.unwrap();
+    assert!(mailboxes.contains(&created), "{mailboxes:?}");
+}
+
+#[tokio::test]
+async fn a_refused_mailbox_is_reported_with_its_set_error() {
+    let server = LocalJmap::start(store(), TOKEN).await;
+    let jmap = connect(&server, TOKEN).await.unwrap();
+    jmap.create_mailbox("Snoozed (blorp)").await.unwrap();
+
+    let refused = jmap.create_mailbox("Snoozed (blorp)").await;
+
+    assert_eq!(
+        refused,
+        Err(Error::Method {
+            method: "Mailbox/set".into(),
+            kind: "invalidProperties".into(),
+        })
     );
 }

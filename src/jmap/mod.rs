@@ -28,7 +28,8 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// The threads matching `query` and every email of them, in two stages
     /// that are not atomic. First, one request chains `Email/query` with
     /// `collapseThreads`, `Email/get` for the hits' threads, and `Thread/get`
-    /// by back-reference. Then the threads' emails are fetched with
+    /// by back-reference, then a `Thread/get` of the query's extra threads
+    /// when it names any. Then the threads' emails are fetched with
     /// `Email/get` calls of at most the session's `maxObjectsInGet` ids, in
     /// requests of at most its `maxCallsInRequest` calls, sent one after
     /// another; none is sent for an empty queue. An email gone
@@ -54,6 +55,11 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// `maxCallsInRequest` calls, sent one after another. Ids not found are
     /// left out.
     fn get_emails(&self, ids: &[String]) -> impl Future<Output = Result<Vec<Email>, Error>> + Send;
+
+    /// A top-level mailbox named `name` with no role, created with
+    /// `Mailbox/set`. A refusal is a [`Error::Method`] with the `SetError`
+    /// type as its kind.
+    fn create_mailbox(&self, name: &str) -> impl Future<Output = Result<Mailbox, Error>> + Send;
 
     /// `update` applied in `Email/set` calls of at most the session's
     /// `maxObjectsInSet` emails, in requests of at most its
@@ -91,6 +97,9 @@ pub struct EmailQuery {
     pub ascending: bool,
     /// The most threads to return.
     pub limit: usize,
+    /// Threads fetched by id beside the query's, whatever they match, with
+    /// every email of them.
+    pub extra_threads: Vec<String>,
 }
 
 /// The result of a [`Jmap::query`].
@@ -102,6 +111,8 @@ pub struct QueryResult {
     pub total: usize,
     /// The threads of those emails.
     pub threads: Vec<Thread>,
+    /// The threads of [`EmailQuery::extra_threads`] that exist.
+    pub extra_threads: Vec<Thread>,
     /// Every email of those threads.
     pub emails: Vec<Email>,
 }

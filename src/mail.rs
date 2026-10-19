@@ -103,6 +103,24 @@ impl Mailboxes {
         self.0.iter().find(|m| m.id == id)
     }
 
+    /// The snooze mailbox: the top-level `Snoozed (blorp)` with no role,
+    /// once blorp has created it.
+    pub fn snooze(&self) -> Option<&Mailbox> {
+        self.0
+            .iter()
+            .find(|m| m.parent_id.is_none() && m.role.is_none() && m.name == SNOOZE_MAILBOX)
+    }
+
+    /// Adds `mailbox`, as one just created.
+    pub fn add(&mut self, mailbox: jmap::Mailbox) {
+        self.0.extend(Mailboxes::from(vec![mailbox]).0);
+    }
+
+    /// Removes the mailbox with `id`.
+    pub fn remove(&mut self, id: &str) {
+        self.0.retain(|m| m.id != id);
+    }
+
     /// Every mailbox, in the order the server listed them.
     pub fn iter(&self) -> impl Iterator<Item = &Mailbox> {
         self.0.iter()
@@ -278,6 +296,13 @@ impl Thread {
             });
         }
         queue
+    }
+
+    /// A thread of `emails`, oldest first, standing for itself in its row
+    /// by the one with `hit_id`, or none when no email has that id.
+    pub fn new(id: String, emails: Vec<Email>, hit_id: &str) -> Option<Thread> {
+        let hit = emails.iter().position(|e| e.id == hit_id)?;
+        Some(Thread { id, emails, hit })
     }
 
     /// The email the query matched.

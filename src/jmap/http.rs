@@ -191,6 +191,13 @@ impl HttpJmap {
                 "2",
             ),
         ]);
+        if !query.extra_threads.is_empty() {
+            calls.push(call(
+                "Thread/get",
+                json!({"accountId": account, "ids": query.extra_threads}),
+                "3",
+            ));
+        }
         let responses = self.send(calls).await?;
         let mailboxes = if mailboxes {
             let got: GetResponse<Mailbox> = response_of(&responses, "Mailbox/get", "m")?;
@@ -201,12 +208,24 @@ impl HttpJmap {
         let ids: QueryResponse = response_of(&responses, "Email/query", "0")?;
         let hits: GetResponse<Hit> = response_of(&responses, "Email/get", "1")?;
         let threads: GetResponse<Thread> = response_of(&responses, "Thread/get", "2")?;
-        let email_ids = member_ids(&ids.ids, &hits.list, &threads.list);
+        let extra_threads = if query.extra_threads.is_empty() {
+            Vec::new()
+        } else {
+            let got: GetResponse<Thread> = response_of(&responses, "Thread/get", "3")?;
+            got.list
+        };
+        let mut email_ids = member_ids(&ids.ids, &hits.list, &threads.list);
+        for thread in &extra_threads {
+            if !threads.list.iter().any(|t| t.id == thread.id) {
+                email_ids.extend(thread.email_ids.iter().cloned());
+            }
+        }
         let emails = self.get_emails(&email_ids).await?;
         let result = QueryResult {
             total: ids.total.unwrap_or(ids.ids.len()),
             ids: ids.ids,
             threads: threads.list,
+            extra_threads,
             emails,
         };
         Ok(Reconciled { mailboxes, result })
@@ -266,6 +285,38 @@ impl Jmap for HttpJmap {
             })
             .await?;
         Ok(responses.into_iter().flat_map(|got| got.list).collect())
+    }
+
+    async fn create_mailbox(&self, name: &str) -> Result<Mailbox, Error> {
+        let responses = self
+            .send(vec![call(
+                "Mailbox/set",
+                json!({
+                    "accountId": self.account_id,
+                    "create": {"new": {"name": name, "parentId": null}}
+                }),
+                "0",
+            )])
+            .await?;
+        let set: MailboxSetResponse = response_of(&responses, "Mailbox/set", "0")?;
+        if let Some(created) = set.created.as_ref().and_then(|c| c.get("new")) {
+            return Ok(Mailbox {
+                id: created.id.clone(),
+                name: name.into(),
+                parent_id: None,
+                role: None,
+            });
+        }
+        let kind = set
+            .not_created
+            .as_ref()
+            .and_then(|n| n.get("new"))
+            .and_then(|e| e["type"].as_str())
+            .ok_or_else(|| Error::Parse("Mailbox/set neither created nor refused it".into()))?;
+        Err(Error::Method {
+            method: "Mailbox/set".into(),
+            kind: kind.into(),
+        })
     }
 
     async fn set_emails(&self, update: &EmailUpdate) -> Result<SetResult, Error> {
@@ -329,6 +380,18 @@ struct GetResponse<T> {
 #[serde(rename_all = "camelCase")]
 struct SetResponse {
     not_updated: Option<BTreeMap<String, Value>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MailboxSetResponse {
+    created: Option<BTreeMap<String, Created>>,
+    not_created: Option<BTreeMap<String, Value>>,
+}
+
+#[derive(Deserialize)]
+struct Created {
+    id: String,
 }
 
 #[derive(Deserialize)]

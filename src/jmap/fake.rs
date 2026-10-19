@@ -8,7 +8,8 @@
 //! direction; collapsing threads; `limit`; and `calculateTotal`. Every get
 //! is held to Fastmail's `maxObjectsInGet`, and the local test server holds
 //! every `Email/set` to its `maxObjectsInSet`.
-//! `Email/set` applies `mailboxIds/<id>` and `keywords/<keyword>` patches.
+//! `Email/set` applies `mailboxIds/<id>` and `keywords/<keyword>` patches,
+//! and `Mailbox/set` creates top-level mailboxes.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -31,6 +32,7 @@ pub enum Call {
     Reconcile(EmailQuery),
     GetEmails(Vec<String>),
     SetEmails(EmailUpdate),
+    CreateMailbox(String),
 }
 
 /// A fake JMAP server: a store, a call log, failure injection, and push
@@ -202,6 +204,13 @@ impl Jmap for FakeJmap {
         })
         .await
     }
+
+    async fn create_mailbox(&self, name: &str) -> Result<Mailbox, Error> {
+        self.call(Call::CreateMailbox(name.into()), |store| {
+            store.create_mailbox(name)
+        })
+        .await
+    }
 }
 
 /// Synthetic mailboxes and emails.
@@ -233,6 +242,34 @@ impl Store {
         });
     }
 
+    /// `Mailbox/set` creating a top-level mailbox named `name` with no
+    /// role, refused with `invalidProperties` when one has that name.
+    pub fn create_mailbox(&mut self, name: &str) -> Result<Mailbox, Error> {
+        if self
+            .mailboxes
+            .iter()
+            .any(|m| m.parent_id.is_none() && m.name == name)
+        {
+            return Err(Error::Method {
+                method: "Mailbox/set".into(),
+                kind: "invalidProperties".into(),
+            });
+        }
+        let mailbox = Mailbox {
+            id: format!("mb-created-{}", self.mailboxes.len() + 1),
+            name: name.into(),
+            parent_id: None,
+            role: None,
+        };
+        self.mailboxes.push(mailbox.clone());
+        Ok(mailbox)
+    }
+
+    /// Deletes the mailbox with `id`, as the web client would.
+    pub fn remove_mailbox(&mut self, id: &str) {
+        self.mailboxes.retain(|m| m.id != id);
+    }
+
     /// Renames the mailbox with `id`, as the web client would.
     pub fn rename_mailbox(&mut self, id: &str, name: &str) {
         if let Some(mailbox) = self.mailboxes.iter_mut().find(|m| m.id == id) {
@@ -248,8 +285,14 @@ impl Store {
         let (hits, _) = self.get_emails(&ids)?;
         let thread_ids: Vec<String> = hits.into_iter().map(|e| e.thread_id).collect();
         let (threads, _) = self.get_threads(&thread_ids)?;
+        let (extra_threads, _) = self.get_threads(&query.extra_threads)?;
         let email_ids: Vec<String> = threads
             .iter()
+            .chain(
+                extra_threads
+                    .iter()
+                    .filter(|e| !threads.iter().any(|t| t.id == e.id)),
+            )
             .flat_map(|t| t.email_ids.iter().cloned())
             .collect();
         let mut emails = Vec::new();
@@ -260,6 +303,7 @@ impl Store {
             ids,
             total,
             threads,
+            extra_threads,
             emails,
         })
     }
@@ -634,6 +678,7 @@ mod tests {
             filter: json!({"inMailbox": "mb-inbox"}),
             ascending: false,
             limit,
+            extra_threads: Vec::new(),
         }
     }
 
@@ -740,6 +785,7 @@ mod tests {
                 filter: filter.clone(),
                 ascending: false,
                 limit: 500,
+                extra_threads: Vec::new(),
             };
             let (got, total) = store.query_ids(&query).unwrap();
             assert_eq!(got, ids, "{filter}");
@@ -759,6 +805,7 @@ mod tests {
                 filter: filter.clone(),
                 ascending: false,
                 limit: 500,
+                extra_threads: Vec::new(),
             };
             assert_eq!(
                 store.query_ids(&query),

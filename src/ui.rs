@@ -3,13 +3,13 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use jiff::Timestamp;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Mode, Msg};
+use crate::app::{App, Mode, Msg, PickerKey, SnoozeChoices};
 use crate::mail::Thread;
 use crate::prompt::Key;
 
@@ -53,6 +53,52 @@ pub fn view(app: &App, frame: &mut Frame) {
         }
         _ => frame.render_widget(Paragraph::new(bottom_line(app)), bottom),
     }
+    if let Some(choices) = app.snooze_picker() {
+        snooze_picker(frame, &choices);
+    }
+}
+
+const PICKER_WIDTH: u16 = 42;
+
+/// The snooze picker, centred over the queue: each preset's letter, label,
+/// and time, with the one Enter chooses reversed.
+fn snooze_picker(frame: &mut Frame, choices: &SnoozeChoices) {
+    let lines: Vec<Line> = choices
+        .presets
+        .iter()
+        .enumerate()
+        .map(|(i, (preset, when))| {
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" {}  ", preset.key()),
+                    Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!("{:<18}", preset.label())),
+                Span::styled(when.clone(), Style::new().fg(Color::DarkGray)),
+            ]);
+            if i == choices.index {
+                line.style(Style::new().add_modifier(Modifier::REVERSED))
+            } else {
+                line
+            }
+        })
+        .collect();
+    let title = match choices.threads {
+        1 => " Snooze ".to_string(),
+        n => format!(" Snooze {n} threads "),
+    };
+    let height = u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2;
+    let [area] = Layout::horizontal([Constraint::Length(PICKER_WIDTH)])
+        .flex(Flex::Center)
+        .areas(frame.area());
+    let [area] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(title)),
+        area,
+    );
 }
 
 /// The character before the prompt in `mode`, when it is a prompt.
@@ -328,6 +374,9 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
     if prompt_prefix(app.mode()).is_some() {
         return prompt_key(key);
     }
+    if app.snooze_picker().is_some() {
+        return picker_key(key);
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') => Some(Msg::Quit),
@@ -342,6 +391,7 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('G') => Some(Msg::Bottom),
         KeyCode::Char('q') => Some(Msg::Quit),
         KeyCode::Char('e') => Some(Msg::Archive),
+        KeyCode::Char('z') => Some(Msg::OpenSnooze),
         KeyCode::Char('u') => Some(Msg::Undo),
         KeyCode::Char('x') => Some(Msg::Mark),
         KeyCode::Char('X') => Some(Msg::ClearMarks),
@@ -356,6 +406,24 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char(c) => c.to_digit(10).map(|d| Msg::Digit(d as u8)),
         _ => None,
     }
+}
+
+/// The message a key press at the snooze picker stands for: `j`, `k`, and
+/// the arrows move, Enter chooses, Esc cancels, and any other character
+/// may be a preset's letter, with Ctrl-c still quitting.
+fn picker_key(key: KeyEvent) -> Option<Msg> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return (key.code == KeyCode::Char('c')).then_some(Msg::Quit);
+    }
+    let key = match key.code {
+        KeyCode::Char('j') | KeyCode::Down => PickerKey::Down,
+        KeyCode::Char('k') | KeyCode::Up => PickerKey::Up,
+        KeyCode::Enter => PickerKey::Choose,
+        KeyCode::Esc => PickerKey::Cancel,
+        KeyCode::Char(c) => PickerKey::Char(c),
+        _ => return None,
+    };
+    Some(Msg::Picker(key))
 }
 
 /// The message a key press at a prompt stands for: the editing keys, Enter,
@@ -645,6 +713,29 @@ mod tests {
         let h = Harness::loaded(store.build());
 
         insta::assert_snapshot!(render(&h, 80, 24));
+    }
+
+    #[test]
+    fn snooze_picker_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("jz");
+
+        let screen = render(&h, 80, 24);
+        assert!(
+            screen.contains("l  Later today       today 15:00"),
+            "{screen}"
+        );
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn snooze_picker_on_a_selection_120x40() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("Vjjzj");
+
+        let screen = render(&h, 120, 40);
+        assert!(screen.contains(" Snooze 3 threads "), "{screen}");
+        insta::assert_snapshot!(screen);
     }
 
     #[test]

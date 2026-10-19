@@ -87,6 +87,7 @@ async fn launch_loads_the_inbox_and_the_keys_move_through_it() {
                 filter: json!({"inMailbox": "mb-inbox"}),
                 ascending: false,
                 limit: 500,
+                extra_threads: Vec::new(),
             }),
         ]
     );

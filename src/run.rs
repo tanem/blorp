@@ -20,7 +20,7 @@ use crate::app::{App, Effect, Msg, update};
 use crate::jmap::{EmailUpdate, Error, Fatal, Jmap};
 use crate::mail::Mailboxes;
 use crate::undo::{Replay, Replayed};
-use crate::{sync, ui};
+use crate::{snooze, sync, ui};
 
 const SPINNER_TICK: Duration = Duration::from_millis(250);
 
@@ -156,11 +156,13 @@ enum Job {
     Set(EmailUpdate),
     /// An undo.
     Replay(Replay),
+    /// Creating a mailbox with this name.
+    CreateMailbox(String),
 }
 
 /// Starts the outbox task: it runs each job once the job before it has
-/// been answered, reports it back as [`Msg::Sent`] or [`Msg::Replayed`],
-/// and stops when the sender is dropped.
+/// been answered, reports it back as [`Msg::Sent`], [`Msg::Replayed`], or
+/// [`Msg::MailboxCreated`], and stops when the sender is dropped.
 fn outbox<J: Jmap>(jmap: J, tx: UnboundedSender<Msg>) -> UnboundedSender<(u64, Job)> {
     let (outbox, mut jobs) = unbounded_channel::<(u64, Job)>();
     tokio::spawn(async move {
@@ -173,6 +175,10 @@ fn outbox<J: Jmap>(jmap: J, tx: UnboundedSender<Msg>) -> UnboundedSender<(u64, J
                 Job::Replay(replay) => Msg::Replayed {
                     job,
                     result: replay_emails(&jmap, &replay).await,
+                },
+                Job::CreateMailbox(name) => Msg::MailboxCreated {
+                    job,
+                    result: jmap.create_mailbox(&name).await,
                 },
             };
             if tx.send(msg).is_err() {
@@ -210,11 +216,15 @@ struct Executor<J> {
 impl<J: Jmap> Executor<J> {
     /// Sets the time, runs `update`, and carries out its effects. A queue
     /// query or reconcile aborts the one before it, if that is still
-    /// running.
+    /// running. A schedule write that fails cancels the outbox job it was
+    /// written for.
     fn dispatch(&mut self, app: &mut App, clock: &impl Clock, msg: Msg) -> ControlFlow<Exit> {
         app.now = clock.now();
+        let mut cancelled = None;
         for effect in update(app, msg) {
             match effect {
+                Effect::SetEmails { job, .. } | Effect::Replay { job, .. }
+                    if cancelled == Some(job) => {}
                 Effect::Query { generation, query } => {
                     let jmap = self.jmap.clone();
                     self.supersede(async move {
@@ -234,6 +244,29 @@ impl<J: Jmap> Executor<J> {
                 }
                 Effect::Replay { job, replay } => {
                     let _ = self.outbox.send((job, Job::Replay(replay)));
+                }
+                Effect::CreateMailbox { job, name } => {
+                    let _ = self.outbox.send((job, Job::CreateMailbox(name)));
+                }
+                Effect::QuerySnoozed { query } => {
+                    let jmap = self.jmap.clone();
+                    let tx = self.tx.clone();
+                    tokio::spawn(async move {
+                        let result = jmap.query(&query).await;
+                        let _ = tx.send(Msg::SnoozedLoaded { result });
+                    });
+                }
+                Effect::WriteSchedule {
+                    job,
+                    path,
+                    contents,
+                } => {
+                    if let Err(error) = snooze::save(&path, &contents) {
+                        tracing::error!("could not write {}: {error}", path.display());
+                        cancelled = job;
+                        let error = error.to_string();
+                        let _ = self.tx.send(Msg::ScheduleFailed { job, error });
+                    }
                 }
                 Effect::LogDryRun {
                     step,
