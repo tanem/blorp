@@ -203,7 +203,7 @@ async fn the_first_snooze_creates_the_snooze_mailbox_before_it_moves_anything() 
     let Call::SetEmails(sent) = &calls[1] else {
         panic!("{calls:?}");
     };
-    assert_eq!(sent["e1"]["mailboxIds/mb-created-3"], json!(true));
+    assert_eq!(sent["e1"]["mailboxIds/mb-created-1"], json!(true));
     assert_eq!(
         written(&file)["threads"]["t1"]["emails"],
         json!({"e1": "mb-inbox"})
@@ -240,20 +240,20 @@ async fn a_due_thread_returns_at_launch_after_the_inbox_loads() {
     .await
     .unwrap();
 
-    let query = |mailbox: &str| {
+    let query = |mailbox: &str, extra_threads: &[&str]| {
         Call::Query(EmailQuery {
             filter: json!({"inMailbox": mailbox}),
             ascending: false,
             limit: 500,
-            extra_threads: Vec::new(),
+            extra_threads: extra_threads.iter().map(|t| t.to_string()).collect(),
         })
     };
     assert_eq!(
         jmap.calls()[..4],
         [
             Call::GetMailboxes,
-            query("mb-inbox"),
-            query("mb-snooze"),
+            query("mb-inbox", &[]),
+            query("mb-snooze", &["t3"]),
             Call::SetEmails(update(&[(
                 "e3",
                 json!({

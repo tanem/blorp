@@ -41,10 +41,10 @@ pub struct Harness {
 impl Harness {
     /// An app over `store`'s mailboxes, not yet started.
     pub fn new(store: Store) -> Self {
-        Harness::with_dry_run(store, false, Schedule::default())
+        Harness::build(store, false, Schedule::default())
     }
 
-    fn with_dry_run(store: Store, dry_run: bool, schedule: Schedule) -> Self {
+    fn build(store: Store, dry_run: bool, schedule: Schedule) -> Self {
         let now: Timestamp = NOW.parse().expect("valid timestamp");
         let app = App::new(Mailboxes::from(store.mailboxes()), now)
             .with_schedule(SCHEDULE_FILE.into(), schedule)
@@ -55,7 +55,7 @@ impl Harness {
     /// An app over `store` and `schedule`, read from its file, not yet
     /// started.
     pub fn with_schedule(store: Store, schedule: Schedule) -> Self {
-        Harness::with_dry_run(store, false, schedule)
+        Harness::build(store, false, schedule)
     }
 
     /// An app over `store` with its initial queue loaded.
@@ -81,7 +81,7 @@ impl Harness {
     /// queue loaded and any due threads returned, and the launch's effects
     /// left unresolved.
     pub fn launched(store: Store, dry_run: bool, schedule: Schedule) -> (Self, Vec<Effect>) {
-        let mut harness = Harness::with_dry_run(store, dry_run, schedule);
+        let mut harness = Harness::build(store, dry_run, schedule);
         let effects = harness.start();
         let effects = harness.settle(effects);
         (harness, effects)

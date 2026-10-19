@@ -974,3 +974,28 @@ fn a_returned_thread_in_a_narrower_queue_keeps_its_entry() {
     assert_eq!(rest, vec![]);
     assert!(h.app.schedule().get("t3").is_some());
 }
+
+#[test]
+fn a_due_thread_beyond_the_snooze_mailboxs_newest_500_still_returns() {
+    let mut builder = builder().mailbox("mb-snooze", "Snoozed (blorp)").email(
+        EmailSpec::new("e4", "t4", "2026-10-01T09:00:00Z")
+            .in_mailbox("mb-snooze")
+            .seen()
+            .subject("Renewal"),
+    );
+    for i in 0..500 {
+        builder = builder.email(
+            EmailSpec::new(&format!("s{i}"), &format!("ts{i}"), "2026-10-17T09:00:00Z")
+                .in_mailbox("mb-snooze")
+                .subject("Snoozed later"),
+        );
+    }
+
+    let (h, _) = Harness::launched(builder.build(), false, due_schedule());
+
+    assert_eq!(h.subjects()[0], "Renewal");
+    assert_eq!(
+        h.app.schedule().get("t4").unwrap().returned_at,
+        Some(at(NOW))
+    );
+}

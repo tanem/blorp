@@ -221,6 +221,9 @@ pub struct Store {
     /// Each email's `To` addresses by email id, which blorp does not fetch
     /// but `to` and `text` conditions match.
     to: HashMap<String, Vec<EmailAddress>>,
+    /// How many mailboxes `Mailbox/set` has created, which numbers their
+    /// ids.
+    created: usize,
 }
 
 impl Store {
@@ -255,8 +258,9 @@ impl Store {
                 kind: "invalidProperties".into(),
             });
         }
+        self.created += 1;
         let mailbox = Mailbox {
-            id: format!("mb-created-{}", self.mailboxes.len() + 1),
+            id: format!("mb-created-{}", self.created),
             name: name.into(),
             parent_id: None,
             role: None,

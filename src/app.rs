@@ -83,9 +83,16 @@ pub struct App {
     creating: Option<Creating>,
     /// Whether the due-snooze check waits for the first queue to load.
     due_at_launch: bool,
-    /// The returned threads the latest queue query fetched by id, and the
-    /// last outbox job number given out when it was sent.
-    extra: (Vec<String>, u64),
+    /// The returned threads the latest queue query fetched by id.
+    extra: Extra,
+}
+
+/// The returned threads a queue query fetched by id, and the last outbox
+/// job number given out when it was sent.
+#[derive(Debug, Default)]
+struct Extra {
+    threads: Vec<String>,
+    job: u64,
 }
 
 /// The open `z` picker: the preset Enter chooses, and the count typed
@@ -499,7 +506,7 @@ impl App {
             snooze_picker: None,
             creating: None,
             due_at_launch: false,
-            extra: (Vec::new(), 0),
+            extra: Extra::default(),
         }
     }
 
@@ -702,7 +709,10 @@ impl App {
                 .collect(),
             _ => Vec::new(),
         };
-        self.extra = (query.extra_threads.clone(), self.job);
+        self.extra = Extra {
+            threads: query.extra_threads.clone(),
+            job: self.job,
+        };
         query
     }
 
@@ -720,7 +730,10 @@ impl App {
             .cloned()
             .collect();
         let mut threads = Thread::from_query(result);
-        let (requested, job) = std::mem::take(&mut self.extra);
+        let Extra {
+            threads: requested,
+            job,
+        } = std::mem::take(&mut self.extra);
         let mut left = Vec::new();
         for id in requested {
             if threads.iter().any(|t| t.id == id) {
@@ -1421,7 +1434,16 @@ impl App {
     /// The write of the schedule after `entry` changed it, for `job`, or
     /// none when it did not or in dry run.
     fn write_schedule(&self, job: Option<u64>, entry: &Entry) -> Option<Effect> {
-        if entry.schedule.is_empty() || self.dry_run {
+        if entry.schedule.is_empty() {
+            return None;
+        }
+        self.schedule_write(job)
+    }
+
+    /// The write of the schedule as it now is, for `job`, or none in dry run
+    /// or with no file to write.
+    fn schedule_write(&self, job: Option<u64>) -> Option<Effect> {
+        if self.dry_run {
             return None;
         }
         Some(Effect::WriteSchedule {
@@ -1546,6 +1568,7 @@ impl App {
                 }
                 Some(i) => self.queue.set(i, thread),
                 None if is && !was => {
+                    // `self.schedule()` would borrow the queue too.
                     let schedule = self.dry_schedule.as_ref().unwrap_or(&self.schedule);
                     self.queue
                         .insert_sorted(thread, ascending, |t| sort_key(schedule, t));
@@ -1665,34 +1688,35 @@ impl App {
     fn has_due(&self) -> bool {
         self.schedule()
             .iter()
-            .any(|(_, entry)| entry.returned_at.is_none() && entry.return_at <= self.now)
+            .any(|(_, entry)| entry.is_due(self.now))
     }
 
-    /// Starts the due-snooze check: a query on the snooze mailbox, or,
-    /// with no snooze mailbox to return threads from, dropping the due
-    /// entries.
+    /// Starts the due-snooze check: a query on the snooze mailbox that
+    /// fetches the due threads by id too, since the query's limit can leave
+    /// them out, or, with no snooze mailbox to return threads from,
+    /// dropping the due entries.
     fn check_due(&mut self) -> Vec<Effect> {
-        if !self.has_due() {
-            return Vec::new();
-        }
-        if let Some(snooze) = self.mailboxes.snooze() {
-            return vec![Effect::QuerySnoozed {
-                query: EmailQuery {
-                    filter: json!({"inMailbox": snooze.id}),
-                    ascending: false,
-                    limit: QUEUE_LIMIT,
-                    extra_threads: Vec::new(),
-                },
-            }];
-        }
         let now = self.now;
         let due: Vec<String> = self
             .schedule()
             .iter()
-            .filter(|(_, e)| e.returned_at.is_none() && e.return_at <= now)
+            .filter(|(_, e)| e.is_due(now))
             .map(|(id, _)| id.clone())
             .collect();
-        self.forget_entries(&due)
+        if due.is_empty() {
+            return Vec::new();
+        }
+        match self.mailboxes.snooze() {
+            Some(snooze) => vec![Effect::QuerySnoozed {
+                query: EmailQuery {
+                    filter: json!({"inMailbox": snooze.id}),
+                    ascending: false,
+                    limit: QUEUE_LIMIT,
+                    extra_threads: due,
+                },
+            }],
+            None => self.forget_entries(&due),
+        }
     }
 
     /// Drops the schedule entries of the threads `ids`, writing the
@@ -1704,21 +1728,15 @@ impl App {
         for id in ids {
             self.schedule_mut().set(id, None);
         }
-        let Some(path) = self.schedule_file.clone().filter(|_| !self.dry_run) else {
-            return Vec::new();
-        };
-        vec![Effect::WriteSchedule {
-            job: None,
-            path,
-            contents: self.schedule.to_json(&self.tz),
-        }]
+        self.schedule_write(None).into_iter().collect()
     }
 
     /// Returns every due thread among `snoozed`, the snooze mailbox's
     /// threads: the emails the snooze moved go back to the mailbox each came
     /// from, or the Inbox when that is gone, marked unread with the flag
     /// untouched, as one outbox job per thread, and the entry records when.
-    /// A due entry whose thread has no snoozed email left is dropped. In dry
+    /// A due entry whose thread is gone or has no snoozed email left is
+    /// dropped. In dry
     /// run the return happens in memory only.
     fn return_due(&mut self, snoozed: Vec<Thread>) -> Vec<Effect> {
         let (Some(snooze), Some(inbox)) = (
@@ -1731,7 +1749,7 @@ impl App {
         let due: Vec<(String, snooze::Entry)> = self
             .schedule()
             .iter()
-            .filter(|(_, e)| e.returned_at.is_none() && e.return_at <= now)
+            .filter(|(_, e)| e.is_due(now))
             .map(|(id, e)| (id.clone(), e.clone()))
             .collect();
         let mut effects = Vec::new();
@@ -2058,7 +2076,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         }
         Msg::MailboxCreated { job, result } => app.mailbox_created(job, result),
         Msg::SnoozedLoaded { result } => match result {
-            Ok(result) => app.return_due(Thread::from_query(result)),
+            Ok(result) => app.return_due(Thread::all_from_query(result)),
             Err(error) => match error.fatal() {
                 Some(fatal) => vec![Effect::Fatal(fatal)],
                 None => {

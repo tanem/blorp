@@ -38,6 +38,13 @@ pub struct Entry {
     pub returned_at: Option<Timestamp>,
 }
 
+impl Entry {
+    /// Whether the thread is due to return at `now` and has not.
+    pub fn is_due(&self, now: Timestamp) -> bool {
+        self.returned_at.is_none() && self.return_at <= now
+    }
+}
+
 impl Schedule {
     /// The entry for the thread with `id`.
     pub fn get(&self, id: &str) -> Option<&Entry> {
@@ -215,7 +222,7 @@ impl Preset {
     /// When the preset returns, from `now` in its time zone. Later today is
     /// three hours on, rounded up to the hour, or tomorrow morning when that
     /// is past 20:00. Tomorrow morning is 08:00 the next day. This weekend
-    /// is Saturday 08:00, a week later on a Saturday or Sunday. Next week is
+    /// is the next Saturday 08:00, so a week on from a Saturday. Next week is
     /// the next Monday 08:00.
     pub fn at(self, now: &Zoned) -> Zoned {
         let today = now.date();
@@ -229,7 +236,7 @@ impl Preset {
                     hour.checked_add(1.hour()).expect("in range")
                 };
                 if hour <= today.at(EVENING, 0, 0, 0) {
-                    return local(hour.date(), hour.time(), now);
+                    return local(hour.date(), hour.time(), now).expect("in range");
                 }
                 today.tomorrow().expect("in range")
             }
@@ -240,7 +247,7 @@ impl Preset {
             },
             Preset::NextWeek => today.nth_weekday(1, Weekday::Monday).expect("in range"),
         };
-        local(date, morning(), now)
+        local(date, morning(), now).expect("in range")
     }
 }
 
@@ -343,19 +350,11 @@ impl When {
                 now.checked_add(span).ok()
             }
             When::At(time) => {
-                let at = today
-                    .to_datetime(time)
-                    .to_zoned(now.time_zone().clone())
-                    .ok()?;
+                let at = local(today, time, now)?;
                 if at > *now {
                     return Some(at);
                 }
-                today
-                    .tomorrow()
-                    .ok()?
-                    .to_datetime(time)
-                    .to_zoned(now.time_zone().clone())
-                    .ok()
+                local(today.tomorrow().ok()?, time, now)
             }
             When::Weekday(day, time) => {
                 let time = time.unwrap_or_else(morning);
@@ -365,20 +364,14 @@ impl When {
                     today.nth_weekday(1, day).ok()?
                 };
                 loop {
-                    let at = date
-                        .to_datetime(time)
-                        .to_zoned(now.time_zone().clone())
-                        .ok()?;
+                    let at = local(date, time, now)?;
                     if at > *now {
                         return Some(at);
                     }
                     date = date.checked_add(7.days()).ok()?;
                 }
             }
-            When::Date(date, time) => date
-                .to_datetime(time.unwrap_or_else(morning))
-                .to_zoned(now.time_zone().clone())
-                .ok(),
+            When::Date(date, time) => local(date, time.unwrap_or_else(morning), now),
         }
     }
 }
@@ -439,11 +432,11 @@ fn morning() -> Time {
     Time::constant(MORNING, 0, 0, 0)
 }
 
-/// `date` at `time` in `now`'s time zone.
-fn local(date: Date, time: Time, now: &Zoned) -> Zoned {
+/// `date` at `time` in `now`'s time zone, or none when out of range.
+fn local(date: Date, time: Time, now: &Zoned) -> Option<Zoned> {
     date.to_datetime(time)
         .to_zoned(now.time_zone().clone())
-        .expect("in range")
+        .ok()
 }
 
 /// How a snooze time `at` reads from `now`: `today 15:00` on the same day,
@@ -453,7 +446,7 @@ pub fn describe(at: &Zoned, now: &Zoned) -> String {
     let days = (at.date() - now.date()).get_days();
     if at.date() == now.date() {
         at.strftime("today %H:%M").to_string()
-    } else if (1..7).contains(&days) && at.date() > now.date() {
+    } else if (1..7).contains(&days) {
         at.strftime("%a %H:%M").to_string()
     } else if at.year() == now.year() {
         at.strftime("%a %-d %b %H:%M").to_string()
