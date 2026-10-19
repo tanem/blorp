@@ -45,6 +45,21 @@ pub enum Condition {
     Text(String),
 }
 
+/// The token keys, in the order completion offers them.
+pub const KEYS: [&str; 6] = ["in", "from", "to", "subject", "is", "has"];
+
+/// The `is:` values and what each matches, in the order completion offers
+/// them.
+pub const IS_VALUES: [(&str, Condition); 4] = [
+    ("unread", Condition::Unread),
+    ("read", Condition::Read),
+    ("flagged", Condition::Flagged),
+    ("list", Condition::List),
+];
+
+/// The `has:` values and what each matches.
+pub const HAS_VALUES: [(&str, Condition); 1] = [("attachment", Condition::Attachment)];
+
 /// Why filter text was refused. The message is shown in the status line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -262,14 +277,8 @@ impl Token {
             Some("from") => Condition::From(value),
             Some("to") => Condition::To(value),
             Some("subject") => Condition::Subject(value),
-            Some("is") => match value.to_lowercase().as_str() {
-                "unread" => Condition::Unread,
-                "read" => Condition::Read,
-                "flagged" => Condition::Flagged,
-                "list" => Condition::List,
-                _ => return Err(unknown()),
-            },
-            Some("has") if value.eq_ignore_ascii_case("attachment") => Condition::Attachment,
+            Some("is") => lookup(&IS_VALUES, &value).ok_or_else(unknown)?,
+            Some("has") => lookup(&HAS_VALUES, &value).ok_or_else(unknown)?,
             Some(_) => return Err(unknown()),
         };
         Ok(Term {
@@ -277,6 +286,14 @@ impl Token {
             condition,
         })
     }
+}
+
+/// What `value` matches among `values`, ignoring case.
+fn lookup(values: &[(&str, Condition)], value: &str) -> Option<Condition> {
+    values
+        .iter()
+        .find(|(name, _)| value.eq_ignore_ascii_case(name))
+        .map(|(_, condition)| condition.clone())
 }
 
 #[cfg(test)]

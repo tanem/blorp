@@ -53,6 +53,7 @@ async fn e_archives_the_thread_on_the_server() {
     blorp.keys("e");
     blorp.wait_statusline(" 1/1");
     blorp.wait_text("Archived 1 thread");
+    server.wait_for_calls("Email/set", 1).await;
     blorp.keys("q");
     assert_eq!(blorp.wait_exit().exit_code(), 0);
 

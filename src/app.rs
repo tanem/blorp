@@ -1,9 +1,12 @@
 //! The application state and `update`, the pure core every message goes
 //! through (ADR 0001).
 
+use std::ops::Range;
+
 use jiff::Timestamp;
 use serde_json::Value;
 
+use crate::command::{self, Command};
 use crate::filter;
 use crate::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, QueryResult, SetResult};
 use crate::mail::{Email, Mailboxes, QueueMailbox, Role, Thread};
@@ -29,6 +32,9 @@ pub struct App {
     /// The `/` prompt, while it is open.
     filter_prompt: Option<FilterPrompt>,
     filter_history: PromptHistory,
+    /// The `:` prompt, while it is open.
+    command_prompt: Option<CommandPrompt>,
+    command_history: PromptHistory,
     total: usize,
     generation: u64,
     loading: bool,
@@ -90,6 +96,33 @@ struct FilterPrompt {
     total: usize,
     /// Whether an edit has run a query, which changes the rows.
     queried: bool,
+}
+
+/// The open `:` prompt, the count typed before the colon, and the
+/// completion Tab has made.
+#[derive(Debug)]
+struct CommandPrompt {
+    prompt: Prompt,
+    count: Option<usize>,
+    completion: Option<Completion>,
+}
+
+/// The candidates for a word at the `:` prompt, which one fills it, and
+/// the characters it fills.
+#[derive(Debug)]
+struct Completion {
+    candidates: Vec<String>,
+    index: usize,
+    range: Range<usize>,
+}
+
+/// What keys go to: normal mode, the visual range, or a prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    Visual,
+    Filter,
+    Command,
 }
 
 /// A job in the outbox: the entry it applies, kept to put back if it
@@ -175,10 +208,14 @@ pub enum Msg {
     SetFilter(String),
     /// `/`: open the filter prompt holding the current filter.
     OpenFilter,
+    /// `:`: open the command line.
+    OpenCommand,
     /// A key typed at the open prompt.
     Prompt(Key),
     /// `t`: toggle newest and oldest first.
     ToggleSort,
+    /// `:sort newest` or `:sort oldest`.
+    SetSort(Sort),
     Down,
     Up,
     Top,
@@ -208,6 +245,8 @@ pub enum Msg {
     Redo,
     /// `D`: turn dry run on or off.
     ToggleDryRun,
+    /// `:dry` or `:dry off`: turn dry run on, or off.
+    SetDryRun(bool),
     /// The spinner's tick while a request is in flight.
     Tick,
     /// A queue query's result, tagged with the generation it was sent for.
@@ -269,6 +308,8 @@ impl App {
             sort: Sort::Newest,
             filter_prompt: None,
             filter_history: PromptHistory::default(),
+            command_prompt: None,
+            command_history: PromptHistory::default(),
             total: 0,
             generation: 0,
             loading: false,
@@ -312,14 +353,44 @@ impl App {
         self.sort
     }
 
-    /// The text at the `/` prompt, while it is open.
-    pub fn prompt(&self) -> Option<&str> {
-        self.filter_prompt.as_ref().map(|p| p.prompt.text())
+    /// What keys go to.
+    pub fn mode(&self) -> Mode {
+        if self.filter_prompt.is_some() {
+            Mode::Filter
+        } else if self.command_prompt.is_some() {
+            Mode::Command
+        } else if self.queue.visual().is_some() {
+            Mode::Visual
+        } else {
+            Mode::Normal
+        }
     }
 
-    /// The cursor at the `/` prompt, in characters, while it is open.
+    /// The prompt that is open, if one is.
+    fn open_prompt(&self) -> Option<&Prompt> {
+        match (&self.filter_prompt, &self.command_prompt) {
+            (Some(open), _) => Some(&open.prompt),
+            (_, Some(open)) => Some(&open.prompt),
+            _ => None,
+        }
+    }
+
+    /// The text at the `/` or `:` prompt, while one is open.
+    pub fn prompt(&self) -> Option<&str> {
+        self.open_prompt().map(Prompt::text)
+    }
+
+    /// The cursor at the `/` or `:` prompt, in characters, while one is
+    /// open.
     pub fn prompt_cursor(&self) -> Option<usize> {
-        self.filter_prompt.as_ref().map(|p| p.prompt.cursor())
+        self.open_prompt().map(Prompt::cursor)
+    }
+
+    /// The completion candidates at the `:` prompt, and the one filling the
+    /// word, while Tab is cycling through them.
+    pub fn completion(&self) -> Option<(&[String], usize)> {
+        let completion = self.command_prompt.as_ref()?.completion.as_ref()?;
+        Some((&completion.candidates, completion.index))
     }
 
     /// How many threads match the queue's query, including any beyond
@@ -433,19 +504,32 @@ impl App {
         }
     }
 
-    /// Flips the sort and reloads the queue in it, clearing the selection
-    /// and putting the cursor on the first row.
-    fn toggle_sort(&mut self) -> Vec<Effect> {
-        self.sort = match self.sort {
-            Sort::Newest => Sort::Oldest,
-            Sort::Oldest => Sort::Newest,
-        };
+    /// Sets the sort and, when it changes, reloads the queue in it,
+    /// clearing the selection and putting the cursor on the first row.
+    fn set_sort(&mut self, sort: Sort) -> Vec<Effect> {
+        if sort == self.sort {
+            return Vec::new();
+        }
+        self.sort = sort;
         let Some(shown) = &mut self.shown else {
             return Vec::new();
         };
         shown.query.ascending = self.sort.ascending();
         let query = shown.query.clone();
         self.load_new(query)
+    }
+
+    /// Turns dry run on or off. A change clears the undo history, so real
+    /// and simulated entries never share it.
+    fn set_dry_run(&mut self, on: bool) {
+        let mode = if on { "on" } else { "off" };
+        if on == self.dry_run {
+            self.status = format!("Dry run already {mode}");
+            return;
+        }
+        self.dry_run = on;
+        self.history.clear();
+        self.status = format!("Dry run {mode}, undo history cleared");
     }
 
     /// Opens the `/` prompt holding the current filter, dropping a pending
@@ -520,6 +604,129 @@ impl App {
         self.queue = open.queue;
         self.total = open.total;
         self.reload()
+    }
+
+    /// Opens the `:` prompt, keeping the visual range open and the pending
+    /// count for the command, and clearing the status message.
+    fn open_command(&mut self) {
+        let count = self.take_count();
+        self.status.clear();
+        self.command_prompt = Some(CommandPrompt {
+            prompt: Prompt::new(""),
+            count,
+            completion: None,
+        });
+    }
+
+    /// Handles a key at the `:` prompt. Enter runs the command, which goes
+    /// into the prompt's history whether or not it runs; Enter and Esc
+    /// return to normal mode.
+    fn command_key(&mut self, key: Key) -> Vec<Effect> {
+        match key {
+            Key::Enter => {
+                let Some(open) = self.command_prompt.take() else {
+                    return Vec::new();
+                };
+                let text = open.prompt.text();
+                self.command_history.push(text);
+                let effects = match command::parse(text) {
+                    Ok(Some(command)) => self.run(command, open.count),
+                    Ok(None) => Vec::new(),
+                    Err(error) => {
+                        self.status = error.to_string();
+                        Vec::new()
+                    }
+                };
+                self.queue.close_visual();
+                effects
+            }
+            Key::Esc => {
+                self.command_prompt = None;
+                self.queue.close_visual();
+                Vec::new()
+            }
+            Key::Tab | Key::BackTab => {
+                self.complete(key == Key::Tab);
+                Vec::new()
+            }
+            key => {
+                if let Some(open) = &mut self.command_prompt {
+                    open.completion = None;
+                    open.prompt.edit(key, &self.command_history);
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    /// Fills the word under the cursor at the `:` prompt with the next
+    /// candidate, or the previous one when not `forward`. Without a
+    /// completion under way, it starts one at the first candidate, or the
+    /// last when not `forward`.
+    fn complete(&mut self, forward: bool) {
+        let Some(open) = &mut self.command_prompt else {
+            return;
+        };
+        let completion = match open.completion.take() {
+            Some(mut c) => {
+                let n = c.candidates.len();
+                c.index = if forward {
+                    (c.index + 1) % n
+                } else {
+                    (c.index + n - 1) % n
+                };
+                c
+            }
+            None => {
+                let (range, candidates) =
+                    command::complete(open.prompt.text(), open.prompt.cursor(), &self.mailboxes);
+                if candidates.is_empty() {
+                    return;
+                }
+                let index = if forward { 0 } else { candidates.len() - 1 };
+                Completion {
+                    candidates,
+                    index,
+                    range,
+                }
+            }
+        };
+        let candidate = &completion.candidates[completion.index];
+        open.prompt.replace(completion.range.clone(), candidate);
+        let start = completion.range.start;
+        open.completion = Some(Completion {
+            range: start..start + candidate.chars().count(),
+            ..completion
+        });
+    }
+
+    /// Runs `command` on the selection, with `count` as the count typed
+    /// before the colon.
+    fn run(&mut self, command: Command, count: Option<usize>) -> Vec<Effect> {
+        let msg = match command {
+            Command::Archive => {
+                if self.queue.selection(count.unwrap_or(1)).is_empty() {
+                    self.status = "Nothing selected".into();
+                    return Vec::new();
+                }
+                self.pending_count = count;
+                Msg::Archive
+            }
+            Command::Undo(n) => {
+                self.pending_count = n.or(count);
+                Msg::Undo
+            }
+            Command::Redo => {
+                self.pending_count = count;
+                Msg::Redo
+            }
+            Command::Filter(text) => Msg::SetFilter(text),
+            Command::Sort(None) => Msg::ToggleSort,
+            Command::Sort(Some(sort)) => Msg::SetSort(sort),
+            Command::Dry(on) => Msg::SetDryRun(on),
+            Command::Quit => Msg::Quit,
+        };
+        update(self, msg)
     }
 
     fn perform(&mut self, repeat: Repeat) -> Vec<Effect> {
@@ -872,8 +1079,17 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             app.open_filter();
             Vec::new()
         }
+        Msg::OpenCommand => {
+            app.open_command();
+            Vec::new()
+        }
+        Msg::Prompt(key) if app.command_prompt.is_some() => app.command_key(key),
         Msg::Prompt(key) => app.filter_key(key),
-        Msg::ToggleSort => app.toggle_sort(),
+        Msg::ToggleSort => app.set_sort(match app.sort {
+            Sort::Newest => Sort::Oldest,
+            Sort::Oldest => Sort::Newest,
+        }),
+        Msg::SetSort(sort) => app.set_sort(sort),
         Msg::Digit(digit) => {
             let count = app.pending_count.unwrap_or(0);
             if count > 0 || digit > 0 {
@@ -944,14 +1160,11 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::Undo => app.replay(Step::Undo),
         Msg::Redo => app.replay(Step::Redo),
         Msg::ToggleDryRun => {
-            app.dry_run = !app.dry_run;
-            let mode = if app.dry_run {
-                "Dry run on"
-            } else {
-                "Dry run off"
-            };
-            app.history.clear();
-            app.status = format!("{mode}, undo history cleared");
+            app.set_dry_run(!app.dry_run);
+            Vec::new()
+        }
+        Msg::SetDryRun(on) => {
+            app.set_dry_run(on);
             Vec::new()
         }
         Msg::Sent { job, result } => app.sent(job, result),
