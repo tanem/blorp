@@ -83,6 +83,9 @@ pub struct App {
     creating: Option<Creating>,
     /// Whether the due-snooze check waits for the first queue to load.
     due_at_launch: bool,
+    /// The last outbox job number given out when the launch check's query
+    /// was sent, while it is in flight.
+    checking: Option<u64>,
     /// The returned threads the latest queue query fetched by id.
     extra: Extra,
 }
@@ -194,6 +197,55 @@ impl Sort {
     }
 }
 
+/// What a queue sorts by, and which way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Order {
+    /// The later of `receivedAt` and `returnedAt`, oldest first when
+    /// ascending.
+    Received { ascending: bool },
+    /// The snooze mailbox's order: the return time, soonest first when
+    /// ascending. A thread with no schedule entry is due now and sorts
+    /// first either way.
+    Return { ascending: bool },
+}
+
+impl Order {
+    /// Whether the lowest key sorts first.
+    fn ascending(self) -> bool {
+        match self {
+            Order::Received { ascending } | Order::Return { ascending } => ascending,
+        }
+    }
+
+    /// Sorts `threads` in this order, keeping the order between ties.
+    fn sort(self, threads: &mut [Thread], schedule: &Schedule) {
+        if self.ascending() {
+            threads.sort_by_key(|t| self.key(schedule, t));
+        } else {
+            threads.sort_by_key(|t| Reverse(self.key(schedule, t)));
+        }
+    }
+
+    /// Where `thread` sorts, by its entry in `schedule`.
+    fn key(self, schedule: &Schedule, thread: &Thread) -> Timestamp {
+        let entry = schedule.get(&thread.id);
+        match self {
+            Order::Received { .. } => {
+                let received = thread.hit().received_at;
+                match entry.and_then(|e| e.returned_at) {
+                    Some(returned) => received.max(returned),
+                    None => received,
+                }
+            }
+            Order::Return { ascending } => match entry {
+                Some(entry) => entry.return_at,
+                None if ascending => Timestamp::MIN,
+                None => Timestamp::MAX,
+            },
+        }
+    }
+}
+
 /// The open `/` prompt, and the queue as it was when it opened, for Esc to
 /// put back.
 #[derive(Debug)]
@@ -282,8 +334,10 @@ impl Step {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Archive,
-    /// Snooze until the time given.
+    /// Snooze until the time given, or in the snooze mailbox, reschedule.
     Snooze(Timestamp),
+    /// `:unsnooze`: return snoozed threads now.
+    Unsnooze,
     /// A due snoozed thread going back to where it was snoozed from. It is
     /// not on the undo history.
     Return,
@@ -295,6 +349,7 @@ impl Action {
         match self {
             Action::Archive => "archive",
             Action::Snooze(_) => "snooze",
+            Action::Unsnooze => "unsnooze",
             Action::Return => "return",
         }
     }
@@ -303,6 +358,7 @@ impl Action {
         match self {
             Action::Archive => "Archived",
             Action::Snooze(_) => "Snoozed",
+            Action::Unsnooze => "Unsnoozed",
             Action::Return => "Returned",
         }
     }
@@ -350,6 +406,8 @@ pub enum Msg {
     Picker(PickerKey),
     /// `:snooze <time>` or a picker choice: snooze the selection.
     Snooze(When),
+    /// `:unsnooze`: return the selection from the snooze mailbox now.
+    Unsnooze,
     /// `x`: mark or unmark the row under the cursor, or as many rows as the
     /// count, and move past them.
     Mark,
@@ -423,12 +481,14 @@ pub enum Effect {
         generation: u64,
         query: EmailQuery,
     },
-    /// Run a queue query with `Mailbox/get` in its first request and report
-    /// it back as [`Msg::Reconciled`]. It supersedes a query in flight as
+    /// Run a queue query with `Mailbox/get` in its first request, and the
+    /// snooze mailbox's query too when there is one, and report it back as
+    /// [`Msg::Reconciled`]. It supersedes a query in flight as
     /// [`Effect::Query`] does.
     Reconcile {
         generation: u64,
         query: EmailQuery,
+        snoozed: Option<EmailQuery>,
     },
     /// Send an action's or a redo's `Email/set` through the outbox, after
     /// every job before it, and report it back as [`Msg::Sent`].
@@ -506,6 +566,7 @@ impl App {
             snooze_picker: None,
             creating: None,
             due_at_launch: false,
+            checking: None,
             extra: Extra::default(),
         }
     }
@@ -592,6 +653,37 @@ impl App {
 
     pub fn sort(&self) -> Sort {
         self.sort
+    }
+
+    /// The sort order as the statusline shows it: `newest` or `oldest`, or
+    /// in the snooze mailbox `soonest` or `latest`.
+    pub fn sort_name(&self) -> &'static str {
+        match (self.in_snooze_mailbox(), self.sort) {
+            (false, sort) => sort.name(),
+            (true, Sort::Newest) => "soonest",
+            (true, Sort::Oldest) => "latest",
+        }
+    }
+
+    /// Whether the queue shown is the snooze mailbox's, whose rows show
+    /// and sort by when each thread returns.
+    pub fn in_snooze_mailbox(&self) -> bool {
+        match (&self.shown, self.mailboxes.snooze()) {
+            (Some(shown), Some(snooze)) => shown.mailbox == QueueMailbox::One(snooze.id.clone()),
+            _ => false,
+        }
+    }
+
+    /// How the queue shown sorts.
+    fn order(&self) -> Order {
+        let ascending = self.sort.ascending();
+        if self.in_snooze_mailbox() {
+            Order::Return {
+                ascending: !ascending,
+            }
+        } else {
+            Order::Received { ascending }
+        }
     }
 
     /// What keys go to.
@@ -1075,6 +1167,14 @@ impl App {
                 self.pending_count = count;
                 Msg::Snooze(when)
             }
+            Command::Unsnooze => {
+                if self.queue.selection(count.unwrap_or(1)).is_empty() {
+                    self.status = "Nothing selected".into();
+                    return Vec::new();
+                }
+                self.pending_count = count;
+                Msg::Unsnooze
+            }
             Command::Undo(n) => {
                 self.pending_count = n.or(count);
                 Msg::Undo
@@ -1097,6 +1197,7 @@ impl App {
         match repeat.action {
             Action::Archive => self.archive(repeat),
             Action::Snooze(until) => self.snooze(repeat, until),
+            Action::Unsnooze => self.unsnooze(repeat),
             Action::Return => Vec::new(),
         }
     }
@@ -1212,8 +1313,7 @@ impl App {
             return Vec::new();
         };
         if from == QueueMailbox::One(snooze.into()) {
-            self.report("Already snoozed");
-            return Vec::new();
+            return self.reschedule(rows, repeat, until, snooze);
         }
         let inbox = self.mailboxes.by_role(Role::Inbox).map(|m| m.id.clone());
         let mut threads = Vec::new();
@@ -1258,6 +1358,128 @@ impl App {
             return Vec::new();
         }
         self.act(repeat, threads, update, entries)
+    }
+
+    /// Sets the return time of the threads at `rows`, in the snooze mailbox
+    /// `snooze`, to `until`, moving nothing. A thread with no entry gets one
+    /// that returns its emails to the Inbox.
+    fn reschedule(
+        &mut self,
+        rows: Vec<usize>,
+        repeat: Repeat,
+        until: Timestamp,
+        snooze: &str,
+    ) -> Vec<Effect> {
+        let inbox = self.mailboxes.by_role(Role::Inbox).map(|m| m.id.clone());
+        let mut threads = Vec::new();
+        let mut entries = BTreeMap::new();
+        for row in rows {
+            let thread = &self.queue.threads()[row];
+            let entry = match self.schedule().get(&thread.id) {
+                Some(entry) => snooze::Entry {
+                    return_at: until,
+                    returned_at: None,
+                    ..entry.clone()
+                },
+                None => snooze::Entry {
+                    emails: thread
+                        .emails
+                        .iter()
+                        .filter(|e| e.mailbox_ids.contains(snooze))
+                        .filter_map(|e| Some((e.id.clone(), inbox.clone()?)))
+                        .collect(),
+                    snoozed_at: self.now,
+                    return_at: until,
+                    returned_at: None,
+                },
+            };
+            threads.push(thread.clone());
+            entries.insert(thread.id.clone(), entry);
+        }
+        self.act(repeat, threads, EmailUpdate::new(), entries)
+    }
+
+    /// Returns the selection from the snooze mailbox now, as a due return
+    /// would, as one undo entry. Closes the visual range.
+    fn unsnooze(&mut self, repeat: Repeat) -> Vec<Effect> {
+        let rows = self.queue.selection(repeat.count.unwrap_or(1));
+        self.queue.close_visual();
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let mut threads = Vec::new();
+        let mut update = EmailUpdate::new();
+        let mut entries = BTreeMap::new();
+        if self.in_snooze_mailbox() {
+            for row in rows {
+                let thread = &self.queue.threads()[row];
+                let entry = self.schedule().get(&thread.id);
+                let Some((patches, entry)) = self.return_update(thread, entry) else {
+                    continue;
+                };
+                threads.push(thread.clone());
+                update.extend(patches);
+                entries.insert(thread.id.clone(), entry);
+            }
+        }
+        if update.is_empty() {
+            self.report("Nothing to unsnooze");
+            return Vec::new();
+        }
+        self.act(repeat, threads, update, entries)
+    }
+
+    /// The return of `thread` from the snooze mailbox, whose schedule entry
+    /// is `entry`: each email the entry records that is still there goes
+    /// back to the mailbox it came from, or the Inbox when that is gone, and
+    /// with no entry each of its emails there goes to the Inbox, marked
+    /// unread with the flag untouched. Gives the patches and the entry
+    /// recording the return, or none when no email goes back.
+    fn return_update(
+        &self,
+        thread: &Thread,
+        entry: Option<&snooze::Entry>,
+    ) -> Option<(EmailUpdate, snooze::Entry)> {
+        let snooze = &self.mailboxes.snooze()?.id;
+        let inbox = &self.mailboxes.by_role(Role::Inbox)?.id;
+        let mut update = EmailUpdate::new();
+        let mut origins = BTreeMap::new();
+        for email in &thread.emails {
+            if !email.mailbox_ids.contains(snooze) {
+                continue;
+            }
+            let origin = match entry {
+                Some(entry) => match entry.emails.get(&email.id) {
+                    Some(origin) if self.mailboxes.by_id(origin).is_some() => origin,
+                    Some(_) => inbox,
+                    None => continue,
+                },
+                None => inbox,
+            };
+            let before = State::from(email);
+            let mut after = before.clone();
+            after.mailbox_ids.remove(snooze);
+            after.mailbox_ids.insert(origin.clone());
+            after.seen = false;
+            update.insert(email.id.clone(), before.patch_to(&after));
+            origins.insert(email.id.clone(), origin.clone());
+        }
+        if update.is_empty() {
+            return None;
+        }
+        let returned = match entry {
+            Some(entry) => snooze::Entry {
+                returned_at: Some(self.now),
+                ..entry.clone()
+            },
+            None => snooze::Entry {
+                emails: origins,
+                snoozed_at: self.now,
+                return_at: self.now,
+                returned_at: Some(self.now),
+            },
+        };
+        Some((update, returned))
     }
 
     /// Re-resolves an `in:any` queue's mailbox, whose excluded mailboxes
@@ -1382,19 +1604,7 @@ impl App {
                 })
             })
             .collect();
-        let changes = touched
-            .iter()
-            .flat_map(|thread| &thread.emails)
-            .filter_map(|email| {
-                let patch = update.get(&email.id)?;
-                let before = State::from(email);
-                Some(Change {
-                    id: email.id.clone(),
-                    after: before.patched(patch),
-                    before,
-                })
-            })
-            .collect();
+        let changes = changes(&touched, &update);
         let entry = self
             .history
             .record(action, touched, changes, schedule)
@@ -1550,7 +1760,7 @@ impl App {
             let state = change.state(side).cloned();
             self.schedule_mut().set(&change.thread_id, state);
         }
-        let ascending = self.sort.ascending();
+        let order = self.order();
         let mut placed = Placed::default();
         for snapshot in &entry.threads {
             let index = self.queue.index_of(&snapshot.id);
@@ -1571,7 +1781,7 @@ impl App {
                     // `self.schedule()` would borrow the queue too.
                     let schedule = self.dry_schedule.as_ref().unwrap_or(&self.schedule);
                     self.queue
-                        .insert_sorted(thread, ascending, |t| sort_key(schedule, t));
+                        .insert_sorted(thread, order.ascending(), |t| order.key(schedule, t));
                     self.total += 1;
                 }
                 None => {}
@@ -1581,6 +1791,10 @@ impl App {
             } else if placed.went_to.is_none() {
                 placed.went_to = entry.mailbox_gained(snapshot, side);
             }
+        }
+        if !entry.schedule.is_empty() {
+            let schedule = self.dry_schedule.as_ref().unwrap_or(&self.schedule);
+            self.queue.resort(|threads| order.sort(threads, schedule));
         }
         placed
     }
@@ -1684,39 +1898,70 @@ impl App {
         self.run_pending_reconcile()
     }
 
-    /// Whether the schedule holds a thread due to return that has not.
-    fn has_due(&self) -> bool {
-        self.schedule()
-            .iter()
-            .any(|(_, entry)| entry.is_due(self.now))
+    /// The query on the snooze mailbox that the due-snooze check runs,
+    /// fetching by id too the threads due to return, since the query's
+    /// limit can leave one out. None when there is no snooze mailbox on
+    /// Fastmail.
+    fn snoozed_query(&self) -> Option<EmailQuery> {
+        let snooze = self
+            .mailboxes
+            .snooze()
+            .filter(|m| m.id != DRY_RUN_SNOOZE_MAILBOX)?;
+        Some(EmailQuery {
+            filter: json!({"inMailbox": snooze.id}),
+            ascending: false,
+            limit: QUEUE_LIMIT,
+            extra_threads: self.due(),
+        })
     }
 
-    /// Starts the due-snooze check: a query on the snooze mailbox that
-    /// fetches the due threads by id too, since the query's limit can leave
-    /// them out, or, with no snooze mailbox to return threads from,
-    /// dropping the due entries.
-    fn check_due(&mut self) -> Vec<Effect> {
-        let now = self.now;
-        let due: Vec<String> = self
-            .schedule()
+    /// The ids of the threads due to return that have not.
+    fn due(&self) -> Vec<String> {
+        self.schedule()
             .iter()
-            .filter(|(_, e)| e.is_due(now))
+            .filter(|(_, e)| e.is_due(self.now))
             .map(|(id, _)| id.clone())
-            .collect();
-        if due.is_empty() {
-            return Vec::new();
+            .collect()
+    }
+
+    /// Starts the due-snooze check at launch: a query on the snooze
+    /// mailbox, or with no snooze mailbox to return threads from, dropping
+    /// the due entries.
+    fn check_due(&mut self) -> Vec<Effect> {
+        match self.snoozed_query() {
+            Some(query) => {
+                self.checking = Some(self.job);
+                vec![Effect::QuerySnoozed { query }]
+            }
+            None => self.forget_due(),
         }
-        match self.mailboxes.snooze() {
-            Some(snooze) => vec![Effect::QuerySnoozed {
-                query: EmailQuery {
-                    filter: json!({"inMailbox": snooze.id}),
-                    ascending: false,
-                    limit: QUEUE_LIMIT,
-                    extra_threads: due,
-                },
-            }],
-            None => self.forget_entries(&due),
+    }
+
+    /// Handles the launch check's query on the snooze mailbox. As with a
+    /// reconcile, the result is used only if the outbox stayed idle from
+    /// when it was sent, so a snapshot taken before a return or an action
+    /// landed never returns a thread again; otherwise the next reconcile
+    /// runs the check.
+    fn snoozed_loaded(&mut self, result: Result<QueryResult, Error>) -> Vec<Effect> {
+        let sent = self.checking.take();
+        match result {
+            Ok(_) if sent != Some(self.job) || !self.in_flight.is_empty() => Vec::new(),
+            Ok(result) => self.return_due(Thread::all_from_query(result)),
+            Err(error) => match error.fatal() {
+                Some(fatal) => vec![Effect::Fatal(fatal)],
+                None => {
+                    self.status = format!("Could not check snoozed threads: {error}");
+                    Vec::new()
+                }
+            },
         }
+    }
+
+    /// Drops the entries of the threads due to return, which have no snooze
+    /// mailbox to return from.
+    fn forget_due(&mut self) -> Vec<Effect> {
+        let due = self.due();
+        self.forget_entries(&due)
     }
 
     /// Drops the schedule entries of the threads `ids`, writing the
@@ -1731,77 +1976,70 @@ impl App {
         self.schedule_write(None).into_iter().collect()
     }
 
-    /// Returns every due thread among `snoozed`, the snooze mailbox's
-    /// threads: the emails the snooze moved go back to the mailbox each came
-    /// from, or the Inbox when that is gone, marked unread with the flag
-    /// untouched, as one outbox job per thread, and the entry records when.
-    /// A due entry whose thread is gone or has no snoozed email left is
-    /// dropped. In dry run the return happens in memory only.
-    fn return_due(&mut self, snoozed: Vec<Thread>) -> Vec<Effect> {
-        let (Some(snooze), Some(inbox)) = (
-            self.mailboxes.snooze().map(|m| m.id.clone()),
-            self.mailboxes.by_role(Role::Inbox).map(|m| m.id.clone()),
-        ) else {
-            return Vec::new();
+    /// Whether `thread`, in the snooze mailbox, returns now: it has no
+    /// entry, its entry is due, or it returns early because it gained an
+    /// email received after it was snoozed in `outside`, every mailbox but
+    /// the snooze mailbox, Trash, Junk, Drafts, and Sent. A thread whose
+    /// entry records a return already made does not.
+    fn returns_now(
+        &self,
+        thread: &Thread,
+        entry: Option<&snooze::Entry>,
+        outside: &QueueMailbox,
+    ) -> bool {
+        let Some(entry) = entry else {
+            return true;
         };
+        if entry.returned_at.is_some() {
+            return false;
+        }
+        if entry.is_due(self.now) {
+            return true;
+        }
+        thread.emails.iter().any(|email| {
+            email.received_at > entry.snoozed_at
+                && email.mailbox_ids.iter().any(|id| outside.contains(id))
+        })
+    }
+
+    /// Returns every thread among `snoozed`, the snooze mailbox's threads,
+    /// that returns now, as [`App::return_update`] describes, as one outbox
+    /// job per thread, and the entry records when. A due entry whose thread
+    /// is gone or has no snoozed email left is dropped. In dry run the
+    /// return happens in memory only.
+    fn return_due(&mut self, snoozed: Vec<Thread>) -> Vec<Effect> {
         let now = self.now;
-        let due: Vec<(String, snooze::Entry)> = self
+        let mut gone: Vec<String> = self
             .schedule()
             .iter()
-            .filter(|(_, e)| e.is_due(now))
-            .map(|(id, e)| (id.clone(), e.clone()))
+            .filter(|(id, e)| e.is_due(now) && !snoozed.iter().any(|t| t.id == **id))
+            .map(|(id, _)| id.clone())
             .collect();
+        let outside = self.mailboxes.all_mail();
         let mut effects = Vec::new();
-        let mut gone = Vec::new();
         let mut returned = 0;
-        for (id, entry) in due {
-            let Some(thread) = snoozed.iter().find(|t| t.id == id) else {
-                gone.push(id);
+        for thread in snoozed {
+            let before = self.schedule().get(&thread.id).cloned();
+            if !self.returns_now(&thread, before.as_ref(), &outside) {
+                continue;
+            }
+            let Some((update, after)) = self.return_update(&thread, before.as_ref()) else {
+                if before.is_some() {
+                    gone.push(thread.id.clone());
+                }
                 continue;
             };
-            let mut changes = Vec::new();
-            let mut update = EmailUpdate::new();
-            for email in &thread.emails {
-                let Some(origin) = entry.emails.get(&email.id) else {
-                    continue;
-                };
-                if !email.mailbox_ids.contains(&snooze) {
-                    continue;
-                }
-                let origin = match self.mailboxes.by_id(origin) {
-                    Some(_) => origin.clone(),
-                    None => inbox.clone(),
-                };
-                let before = State::from(email);
-                let mut after = before.clone();
-                after.mailbox_ids.remove(&snooze);
-                after.mailbox_ids.insert(origin);
-                after.seen = false;
-                update.insert(email.id.clone(), before.patch_to(&after));
-                changes.push(Change {
-                    id: email.id.clone(),
-                    before,
-                    after,
-                });
-            }
-            if changes.is_empty() {
-                gone.push(id);
-                continue;
-            }
-            let schedule = vec![ScheduleChange {
-                thread_id: id,
-                after: Some(snooze::Entry {
-                    returned_at: Some(now),
-                    ..entry.clone()
-                }),
-                before: Some(entry),
-            }];
+            let threads = vec![thread];
             let entry = Entry {
                 id: 0,
                 action: Action::Return,
-                threads: vec![thread.clone()],
-                changes,
-                schedule,
+                changes: changes(&threads, &update),
+                schedule: vec![ScheduleChange {
+                    thread_id: threads[0].id.clone(),
+                    before,
+                    after: Some(after),
+                }],
+                threads,
             };
             returned += 1;
             effects.extend(self.send(entry, update));
@@ -1813,23 +2051,20 @@ impl App {
         effects
     }
 
-    /// Sorts `threads`, in the server's order by `receivedAt`, by the later
-    /// of that and when each returned from snooze, keeping the server's
+    /// Sorts `threads`, in the server's order by `receivedAt`, as the queue
+    /// shown sorts: by the later of that and when each returned from snooze,
+    /// or in the snooze mailbox by when each returns, keeping the server's
     /// order between ties.
     fn ordered(&self, mut threads: Vec<Thread>) -> Vec<Thread> {
-        let schedule = self.schedule();
-        if self.sort.ascending() {
-            threads.sort_by_key(|t| sort_key(schedule, t));
-        } else {
-            threads.sort_by_key(|t| Reverse(sort_key(schedule, t)));
-        }
+        self.order().sort(&mut threads, self.schedule());
         threads
     }
 
-    /// Re-runs the shown queue's query with `Mailbox/get`, to bring the
-    /// queue and the mailbox list back in line with Fastmail. While a query
-    /// is in flight or the outbox is busy it waits, and runs once both are
-    /// done. In dry run only `R` runs one.
+    /// Re-runs the shown queue's query with `Mailbox/get`, and the snooze
+    /// mailbox's query for the due-snooze check, to bring the queue, the
+    /// mailbox list, and the snoozed threads back in line with Fastmail.
+    /// While a query is in flight or the outbox is busy it waits, and runs
+    /// once both are done. In dry run only `R` runs one.
     fn reconcile(&mut self, trigger: Trigger) -> Vec<Effect> {
         if self.dry_run && trigger == Trigger::Auto {
             return Vec::new();
@@ -1848,9 +2083,11 @@ impl App {
             trigger,
             job: self.job,
         });
+        let query = self.with_extra(query);
         vec![Effect::Reconcile {
             generation: self.generation,
-            query: self.with_extra(query),
+            query,
+            snoozed: self.snoozed_query(),
         }]
     }
 
@@ -1908,7 +2145,9 @@ impl App {
         self.run_pending_reconcile()
     }
 
-    /// Replaces the mailbox list and the queue's rows with Fastmail's. The
+    /// Replaces the mailbox list and the queue's rows with Fastmail's, then
+    /// runs the due-snooze check on the snooze mailbox's threads, keeping
+    /// the cursor on its thread. The
     /// filter keeps the mailbox ids it resolved to. Only `R` reaches here
     /// in dry run, where the undo history is cleared too.
     fn apply_reconciled(&mut self, reconciled: Reconciled, trigger: Trigger) -> Vec<Effect> {
@@ -1917,11 +2156,21 @@ impl App {
         if self.dry_run && trigger == Trigger::Refresh {
             self.dry_schedule = Some(self.schedule.clone());
         }
-        let (threads, effects) = self.queue_threads(reconciled.result);
+        let (threads, mut effects) = self.queue_threads(reconciled.result);
         self.queue.reconcile(threads);
         if self.dry_run && trigger == Trigger::Refresh {
             self.history.clear();
             self.report("Queue reset to Fastmail, undo history cleared");
+        }
+        let current = self.queue.current().map(|t| t.id.clone());
+        effects.extend(match reconciled.snoozed {
+            Some(snoozed) if self.mailboxes.snooze().is_some() => {
+                self.return_due(Thread::all_from_query(snoozed))
+            }
+            _ => self.forget_due(),
+        });
+        if let Some(id) = current {
+            self.queue.to_thread(&id);
         }
         effects
     }
@@ -1937,14 +2186,21 @@ struct Placed {
     went_to: Option<String>,
 }
 
-/// Where `thread` sorts: the later of its matching email's `receivedAt`
-/// and when it returned from snooze.
-fn sort_key(schedule: &Schedule, thread: &Thread) -> Timestamp {
-    let received = thread.hit().received_at;
-    match schedule.get(&thread.id).and_then(|e| e.returned_at) {
-        Some(returned) => received.max(returned),
-        None => received,
-    }
+/// What `update` does to each email of `threads` it patches.
+fn changes(threads: &[Thread], update: &EmailUpdate) -> Vec<Change> {
+    threads
+        .iter()
+        .flat_map(|thread| &thread.emails)
+        .filter_map(|email| {
+            let patch = update.get(&email.id)?;
+            let before = State::from(email);
+            Some(Change {
+                id: email.id.clone(),
+                after: before.patched(patch),
+                before,
+            })
+        })
+        .collect()
 }
 
 /// The dry-run log effect for `step` on `entry`.
@@ -1994,7 +2250,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
     match msg {
         Msg::Start => {
             app.next_reconcile_at = app.now + RECONCILE_INTERVAL;
-            app.due_at_launch = app.has_due();
+            app.due_at_launch = true;
             app.set_filter("")
         }
         Msg::SetFilter(text) => app.set_filter(&text),
@@ -2073,17 +2329,15 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
                 }
             }
         }
+        Msg::Unsnooze => {
+            let count = app.take_count();
+            app.perform(Repeat {
+                action: Action::Unsnooze,
+                count,
+            })
+        }
         Msg::MailboxCreated { job, result } => app.mailbox_created(job, result),
-        Msg::SnoozedLoaded { result } => match result {
-            Ok(result) => app.return_due(Thread::all_from_query(result)),
-            Err(error) => match error.fatal() {
-                Some(fatal) => vec![Effect::Fatal(fatal)],
-                None => {
-                    app.status = format!("Could not check snoozed threads: {error}");
-                    Vec::new()
-                }
-            },
-        },
+        Msg::SnoozedLoaded { result } => app.snoozed_loaded(result),
         Msg::ScheduleFailed { job, error } => app.schedule_failed(job, &error),
         Msg::Repeat => {
             let count = app.take_count();

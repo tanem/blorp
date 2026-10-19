@@ -52,6 +52,21 @@ fn store(snooze_mailbox: bool) -> Store {
     builder.build()
 }
 
+/// A schedule in which t3, in the snooze mailbox, returns next Sunday.
+fn snoozed_t3() -> Schedule {
+    let mut schedule = Schedule::default();
+    schedule.set(
+        "t3",
+        Some(Entry {
+            emails: [("e3".into(), "mb-inbox".into())].into(),
+            snoozed_at: at("2026-10-10T09:00:00Z"),
+            return_at: at("2026-10-25T08:00:00Z"),
+            returned_at: None,
+        }),
+    );
+    schedule
+}
+
 /// Types each key one virtual second after the last, then waits a second.
 fn script(keys: &'static str) -> impl Stream<Item = io::Result<Event>> + Unpin {
     let keys = keys.chars().map(Some).chain([None]);
@@ -112,7 +127,7 @@ async fn a_snooze_writes_the_schedule_file_and_sends_the_move() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("blorp/snooze.json");
     let jmap = FakeJmap::new(store(true));
-    let app = start(&jmap, &file, Schedule::default()).await;
+    let app = start(&jmap, &file, snoozed_t3()).await;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
     run(
@@ -153,7 +168,7 @@ async fn a_schedule_write_that_fails_sends_nothing() {
     fs::write(&state, "a file where the state directory should be").unwrap();
     let file = state.join("snooze.json");
     let jmap = FakeJmap::new(store(true));
-    let app = start(&jmap, &file, Schedule::default()).await;
+    let app = start(&jmap, &file, snoozed_t3()).await;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
     run(
@@ -271,5 +286,67 @@ async fn a_due_thread_returns_at_launch_after_the_inbox_loads() {
     let screen = screen(&terminal);
     assert!(screen[0].contains("Renewal"), "{screen:#?}");
     assert!(screen[0].contains('●'), "returned unread: {screen:#?}");
+    assert_eq!(screen[23].trim_end(), "Returned 1 thread from snooze");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_thread_that_falls_due_while_blorp_runs_returns_on_the_reconcile_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("blorp/snooze.json");
+    let mut schedule = snoozed_t3();
+    let mut entry = schedule.get("t3").unwrap().clone();
+    entry.return_at = at("2026-10-18T12:00:30Z");
+    schedule.set("t3", Some(entry));
+    let jmap = FakeJmap::new(store(true));
+    let app = start(&jmap, &file, schedule).await;
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let clock = TestClock::new(at(NOW));
+    // The clock moves past the return time 45 s in; the tick comes at 60 s,
+    // and the keys end at 75 s.
+    let keys = {
+        let clock = clock.clone();
+        Box::pin(stream::once(async move {
+            tokio::time::sleep(Duration::from_secs(45)).await;
+            clock.set(at("2026-10-18T12:00:45Z"));
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok(Event::Key(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)))
+        }))
+    };
+
+    run(&mut terminal, keys, jmap.clone(), clock, app)
+        .await
+        .unwrap();
+
+    let calls: Vec<Call> = jmap
+        .calls()
+        .into_iter()
+        .filter(|c| matches!(c, Call::Reconcile(..) | Call::SetEmails(_)))
+        .collect();
+    let query = |mailbox: &str, extra_threads: &[&str]| EmailQuery {
+        filter: json!({"inMailbox": mailbox}),
+        ascending: false,
+        limit: 500,
+        extra_threads: extra_threads.iter().map(|t| t.to_string()).collect(),
+    };
+    assert_eq!(
+        calls,
+        [
+            Call::Reconcile(query("mb-inbox", &[]), Some(query("mb-snooze", &["t3"]))),
+            Call::SetEmails(update(&[(
+                "e3",
+                json!({
+                    "mailboxIds/mb-snooze": null,
+                    "mailboxIds/mb-inbox": true,
+                    "keywords/$seen": null
+                })
+            )])),
+        ]
+    );
+    assert_eq!(
+        written(&file)["threads"]["t3"]["returnedAt"],
+        "2026-10-18T12:00:45+00:00"
+    );
+    let screen = screen(&terminal);
+    assert!(screen[0].contains("Renewal"), "{screen:#?}");
     assert_eq!(screen[23].trim_end(), "Returned 1 thread from snooze");
 }

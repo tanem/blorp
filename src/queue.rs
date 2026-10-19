@@ -130,6 +130,19 @@ impl Queue {
         self.threads.insert(index, thread);
     }
 
+    /// Puts the rows in the order `sort` leaves them. The cursor keeps its
+    /// row number.
+    pub fn resort(&mut self, sort: impl FnOnce(&mut [Thread])) {
+        sort(&mut self.threads);
+    }
+
+    /// Moves to the thread with `id`, if it is in the queue.
+    pub fn to_thread(&mut self, id: &str) {
+        if let Some(index) = self.index_of(id) {
+            self.cursor = index;
+        }
+    }
+
     pub fn down(&mut self, rows: usize) {
         self.cursor = self.cursor.saturating_add(rows).min(self.last());
     }

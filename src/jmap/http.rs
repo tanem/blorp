@@ -147,10 +147,17 @@ impl HttpJmap {
         Ok(response.method_responses)
     }
 
-    /// The staged fetch [`Jmap::query`] describes, with `Mailbox/get`
-    /// for every mailbox ahead of the query's calls in the first request
-    /// when `mailboxes` is true. The mailbox list is empty when it is false.
-    async fn fetch(&self, query: &EmailQuery, mailboxes: bool) -> Result<Reconciled, Error> {
+    /// The staged fetch [`Jmap::query`] describes for each of `queries`,
+    /// with `Mailbox/get` for every mailbox ahead of the queries' calls in
+    /// the first request when `mailboxes` is true. Each query's first-stage
+    /// chain goes into that one request, its call ids prefixed with the
+    /// query's prefix, and the later stages follow for each query in turn.
+    /// The mailbox list is empty when `mailboxes` is false.
+    async fn fetch(
+        &self,
+        queries: &[(&str, &EmailQuery)],
+        mailboxes: bool,
+    ) -> Result<(Vec<Mailbox>, Vec<QueryResult>), Error> {
         let account = &self.account_id;
         let mut calls = Vec::new();
         if mailboxes {
@@ -160,37 +167,39 @@ impl HttpJmap {
                 "m",
             ));
         }
-        calls.extend([
-            call(
-                "Email/query",
-                json!({
-                    "accountId": account,
-                    "filter": query.filter,
-                    "sort": [{"property": "receivedAt", "isAscending": query.ascending}],
-                    "collapseThreads": true,
-                    "limit": query.limit,
-                    "calculateTotal": true
-                }),
-                "0",
-            ),
-            call(
-                "Email/get",
-                json!({
-                    "accountId": account,
-                    "#ids": {"resultOf": "0", "name": "Email/query", "path": "/ids"},
-                    "properties": ["threadId"]
-                }),
-                "1",
-            ),
-            call(
-                "Thread/get",
-                json!({
-                    "accountId": account,
-                    "#ids": {"resultOf": "1", "name": "Email/get", "path": "/list/*/threadId"}
-                }),
-                "2",
-            ),
-        ]);
+        for (prefix, query) in queries {
+            calls.extend([
+                call(
+                    "Email/query",
+                    json!({
+                        "accountId": account,
+                        "filter": query.filter,
+                        "sort": [{"property": "receivedAt", "isAscending": query.ascending}],
+                        "collapseThreads": true,
+                        "limit": query.limit,
+                        "calculateTotal": true
+                    }),
+                    &format!("{prefix}0"),
+                ),
+                call(
+                    "Email/get",
+                    json!({
+                        "accountId": account,
+                        "#ids": {"resultOf": format!("{prefix}0"), "name": "Email/query", "path": "/ids"},
+                        "properties": ["threadId"]
+                    }),
+                    &format!("{prefix}1"),
+                ),
+                call(
+                    "Thread/get",
+                    json!({
+                        "accountId": account,
+                        "#ids": {"resultOf": format!("{prefix}1"), "name": "Email/get", "path": "/list/*/threadId"}
+                    }),
+                    &format!("{prefix}2"),
+                ),
+            ]);
+        }
         let responses = self.send(calls).await?;
         let mailboxes = if mailboxes {
             let got: GetResponse<Mailbox> = response_of(&responses, "Mailbox/get", "m")?;
@@ -198,9 +207,31 @@ impl HttpJmap {
         } else {
             Vec::new()
         };
-        let ids: QueryResponse = response_of(&responses, "Email/query", "0")?;
-        let hits: GetResponse<Hit> = response_of(&responses, "Email/get", "1")?;
-        let threads: GetResponse<Thread> = response_of(&responses, "Thread/get", "2")?;
+        let mut results = Vec::with_capacity(queries.len());
+        for (prefix, query) in queries {
+            let ids: QueryResponse = response_of(&responses, "Email/query", &format!("{prefix}0"))?;
+            let hits: GetResponse<Hit> =
+                response_of(&responses, "Email/get", &format!("{prefix}1"))?;
+            let threads: GetResponse<Thread> =
+                response_of(&responses, "Thread/get", &format!("{prefix}2"))?;
+            results.push(
+                self.fetch_members(query, ids, hits.list, threads.list)
+                    .await?,
+            );
+        }
+        Ok((mailboxes, results))
+    }
+
+    /// The later stages of a query's fetch: its extra threads, then every
+    /// email of its threads.
+    async fn fetch_members(
+        &self,
+        query: &EmailQuery,
+        ids: QueryResponse,
+        hits: Vec<Hit>,
+        threads: Vec<Thread>,
+    ) -> Result<QueryResult, Error> {
+        let account = &self.account_id;
         let chunks: Vec<&[String]> = query
             .extra_threads
             .chunks(self.limits.max_objects_in_get)
@@ -213,21 +244,20 @@ impl HttpJmap {
             )
             .await?;
         let extra_threads: Vec<Thread> = extra.into_iter().flat_map(|got| got.list).collect();
-        let mut email_ids = member_ids(&ids.ids, &hits.list, &threads.list);
+        let mut email_ids = member_ids(&ids.ids, &hits, &threads);
         for thread in &extra_threads {
-            if !threads.list.iter().any(|t| t.id == thread.id) {
+            if !threads.iter().any(|t| t.id == thread.id) {
                 email_ids.extend(thread.email_ids.iter().cloned());
             }
         }
         let emails = self.get_emails(&email_ids).await?;
-        let result = QueryResult {
+        Ok(QueryResult {
             total: ids.total.unwrap_or(ids.ids.len()),
             ids: ids.ids,
-            threads: threads.list,
+            threads,
             extra_threads,
             emails,
-        };
-        Ok(Reconciled { mailboxes, result })
+        })
     }
 }
 
@@ -245,11 +275,24 @@ impl Jmap for HttpJmap {
     }
 
     async fn query(&self, query: &EmailQuery) -> Result<QueryResult, Error> {
-        Ok(self.fetch(query, false).await?.result)
+        let (_, results) = self.fetch(&[("", query)], false).await?;
+        Ok(results.into_iter().next().expect("the query's result"))
     }
 
-    async fn reconcile(&self, query: &EmailQuery) -> Result<Reconciled, Error> {
-        self.fetch(query, true).await
+    async fn reconcile(
+        &self,
+        query: &EmailQuery,
+        snoozed: Option<&EmailQuery>,
+    ) -> Result<Reconciled, Error> {
+        let mut queries = vec![("", query)];
+        queries.extend(snoozed.map(|snoozed| ("s", snoozed)));
+        let (mailboxes, results) = self.fetch(&queries, true).await?;
+        let mut results = results.into_iter();
+        Ok(Reconciled {
+            mailboxes,
+            result: results.next().expect("the queue's result"),
+            snoozed: results.next(),
+        })
     }
 
     async fn events(&self) -> Result<Option<PushStream>, Error> {

@@ -57,7 +57,7 @@ The `Snoozed (blorp)` mailbox that holds snoozed threads until they return. It i
 _Avoid_: Snoozed folder, snooze folder
 
 **Return**:
-A snoozed thread coming back to the queue, at its chosen time or early when a new email arrives in the thread.
+A snoozed thread coming back to the queue, at its chosen time or early when it gains an email received after it was snoozed in a mailbox other than the snooze mailbox, Trash, Junk, Drafts, and Sent.
 _Avoid_: Unsnooze (for the automatic case), wake, resurface
 
 **Undo**:

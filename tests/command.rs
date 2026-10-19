@@ -393,8 +393,8 @@ fn tab_and_shift_tab_cycle_through_the_command_names_and_aliases() {
 
     press(&mut h, KeyCode::Tab);
     let names = vec![
-        "archive", "e", "snooze", "z", "undo", "u", "redo", "filter", "sort", "refresh", "dry",
-        "quit", "q",
+        "archive", "e", "snooze", "z", "unsnooze", "uz", "undo", "u", "redo", "filter", "sort",
+        "refresh", "dry", "quit", "q",
     ];
     assert_eq!(candidates(&h), Some((names.clone(), 0)));
     assert_eq!(h.app.prompt(), Some("archive"));
@@ -404,7 +404,7 @@ fn tab_and_shift_tab_cycle_through_the_command_names_and_aliases() {
     press(&mut h, KeyCode::BackTab);
     press(&mut h, KeyCode::BackTab);
     assert_eq!(h.app.prompt(), Some("q"));
-    assert_eq!(candidates(&h), Some((names, 12)));
+    assert_eq!(candidates(&h), Some((names, 14)));
     assert_eq!(h.app.prompt_cursor(), Some(1));
 }
 
@@ -416,7 +416,10 @@ fn shift_tab_starts_from_the_last_candidate() {
     press(&mut h, KeyCode::BackTab);
 
     assert_eq!(h.app.prompt(), Some("u"));
-    assert_eq!(candidates(&h), Some((vec!["undo", "u"], 1)));
+    assert_eq!(
+        candidates(&h),
+        Some((vec!["unsnooze", "uz", "undo", "u"], 3))
+    );
 }
 
 #[test]

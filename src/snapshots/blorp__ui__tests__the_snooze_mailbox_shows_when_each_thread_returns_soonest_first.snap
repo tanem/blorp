@@ -1,0 +1,28 @@
+---
+source: src/ui.rs
+expression: screen
+---
+"  1    Hotel                Booking                                          now"
+"  1    Airline              Flights                                           3h"
+"  2    Insurer              Renewal                                           6d"
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+" NORMAL  Snoozed (blorp)  in:"Snoozed (blorp)"                     soonest  1/3 "
+"                                                                                "

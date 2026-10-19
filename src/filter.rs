@@ -136,19 +136,7 @@ impl Filter {
                     json!({"inMailbox": mailbox.id})
                 }
                 Condition::InAny => {
-                    let snooze = mailboxes.snooze().map(|m| &m.id);
-                    let excluded = mailboxes
-                        .iter()
-                        .filter(|m| {
-                            matches!(
-                                m.role,
-                                Some(Role::Trash | Role::Junk | Role::Drafts | Role::Sent)
-                            ) || Some(&m.id) == snooze
-                        })
-                        .map(|m| m.id.clone())
-                        .collect();
-                    let mailbox = QueueMailbox::Any(excluded);
-                    queue = Some((mailbox, "All mail".into()));
+                    queue = Some((mailboxes.all_mail(), "All mail".into()));
                     continue;
                 }
                 Condition::From(value) => json!({"from": value}),

@@ -111,6 +111,24 @@ impl Mailboxes {
             .find(|m| m.parent_id.is_none() && m.role.is_none() && m.name == SNOOZE_MAILBOX)
     }
 
+    /// The queue mailbox of `in:any`: every mailbox except Trash, Junk,
+    /// Drafts, Sent, and the snooze mailbox.
+    pub fn all_mail(&self) -> QueueMailbox {
+        let snooze = self.snooze().map(|m| &m.id);
+        let excluded = self
+            .0
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.role,
+                    Some(Role::Trash | Role::Junk | Role::Drafts | Role::Sent)
+                ) || Some(&m.id) == snooze
+            })
+            .map(|m| m.id.clone())
+            .collect();
+        QueueMailbox::Any(excluded)
+    }
+
     /// Adds `mailbox`, as one just created.
     pub fn add(&mut self, mailbox: jmap::Mailbox) {
         self.0.extend(Mailboxes::from(vec![mailbox]).0);
