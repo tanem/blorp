@@ -1736,8 +1736,7 @@ impl App {
     /// from, or the Inbox when that is gone, marked unread with the flag
     /// untouched, as one outbox job per thread, and the entry records when.
     /// A due entry whose thread is gone or has no snoozed email left is
-    /// dropped. In dry
-    /// run the return happens in memory only.
+    /// dropped. In dry run the return happens in memory only.
     fn return_due(&mut self, snoozed: Vec<Thread>) -> Vec<Effect> {
         let (Some(snooze), Some(inbox)) = (
             self.mailboxes.snooze().map(|m| m.id.clone()),

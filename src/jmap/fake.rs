@@ -289,7 +289,10 @@ impl Store {
         let (hits, _) = self.get_emails(&ids)?;
         let thread_ids: Vec<String> = hits.into_iter().map(|e| e.thread_id).collect();
         let (threads, _) = self.get_threads(&thread_ids)?;
-        let (extra_threads, _) = self.get_threads(&query.extra_threads)?;
+        let mut extra_threads = Vec::new();
+        for chunk in query.extra_threads.chunks(MAX_OBJECTS_IN_GET) {
+            extra_threads.extend(self.get_threads(chunk)?.0);
+        }
         let email_ids: Vec<String> = threads
             .iter()
             .chain(

@@ -417,3 +417,22 @@ async fn a_refused_mailbox_is_reported_with_its_set_error() {
         })
     );
 }
+
+#[tokio::test]
+async fn extra_threads_are_fetched_in_gets_of_at_most_max_objects_in_get() {
+    let server = LocalJmap::start(store(), TOKEN).await;
+    let jmap = connect(&server, TOKEN).await.unwrap();
+    let mut extra: Vec<String> = (0..4096).map(|i| format!("t-gone-{i}")).collect();
+    extra.push("t3".into());
+
+    let result = jmap
+        .query(&EmailQuery {
+            extra_threads: extra,
+            ..inbox(1)
+        })
+        .await
+        .unwrap();
+
+    let found: Vec<&str> = result.extra_threads.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(found, ["t3"]);
+}

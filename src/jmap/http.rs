@@ -191,13 +191,6 @@ impl HttpJmap {
                 "2",
             ),
         ]);
-        if !query.extra_threads.is_empty() {
-            calls.push(call(
-                "Thread/get",
-                json!({"accountId": account, "ids": query.extra_threads}),
-                "3",
-            ));
-        }
         let responses = self.send(calls).await?;
         let mailboxes = if mailboxes {
             let got: GetResponse<Mailbox> = response_of(&responses, "Mailbox/get", "m")?;
@@ -208,12 +201,18 @@ impl HttpJmap {
         let ids: QueryResponse = response_of(&responses, "Email/query", "0")?;
         let hits: GetResponse<Hit> = response_of(&responses, "Email/get", "1")?;
         let threads: GetResponse<Thread> = response_of(&responses, "Thread/get", "2")?;
-        let extra_threads = if query.extra_threads.is_empty() {
-            Vec::new()
-        } else {
-            let got: GetResponse<Thread> = response_of(&responses, "Thread/get", "3")?;
-            got.list
-        };
+        let chunks: Vec<&[String]> = query
+            .extra_threads
+            .chunks(self.limits.max_objects_in_get)
+            .collect();
+        let extra: Vec<GetResponse<Thread>> = self
+            .send_chunked(
+                "Thread/get",
+                &chunks,
+                |chunk| json!({"accountId": account, "ids": chunk}),
+            )
+            .await?;
+        let extra_threads: Vec<Thread> = extra.into_iter().flat_map(|got| got.list).collect();
         let mut email_ids = member_ids(&ids.ids, &hits.list, &threads.list);
         for thread in &extra_threads {
             if !threads.list.iter().any(|t| t.id == thread.id) {

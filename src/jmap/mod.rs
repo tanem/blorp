@@ -28,8 +28,10 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// The threads matching `query` and every email of them, in two stages
     /// that are not atomic. First, one request chains `Email/query` with
     /// `collapseThreads`, `Email/get` for the hits' threads, and `Thread/get`
-    /// by back-reference, then a `Thread/get` of the query's extra threads
-    /// when it names any. Then the threads' emails are fetched with
+    /// by back-reference. Next, when the query names extra threads, they
+    /// are fetched in `Thread/get` calls of at most the session's
+    /// `maxObjectsInGet` ids, in requests of at most its `maxCallsInRequest`
+    /// calls. Then the threads' emails are fetched with
     /// `Email/get` calls of at most the session's `maxObjectsInGet` ids, in
     /// requests of at most its `maxCallsInRequest` calls, sent one after
     /// another; none is sent for an empty queue. An email gone
