@@ -1,6 +1,8 @@
 //! A one-line prompt: its text and cursor, the editing keys, and a
 //! session history walked with Up and Down. Pure.
 
+use std::ops::Range;
+
 /// A key typed at a prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -18,6 +20,10 @@ pub enum Key {
     Clear,
     Up,
     Down,
+    /// Tab: complete the word under the cursor.
+    Tab,
+    /// Shift-Tab: complete the word under the cursor, cycling back.
+    BackTab,
     Enter,
     Esc,
 }
@@ -61,13 +67,13 @@ impl Prompt {
 
     /// Applies an editing key. Up and Down walk `history`, newest first,
     /// through the entries that start with the text typed before the walk
-    /// began; Down past the newest puts that text back. Enter and Esc are
-    /// for the caller and change nothing here.
+    /// began; Down past the newest puts that text back. Tab, Shift-Tab,
+    /// Enter, and Esc are for the caller and change nothing here.
     pub fn edit(&mut self, key: Key, history: &History) {
         match key {
             Key::Up => return self.older(history),
             Key::Down => return self.newer(history),
-            Key::Enter | Key::Esc => return,
+            Key::Tab | Key::BackTab | Key::Enter | Key::Esc => return,
             _ => self.walk = None,
         }
         match key {
@@ -101,6 +107,15 @@ impl Prompt {
             Key::Clear => *self = Prompt::new(""),
             _ => {}
         }
+    }
+
+    /// Replaces the characters in `range` with `text` and puts the cursor
+    /// after it.
+    pub fn replace(&mut self, range: Range<usize>, text: &str) {
+        self.walk = None;
+        let (from, to) = (self.byte(range.start), self.byte(range.end));
+        self.text.replace_range(from..to, text);
+        self.cursor = range.start + text.chars().count();
     }
 
     fn older(&mut self, history: &History) {

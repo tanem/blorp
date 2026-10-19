@@ -11,6 +11,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 pub mod app;
 pub mod cli;
+pub mod command;
 pub mod config;
 pub mod filter;
 pub mod harness;

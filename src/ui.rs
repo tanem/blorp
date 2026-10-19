@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Msg};
+use crate::app::{App, Mode, Msg};
 use crate::mail::Thread;
 use crate::prompt::Key;
 
@@ -25,11 +25,14 @@ const AGE_WIDTH: usize = 4;
 const FIXED_WIDTH: usize =
     NUMBER_WIDTH + 1 + 3 + SENDER_WIDTH + 1 + 1 + COUNT_WIDTH + 1 + AGE_WIDTH;
 
-/// Draws the whole screen: the queue, the statusline, and the bottom line.
+/// Draws the whole screen: the queue, the statusline, the completion
+/// candidates while Tab is cycling through them, and the bottom line.
 pub fn view(app: &App, frame: &mut Frame) {
-    let [queue, statusline, bottom] = Layout::vertical([
+    let completion = app.completion();
+    let [queue, statusline, candidates, bottom] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),
+        Constraint::Length(u16::from(completion.is_some())),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -38,16 +41,55 @@ pub fn view(app: &App, frame: &mut Frame) {
         Paragraph::new(status_bar(app, statusline.width)),
         statusline,
     );
+    if let Some((all, index)) = completion {
+        frame.render_widget(
+            Paragraph::new(candidate_line(all, index, candidates.width)),
+            candidates,
+        );
+    }
+    let prefix = if app.mode() == Mode::Command {
+        ':'
+    } else {
+        '/'
+    };
     match (app.prompt(), app.prompt_cursor()) {
-        (Some(text), Some(cursor)) => prompt_line(frame, bottom, text, cursor),
+        (Some(text), Some(cursor)) => prompt_line(frame, bottom, prefix, text, cursor),
         _ => frame.render_widget(Paragraph::new(bottom_line(app)), bottom),
     }
 }
 
-/// The `/` prompt on the bottom line, with the terminal cursor at `cursor`
-/// characters into `text`, scrolled so the cursor stays on screen.
-fn prompt_line(frame: &mut Frame, area: Rect, text: &str, cursor: usize) {
-    let line = format!("/{text}");
+/// The completion candidates, two spaces apart, with the chosen one
+/// reversed, starting late enough that it fits in `width`.
+fn candidate_line(all: &[String], index: usize, width: u16) -> Line<'static> {
+    const GAP: &str = "  ";
+    let width = usize::from(width);
+    let mut first = 0;
+    while first < index
+        && all[first..=index].iter().map(|c| c.width()).sum::<usize>() + GAP.len() * (index - first)
+            > width
+    {
+        first += 1;
+    }
+    let mut spans = Vec::new();
+    for (i, candidate) in all.iter().enumerate().skip(first) {
+        if i > first {
+            spans.push(Span::raw(GAP));
+        }
+        let style = if i == index {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::new()
+        };
+        spans.push(Span::styled(candidate.clone(), style));
+    }
+    Line::from(spans)
+}
+
+/// A prompt on the bottom line, `prefix` then `text`, with the terminal
+/// cursor at `cursor` characters into `text`, scrolled so the cursor stays
+/// on screen.
+fn prompt_line(frame: &mut Frame, area: Rect, prefix: char, text: &str, cursor: usize) {
+    let line = format!("{prefix}{text}");
     let column = |chars: usize| -> usize {
         line.chars()
             .take(chars)
@@ -148,12 +190,11 @@ fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> 
 }
 
 fn status_bar(app: &App, width: u16) -> Line<'static> {
-    let (mode, colour) = if app.prompt().is_some() {
-        (" FILTER ", Color::Green)
-    } else if app.queue().visual().is_some() {
-        (" V-LINE ", Color::Yellow)
-    } else {
-        (" NORMAL ", Color::Blue)
+    let (mode, colour) = match app.mode() {
+        Mode::Filter => (" FILTER ", Color::Green),
+        Mode::Command => (" COMMAND ", Color::Green),
+        Mode::Visual => (" V-LINE ", Color::Yellow),
+        Mode::Normal => (" NORMAL ", Color::Blue),
     };
     let mode = Span::styled(
         mode,
@@ -278,7 +319,7 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
-    if app.prompt().is_some() {
+    if matches!(app.mode(), Mode::Filter | Mode::Command) {
         return prompt_key(key);
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -302,6 +343,7 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('.') => Some(Msg::Repeat),
         KeyCode::Char('D') => Some(Msg::ToggleDryRun),
         KeyCode::Char('/') => Some(Msg::OpenFilter),
+        KeyCode::Char(':') => Some(Msg::OpenCommand),
         KeyCode::Char('t') => Some(Msg::ToggleSort),
         KeyCode::Esc | KeyCode::Enter => Some(Msg::Cancel),
         KeyCode::Char(c) => c.to_digit(10).map(|d| Msg::Digit(d as u8)),
@@ -331,6 +373,8 @@ fn prompt_key(key: KeyEvent) -> Option<Msg> {
             KeyCode::End => Key::End,
             KeyCode::Up => Key::Up,
             KeyCode::Down => Key::Down,
+            KeyCode::Tab => Key::Tab,
+            KeyCode::BackTab => Key::BackTab,
             KeyCode::Enter => Key::Enter,
             KeyCode::Esc => Key::Esc,
             _ => return None,
@@ -508,6 +552,47 @@ mod tests {
         assert!(screen.contains(" FILTER "), "{screen}");
         assert!(screen.contains("/is:unread"), "{screen}");
         insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn command_line_with_candidates() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys(":filter is:");
+        h.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        h.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        let screen = render(&h, 80, 24);
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(lines[21].contains(" COMMAND "), "{screen}");
+        assert!(
+            lines[22].contains("is:unread  is:read  is:flagged  is:list"),
+            "{screen}"
+        );
+        assert!(lines[23].contains(":filter is:read"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn the_candidate_line_scrolls_to_the_chosen_candidate() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys(":");
+        h.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+
+        let screen = render(&h, 20, 6);
+        let candidates = screen.lines().nth(4).unwrap();
+        assert!(candidates.contains("quit  q"), "{screen}");
+        assert!(!candidates.contains("archive"), "{screen}");
+    }
+
+    #[test]
+    fn the_command_line_puts_the_terminal_cursor_after_the_typed_text() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys(":sort");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal.draw(|frame| view(&h.app, frame)).unwrap();
+
+        terminal.backend_mut().assert_cursor_position((5, 23));
     }
 
     #[test]
