@@ -83,6 +83,9 @@ pub struct App {
     creating: Option<Creating>,
     /// Whether the due-snooze check waits for the first queue to load.
     due_at_launch: bool,
+    /// The last outbox job number given out when the launch check's query
+    /// was sent, while it is in flight.
+    checking: Option<u64>,
     /// The returned threads the latest queue query fetched by id.
     extra: Extra,
 }
@@ -211,6 +214,15 @@ impl Order {
     fn ascending(self) -> bool {
         match self {
             Order::Received { ascending } | Order::Return { ascending } => ascending,
+        }
+    }
+
+    /// Sorts `threads` in this order, keeping the order between ties.
+    fn sort(self, threads: &mut [Thread], schedule: &Schedule) {
+        if self.ascending() {
+            threads.sort_by_key(|t| self.key(schedule, t));
+        } else {
+            threads.sort_by_key(|t| Reverse(self.key(schedule, t)));
         }
     }
 
@@ -554,6 +566,7 @@ impl App {
             snooze_picker: None,
             creating: None,
             due_at_launch: false,
+            checking: None,
             extra: Extra::default(),
         }
     }
@@ -1417,11 +1430,11 @@ impl App {
     }
 
     /// The return of `thread` from the snooze mailbox, whose schedule entry
-    /// is `entry`: each of its emails there goes back to the mailbox the
-    /// entry records it came from, or the Inbox when the entry records none
-    /// or that mailbox is gone, marked unread with the flag untouched. Gives
-    /// the patches and the entry recording the return, or none when the
-    /// thread has no email in the snooze mailbox.
+    /// is `entry`: each email the entry records that is still there goes
+    /// back to the mailbox it came from, or the Inbox when that is gone, and
+    /// with no entry each of its emails there goes to the Inbox, marked
+    /// unread with the flag untouched. Gives the patches and the entry
+    /// recording the return, or none when no email goes back.
     fn return_update(
         &self,
         thread: &Thread,
@@ -1435,10 +1448,14 @@ impl App {
             if !email.mailbox_ids.contains(snooze) {
                 continue;
             }
-            let origin = entry
-                .and_then(|e| e.emails.get(&email.id))
-                .filter(|id| self.mailboxes.by_id(id).is_some())
-                .unwrap_or(inbox);
+            let origin = match entry {
+                Some(entry) => match entry.emails.get(&email.id) {
+                    Some(origin) if self.mailboxes.by_id(origin).is_some() => origin,
+                    Some(_) => inbox,
+                    None => continue,
+                },
+                None => inbox,
+            };
             let before = State::from(email);
             let mut after = before.clone();
             after.mailbox_ids.remove(snooze);
@@ -1777,8 +1794,7 @@ impl App {
         }
         if !entry.schedule.is_empty() {
             let schedule = self.dry_schedule.as_ref().unwrap_or(&self.schedule);
-            self.queue
-                .resort(order.ascending(), |t| order.key(schedule, t));
+            self.queue.resort(|threads| order.sort(threads, schedule));
         }
         placed
     }
@@ -1883,9 +1899,9 @@ impl App {
     }
 
     /// The query on the snooze mailbox that the due-snooze check runs,
-    /// fetching by id too every snoozed thread not yet returned, since the
-    /// query's limit can leave one out. None when there is no snooze
-    /// mailbox on Fastmail.
+    /// fetching by id too the threads due to return, since the query's
+    /// limit can leave one out. None when there is no snooze mailbox on
+    /// Fastmail.
     fn snoozed_query(&self) -> Option<EmailQuery> {
         let snooze = self
             .mailboxes
@@ -1895,13 +1911,17 @@ impl App {
             filter: json!({"inMailbox": snooze.id}),
             ascending: false,
             limit: QUEUE_LIMIT,
-            extra_threads: self
-                .schedule()
-                .iter()
-                .filter(|(_, e)| e.returned_at.is_none())
-                .map(|(id, _)| id.clone())
-                .collect(),
+            extra_threads: self.due(),
         })
+    }
+
+    /// The ids of the threads due to return that have not.
+    fn due(&self) -> Vec<String> {
+        self.schedule()
+            .iter()
+            .filter(|(_, e)| e.is_due(self.now))
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Starts the due-snooze check at launch: a query on the snooze
@@ -1909,21 +1929,38 @@ impl App {
     /// the due entries.
     fn check_due(&mut self) -> Vec<Effect> {
         match self.snoozed_query() {
-            Some(query) => vec![Effect::QuerySnoozed { query }],
+            Some(query) => {
+                self.checking = Some(self.job);
+                vec![Effect::QuerySnoozed { query }]
+            }
             None => self.forget_due(),
+        }
+    }
+
+    /// Handles the launch check's query on the snooze mailbox. As with a
+    /// reconcile, the result is used only if the outbox stayed idle from
+    /// when it was sent, so a snapshot taken before a return or an action
+    /// landed never returns a thread again; otherwise the next reconcile
+    /// runs the check.
+    fn snoozed_loaded(&mut self, result: Result<QueryResult, Error>) -> Vec<Effect> {
+        let sent = self.checking.take();
+        match result {
+            Ok(_) if sent != Some(self.job) || !self.in_flight.is_empty() => Vec::new(),
+            Ok(result) => self.return_due(Thread::all_from_query(result)),
+            Err(error) => match error.fatal() {
+                Some(fatal) => vec![Effect::Fatal(fatal)],
+                None => {
+                    self.status = format!("Could not check snoozed threads: {error}");
+                    Vec::new()
+                }
+            },
         }
     }
 
     /// Drops the entries of the threads due to return, which have no snooze
     /// mailbox to return from.
     fn forget_due(&mut self) -> Vec<Effect> {
-        let now = self.now;
-        let due: Vec<String> = self
-            .schedule()
-            .iter()
-            .filter(|(_, e)| e.is_due(now))
-            .map(|(id, _)| id.clone())
-            .collect();
+        let due = self.due();
         self.forget_entries(&due)
     }
 
@@ -1939,19 +1976,26 @@ impl App {
         self.schedule_write(None).into_iter().collect()
     }
 
-    /// Whether `thread`, in the snooze mailbox, returns now: its entry is
-    /// due, it has none, its entry records a return already made, or it
-    /// returns early because it gained an email received after it was
-    /// snoozed that is outside the snooze mailbox, Trash, Junk, Drafts, and
-    /// Sent.
-    fn returns_now(&self, thread: &Thread, entry: Option<&snooze::Entry>) -> bool {
+    /// Whether `thread`, in the snooze mailbox, returns now: it has no
+    /// entry, its entry is due, or it returns early because it gained an
+    /// email received after it was snoozed in `outside`, every mailbox but
+    /// the snooze mailbox, Trash, Junk, Drafts, and Sent. A thread whose
+    /// entry records a return already made does not.
+    fn returns_now(
+        &self,
+        thread: &Thread,
+        entry: Option<&snooze::Entry>,
+        outside: &QueueMailbox,
+    ) -> bool {
         let Some(entry) = entry else {
             return true;
         };
-        if entry.returned_at.is_some() || entry.is_due(self.now) {
+        if entry.returned_at.is_some() {
+            return false;
+        }
+        if entry.is_due(self.now) {
             return true;
         }
-        let outside = self.mailboxes.all_mail();
         thread.emails.iter().any(|email| {
             email.received_at > entry.snoozed_at
                 && email.mailbox_ids.iter().any(|id| outside.contains(id))
@@ -1971,11 +2015,12 @@ impl App {
             .filter(|(id, e)| e.is_due(now) && !snoozed.iter().any(|t| t.id == **id))
             .map(|(id, _)| id.clone())
             .collect();
+        let outside = self.mailboxes.all_mail();
         let mut effects = Vec::new();
         let mut returned = 0;
         for thread in snoozed {
             let before = self.schedule().get(&thread.id).cloned();
-            if !self.returns_now(&thread, before.as_ref()) {
+            if !self.returns_now(&thread, before.as_ref(), &outside) {
                 continue;
             }
             let Some((update, after)) = self.return_update(&thread, before.as_ref()) else {
@@ -2011,22 +2056,15 @@ impl App {
     /// or in the snooze mailbox by when each returns, keeping the server's
     /// order between ties.
     fn ordered(&self, mut threads: Vec<Thread>) -> Vec<Thread> {
-        let schedule = self.schedule();
-        let order = self.order();
-        if order.ascending() {
-            threads.sort_by_key(|t| order.key(schedule, t));
-        } else {
-            threads.sort_by_key(|t| Reverse(order.key(schedule, t)));
-        }
+        self.order().sort(&mut threads, self.schedule());
         threads
     }
 
     /// Re-runs the shown queue's query with `Mailbox/get`, and the snooze
     /// mailbox's query for the due-snooze check, to bring the queue, the
     /// mailbox list, and the snoozed threads back in line with Fastmail.
-    /// While a query
-    /// is in flight or the outbox is busy it waits, and runs once both are
-    /// done. In dry run only `R` runs one.
+    /// While a query is in flight or the outbox is busy it waits, and runs
+    /// once both are done. In dry run only `R` runs one.
     fn reconcile(&mut self, trigger: Trigger) -> Vec<Effect> {
         if self.dry_run && trigger == Trigger::Auto {
             return Vec::new();
@@ -2108,7 +2146,8 @@ impl App {
     }
 
     /// Replaces the mailbox list and the queue's rows with Fastmail's, then
-    /// runs the due-snooze check on the snooze mailbox's threads. The
+    /// runs the due-snooze check on the snooze mailbox's threads, keeping
+    /// the cursor on its thread. The
     /// filter keeps the mailbox ids it resolved to. Only `R` reaches here
     /// in dry run, where the undo history is cleared too.
     fn apply_reconciled(&mut self, reconciled: Reconciled, trigger: Trigger) -> Vec<Effect> {
@@ -2123,12 +2162,16 @@ impl App {
             self.history.clear();
             self.report("Queue reset to Fastmail, undo history cleared");
         }
+        let current = self.queue.current().map(|t| t.id.clone());
         effects.extend(match reconciled.snoozed {
             Some(snoozed) if self.mailboxes.snooze().is_some() => {
                 self.return_due(Thread::all_from_query(snoozed))
             }
             _ => self.forget_due(),
         });
+        if let Some(id) = current {
+            self.queue.to_thread(&id);
+        }
         effects
     }
 }
@@ -2294,16 +2337,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             })
         }
         Msg::MailboxCreated { job, result } => app.mailbox_created(job, result),
-        Msg::SnoozedLoaded { result } => match result {
-            Ok(result) => app.return_due(Thread::all_from_query(result)),
-            Err(error) => match error.fatal() {
-                Some(fatal) => vec![Effect::Fatal(fatal)],
-                None => {
-                    app.status = format!("Could not check snoozed threads: {error}");
-                    Vec::new()
-                }
-            },
-        },
+        Msg::SnoozedLoaded { result } => app.snoozed_loaded(result),
         Msg::ScheduleFailed { job, error } => app.schedule_failed(job, &error),
         Msg::Repeat => {
             let count = app.take_count();

@@ -275,8 +275,8 @@ impl Jmap for HttpJmap {
     }
 
     async fn query(&self, query: &EmailQuery) -> Result<QueryResult, Error> {
-        let (_, mut results) = self.fetch(&[("", query)], false).await?;
-        Ok(results.remove(0))
+        let (_, results) = self.fetch(&[("", query)], false).await?;
+        Ok(results.into_iter().next().expect("the query's result"))
     }
 
     async fn reconcile(
@@ -286,12 +286,12 @@ impl Jmap for HttpJmap {
     ) -> Result<Reconciled, Error> {
         let mut queries = vec![("", query)];
         queries.extend(snoozed.map(|snoozed| ("s", snoozed)));
-        let (mailboxes, mut results) = self.fetch(&queries, true).await?;
-        let snoozed = (results.len() > 1).then(|| results.remove(1));
+        let (mailboxes, results) = self.fetch(&queries, true).await?;
+        let mut results = results.into_iter();
         Ok(Reconciled {
             mailboxes,
-            result: results.remove(0),
-            snoozed,
+            result: results.next().expect("the queue's result"),
+            snoozed: results.next(),
         })
     }
 

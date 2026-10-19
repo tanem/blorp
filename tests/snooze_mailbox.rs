@@ -135,8 +135,9 @@ fn return_patch(origin: &str) -> Value {
 }
 
 #[test]
-fn every_reconcile_queries_the_snooze_mailbox_and_fetches_each_snoozed_thread() {
+fn every_reconcile_queries_the_snooze_mailbox_and_fetches_the_due_threads_by_id() {
     let (mut h, _) = Harness::launched(store(), false, schedule());
+    h.app.now = at("2026-10-18T12:01:00Z");
 
     let effects = h.send(Msg::ReconcileTick);
 
@@ -149,7 +150,7 @@ fn every_reconcile_queries_the_snooze_mailbox_and_fetches_each_snoozed_thread() 
             filter: json!({"inMailbox": "mb-snooze"}),
             ascending: false,
             limit: 500,
-            extra_threads: vec!["t1".into(), "t2".into(), "t3".into()],
+            extra_threads: vec!["t1".into()],
         })
     );
 }
@@ -457,4 +458,42 @@ fn in_dry_run_r_returns_a_due_thread_in_memory_only() {
     );
     assert_eq!(h.subjects(), ["Renewal", "Lunch"]);
     assert_eq!(h.status(), "[dry] Returned 1 thread from snooze");
+}
+
+#[test]
+fn a_return_on_a_reconcile_keeps_the_cursor_on_its_thread() {
+    let (mut h, _) = Harness::launched(store(), false, schedule());
+    h.store_mut().deliver(
+        EmailSpec::new("e2r", "t2", "2026-10-18T09:30:00Z")
+            .in_mailbox("mb-inbox")
+            .subject("Re: Flights"),
+    );
+    h.app.now = at("2026-10-18T12:01:00Z");
+
+    let effects = h.send(Msg::Wake);
+    h.settle(effects);
+
+    assert_eq!(h.subjects(), ["Renewal", "Re: Flights", "Lunch"]);
+    assert_eq!(h.subjects()[h.cursor()], "Lunch");
+}
+
+#[test]
+fn the_launch_check_answered_after_a_reconcile_returned_the_thread_sends_nothing_more() {
+    let mut schedule = schedule();
+    schedule.set("t1", Some(entry("e1", "mb-inbox", "2026-10-18T08:00:00Z")));
+    let mut h = Harness::with_schedule(store(), schedule);
+    let effects = h.start();
+    let effects = h.resolve(effects);
+    let [Effect::QuerySnoozed { query }] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    let stale = h.query(query);
+
+    let effects = h.send(Msg::Wake);
+    h.settle(effects);
+    assert_eq!(h.subjects(), ["Renewal", "Lunch"]);
+    let effects = h.send(Msg::SnoozedLoaded { result: stale });
+
+    assert_eq!(effects, vec![]);
+    assert_eq!(h.status(), "Returned 1 thread from snooze");
 }

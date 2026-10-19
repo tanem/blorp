@@ -130,13 +130,20 @@ impl Queue {
         self.threads.insert(index, thread);
     }
 
-    /// Sorts the rows by `key`, lowest first when `ascending`, keeping the
-    /// order between ties. The cursor keeps its row number.
-    pub fn resort(&mut self, ascending: bool, key: impl Fn(&Thread) -> Timestamp) {
-        if ascending {
-            self.threads.sort_by_key(|t| key(t));
-        } else {
-            self.threads.sort_by_key(|t| std::cmp::Reverse(key(t)));
+    /// Puts the rows in the order `sort` leaves them. The cursor stays on
+    /// its thread.
+    pub fn resort(&mut self, sort: impl FnOnce(&mut [Thread])) {
+        let current = self.current().map(|t| t.id.clone());
+        sort(&mut self.threads);
+        if let Some(id) = current {
+            self.to_thread(&id);
+        }
+    }
+
+    /// Moves to the thread with `id`, if it is in the queue.
+    pub fn to_thread(&mut self, id: &str) {
+        if let Some(index) = self.index_of(id) {
+            self.cursor = index;
         }
     }
 
