@@ -448,7 +448,7 @@ fn a_reconcile_from_before_dry_run_turned_on_is_discarded() {
 }
 
 #[test]
-fn an_r_waiting_when_dry_run_turns_on_runs_as_an_automatic_reconcile() {
+fn an_r_waiting_when_dry_run_turns_on_is_dropped() {
     let mut h = Harness::loaded(store());
     let archive = h.keys("e");
     assert_eq!(h.keys("R"), [], "R waits for the outbox");

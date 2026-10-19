@@ -283,7 +283,7 @@ pub enum Msg {
     SetDryRun(bool),
     /// The spinner's tick while a request is in flight.
     Tick,
-    /// A `state` event on the push stream.
+    /// An event on the push stream: a change, or a ping.
     Wake,
     /// The reconcile tick, at [`App::next_reconcile_at`].
     ReconcileTick,
