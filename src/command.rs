@@ -10,8 +10,8 @@ use crate::mail::{Mailboxes, Role};
 
 /// Each command name followed by its aliases, in the order Tab offers
 /// them.
-const NAMES: [&str; 10] = [
-    "archive", "e", "undo", "u", "redo", "filter", "sort", "dry", "quit", "q",
+const NAMES: [&str; 11] = [
+    "archive", "e", "undo", "u", "redo", "filter", "sort", "refresh", "dry", "quit", "q",
 ];
 
 /// A command typed at the `:` prompt.
@@ -28,6 +28,8 @@ pub enum Command {
     Filter(String),
     /// `:sort [newest|oldest]`: toggles with no argument.
     Sort(Option<Sort>),
+    /// `:refresh`: reconcile at once, as `R` does.
+    Refresh,
     /// `:dry [off]`: whether dry run is to be on.
     Dry(bool),
     /// `:quit`, `:q`.
@@ -85,6 +87,7 @@ pub fn parse(text: &str) -> Result<Option<Command>, Error> {
             "oldest" => Some(Sort::Oldest),
             _ => return Err(Error::Usage(":sort [newest|oldest]")),
         }),
+        "refresh" => bare(Command::Refresh, ":refresh")?,
         "dry" => match rest {
             "" => Command::Dry(true),
             "off" => Command::Dry(false),

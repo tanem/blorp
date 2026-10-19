@@ -3,12 +3,13 @@
 
 use std::ops::Range;
 
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use serde_json::Value;
 
 use crate::command::{self, Command};
 use crate::filter;
-use crate::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, QueryResult, SetResult};
+use crate::jmap::SetResult;
+use crate::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, QueryResult, Reconciled};
 use crate::mail::{Email, Mailboxes, QueueMailbox, Role, Thread};
 use crate::prompt::{History as PromptHistory, Key, Prompt};
 use crate::queue::Queue;
@@ -18,6 +19,9 @@ use crate::undo::{Change, Entry, History, Replay, Replayed, Side, State};
 /// threads that match. The query fetches every email of each thread, so the
 /// cap bounds the size and time of the queue fetch.
 pub const QUEUE_LIMIT: usize = 500;
+
+/// How often a reconcile runs, whether or not the push stream is up.
+pub const RECONCILE_INTERVAL: SignedDuration = SignedDuration::from_secs(60);
 
 /// The whole state of a running blorp, owned by the state task.
 #[derive(Debug)]
@@ -49,6 +53,34 @@ pub struct App {
     job: u64,
     /// Actions, undos, and redos sent and not yet answered, oldest first.
     in_flight: Vec<InFlight>,
+    /// When the next reconcile tick is due.
+    next_reconcile_at: Timestamp,
+    /// The reconcile in flight, if one is.
+    reconciling: Option<Reconciling>,
+    /// A reconcile waiting for the query in flight to land and the outbox
+    /// to drain.
+    wanted: Option<Trigger>,
+}
+
+/// What asked for a reconcile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Trigger {
+    /// A push event, the tick, or the end of an action that failed or
+    /// only partly applied. Ignored in dry run, and silent when it fails.
+    Auto,
+    /// `R` or `:refresh`: shows the spinner and reports a failure. In dry
+    /// run it resets the queue to Fastmail's and clears the undo history.
+    Refresh,
+}
+
+/// A reconcile in flight.
+#[derive(Debug, Clone, Copy)]
+struct Reconciling {
+    generation: u64,
+    trigger: Trigger,
+    /// The last outbox job number given out when it was sent. The outbox
+    /// was idle then, so a later number means a job was sent meanwhile.
+    job: u64,
 }
 
 /// The filter a queue shows and what it selects.
@@ -201,7 +233,7 @@ struct Repeat {
 /// Something that happened: a key, a request's result, a timer.
 #[derive(Debug)]
 pub enum Msg {
-    /// Launch: load the Inbox queue.
+    /// Launch: load the Inbox queue and start the reconcile tick.
     Start,
     /// Show the queue this filter text selects, or report why it selects
     /// none.
@@ -249,10 +281,21 @@ pub enum Msg {
     SetDryRun(bool),
     /// The spinner's tick while a request is in flight.
     Tick,
+    /// A `state` event on the push stream.
+    Wake,
+    /// The reconcile tick, at [`App::next_reconcile_at`].
+    ReconcileTick,
+    /// `R` or `:refresh`: reconcile at once.
+    Refresh,
     /// A queue query's result, tagged with the generation it was sent for.
     Loaded {
         generation: u64,
         result: Result<QueryResult, Error>,
+    },
+    /// A reconcile's result, tagged with the generation it was sent for.
+    Reconciled {
+        generation: u64,
+        result: Result<Reconciled, Error>,
     },
     /// An action's or a redo's `Email/set` result.
     Sent {
@@ -271,6 +314,13 @@ pub enum Msg {
 pub enum Effect {
     /// Run a queue query and report it back as [`Msg::Loaded`].
     Query {
+        generation: u64,
+        query: EmailQuery,
+    },
+    /// Run a queue query with `Mailbox/get` in its first request and report
+    /// it back as [`Msg::Reconciled`]. It supersedes a query in flight as
+    /// [`Effect::Query`] does.
+    Reconcile {
         generation: u64,
         query: EmailQuery,
     },
@@ -321,6 +371,9 @@ impl App {
             last_action: None,
             job: 0,
             in_flight: Vec::new(),
+            next_reconcile_at: now + RECONCILE_INTERVAL,
+            reconciling: None,
+            wanted: None,
         }
     }
 
@@ -399,9 +452,15 @@ impl App {
         self.total
     }
 
-    /// True while a queue query is in flight.
+    /// True while a queue query is in flight, other than a reconcile `R`
+    /// did not ask for.
     pub fn loading(&self) -> bool {
         self.loading
+    }
+
+    /// When the state task sends the next [`Msg::ReconcileTick`].
+    pub fn next_reconcile_at(&self) -> Timestamp {
+        self.next_reconcile_at
     }
 
     /// The count typed so far, before the key that uses it.
@@ -429,9 +488,12 @@ impl App {
         self.pending_count.take()
     }
 
+    /// Runs `query`, superseding any query in flight, a reconcile
+    /// included.
     fn load(&mut self, query: EmailQuery) -> Vec<Effect> {
         self.generation += 1;
         self.loading = true;
+        self.reconciling = None;
         vec![Effect::Query {
             generation: self.generation,
             query,
@@ -723,6 +785,7 @@ impl App {
             Command::Filter(text) => Msg::SetFilter(text),
             Command::Sort(None) => Msg::ToggleSort,
             Command::Sort(Some(sort)) => Msg::SetSort(sort),
+            Command::Refresh => Msg::Refresh,
             Command::Dry(on) => Msg::SetDryRun(on),
             Command::Quit => Msg::Quit,
         };
@@ -1002,7 +1065,7 @@ impl App {
                 threads(n)
             );
         } else if skipped.is_empty() {
-            return Vec::new();
+            return self.run_wanted();
         } else {
             let changed = entry.threads_with(&skipped);
             self.history.narrow(entry.id, &skipped);
@@ -1014,7 +1077,94 @@ impl App {
                 threads(n)
             );
         }
-        self.reload()
+        self.reconcile(Trigger::Auto)
+    }
+
+    /// Re-runs the shown queue's query with `Mailbox/get`, to bring the
+    /// queue and the mailbox list back in line with Fastmail. While a query
+    /// is in flight or the outbox is busy it waits, and runs once both are
+    /// done.
+    fn reconcile(&mut self, trigger: Trigger) -> Vec<Effect> {
+        let Some(query) = self.shown.as_ref().map(|s| s.query.clone()) else {
+            return Vec::new();
+        };
+        if self.busy() {
+            self.wanted = self.wanted.max(Some(trigger));
+            return Vec::new();
+        }
+        self.generation += 1;
+        self.loading = trigger == Trigger::Refresh;
+        self.reconciling = Some(Reconciling {
+            generation: self.generation,
+            trigger,
+            job: self.job,
+        });
+        vec![Effect::Reconcile {
+            generation: self.generation,
+            query,
+        }]
+    }
+
+    /// Whether a queue query is in flight or the outbox holds a job.
+    fn busy(&self) -> bool {
+        self.loading || self.reconciling.is_some() || !self.in_flight.is_empty()
+    }
+
+    /// Runs the reconcile that was waiting, once nothing holds it back. One
+    /// that only the tick or a push event asked for is dropped in dry run.
+    fn run_wanted(&mut self) -> Vec<Effect> {
+        if self.busy() {
+            return Vec::new();
+        }
+        match self.wanted.take() {
+            Some(Trigger::Auto) if self.dry_run => Vec::new(),
+            Some(trigger) => self.reconcile(trigger),
+            None => Vec::new(),
+        }
+    }
+
+    /// Handles a reconcile's result. It is applied only if the outbox
+    /// stayed idle from when it was sent, so a snapshot taken before an
+    /// action landed never brings back a thread the action moved; otherwise
+    /// it is discarded and run again once the outbox drains. A failure is
+    /// reported only for `R`.
+    fn reconciled(&mut self, generation: u64, result: Result<Reconciled, Error>) -> Vec<Effect> {
+        if let Err(error) = &result
+            && let Some(fatal) = error.fatal()
+        {
+            return vec![Effect::Fatal(fatal)];
+        }
+        let Some(reconciling) = self.reconciling.take_if(|r| r.generation == generation) else {
+            return Vec::new();
+        };
+        self.loading = false;
+        let trigger = reconciling.trigger;
+        match result {
+            Err(error) => {
+                if trigger == Trigger::Refresh {
+                    self.status = error.to_string();
+                }
+            }
+            Ok(_) if self.job != reconciling.job || !self.in_flight.is_empty() => {
+                self.wanted = self.wanted.max(Some(trigger));
+            }
+            Ok(_) if self.dry_run && trigger == Trigger::Auto => {}
+            Ok(reconciled) => self.apply_reconciled(reconciled, trigger),
+        }
+        self.run_wanted()
+    }
+
+    /// Replaces the mailbox list and the queue's rows with Fastmail's. The
+    /// filter keeps the mailbox ids it resolved to. In dry run, which only
+    /// `R` gets here in, the undo history is cleared too.
+    fn apply_reconciled(&mut self, reconciled: Reconciled, trigger: Trigger) {
+        self.mailboxes = Mailboxes::from(reconciled.mailboxes);
+        self.total = reconciled.result.total;
+        self.queue.reconcile(Thread::from_query(reconciled.result));
+        if self.dry_run && trigger == Trigger::Refresh {
+            self.history.clear();
+            self.report("Queue reset to Fastmail, undo history cleared");
+        }
     }
 }
 
@@ -1073,7 +1223,10 @@ fn move_patch(email: &Email, from: &QueueMailbox, to: &str) -> Option<EmailPatch
 /// Applies `msg` to `app` and returns what the executor should do. Pure.
 pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
     match msg {
-        Msg::Start => app.set_filter(""),
+        Msg::Start => {
+            app.next_reconcile_at = app.now + RECONCILE_INTERVAL;
+            app.set_filter("")
+        }
         Msg::SetFilter(text) => app.set_filter(&text),
         Msg::OpenFilter => {
             app.open_filter();
@@ -1173,6 +1326,20 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             app.spinner = app.spinner.wrapping_add(1);
             Vec::new()
         }
+        Msg::Wake if app.dry_run => Vec::new(),
+        Msg::Wake => app.reconcile(Trigger::Auto),
+        Msg::ReconcileTick => {
+            app.next_reconcile_at = app.now + RECONCILE_INTERVAL;
+            if app.dry_run {
+                return Vec::new();
+            }
+            app.reconcile(Trigger::Auto)
+        }
+        Msg::Refresh => {
+            app.take_count();
+            app.reconcile(Trigger::Refresh)
+        }
+        Msg::Reconciled { generation, result } => app.reconciled(generation, result),
         Msg::Loaded { generation, result } => {
             if let Err(error) = &result
                 && let Some(fatal) = error.fatal()
@@ -1190,7 +1357,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
                 }
                 Err(error) => app.status = error.to_string(),
             }
-            Vec::new()
+            app.run_wanted()
         }
     }
 }

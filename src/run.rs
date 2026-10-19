@@ -12,13 +12,15 @@ use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{App, Effect, Msg, update};
 use crate::jmap::{EmailUpdate, Error, Fatal, Jmap};
 use crate::mail::Mailboxes;
-use crate::ui;
 use crate::undo::{Replay, Replayed};
+use crate::{sync, ui};
 
 const SPINNER_TICK: Duration = Duration::from_millis(250);
 
@@ -74,9 +76,10 @@ pub async fn launch<J: Jmap>(jmap: &J, now: Timestamp) -> Result<App, Error> {
 }
 
 /// Runs the state task until a quit or fatal effect or the end of `keys`,
-/// and says which: sends the
-/// launch message, then turns key events, request results, and spinner ticks
-/// into messages, redrawing once after everything ready is handled.
+/// and says which: starts the `sync` task, sends the launch message, then
+/// turns key events, request results, push events, spinner ticks, and the
+/// reconcile tick at `App`'s `next_reconcile_at` into messages, redrawing
+/// once after everything ready is handled.
 pub async fn run<B, K, J, C>(
     terminal: &mut Terminal<B>,
     mut keys: K,
@@ -93,6 +96,7 @@ where
 {
     let (tx, mut rx) = unbounded_channel();
     let outbox = outbox(jmap.clone(), tx.clone());
+    let _sync = AbortOnDrop(tokio::spawn(sync::run(jmap.clone(), tx.clone())));
     let mut executor = Executor {
         jmap,
         tx,
@@ -101,6 +105,9 @@ where
     };
     let mut spinner = tokio::time::interval(SPINNER_TICK);
     let mut spinning = false;
+    let reconcile = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(reconcile);
+    let mut reconcile_at = None;
     let mut next = Some(Msg::Start);
     loop {
         if let Some(msg) = next.take()
@@ -117,6 +124,12 @@ where
             spinner.reset();
         }
         spinning = app.loading();
+        if reconcile_at != Some(app.next_reconcile_at()) {
+            reconcile_at = Some(app.next_reconcile_at());
+            let wait = app.next_reconcile_at().duration_since(clock.now());
+            let wait = Duration::try_from(wait).unwrap_or(Duration::ZERO);
+            reconcile.as_mut().reset(Instant::now() + wait);
+        }
         terminal
             .draw(|frame| ui::view(&app, frame))
             .map_err(io::Error::other)?;
@@ -129,7 +142,21 @@ where
             },
             Some(msg) = rx.recv() => Some(msg),
             _ = spinner.tick(), if spinning => Some(Msg::Tick),
+            () = &mut reconcile => {
+                reconcile_at = None;
+                Some(Msg::ReconcileTick)
+            }
         };
+    }
+}
+
+/// Aborts a task when dropped, so the `sync` task stops with the state
+/// task.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -192,23 +219,24 @@ struct Executor<J> {
 
 impl<J: Jmap> Executor<J> {
     /// Sets the time, runs `update`, and carries out its effects. A queue
-    /// query aborts the one before it, if that is still running.
+    /// query or reconcile aborts the one before it, if that is still
+    /// running.
     fn dispatch(&mut self, app: &mut App, clock: &impl Clock, msg: Msg) -> ControlFlow<Exit> {
         app.now = clock.now();
         for effect in update(app, msg) {
             match effect {
                 Effect::Query { generation, query } => {
-                    self.query.cancel();
-                    self.query = CancellationToken::new();
-                    let cancelled = self.query.clone();
                     let jmap = self.jmap.clone();
-                    let tx = self.tx.clone();
-                    tokio::spawn(async move {
-                        if let Some(result) =
-                            cancelled.run_until_cancelled(jmap.query(&query)).await
-                        {
-                            let _ = tx.send(Msg::Loaded { generation, result });
-                        }
+                    self.supersede(async move {
+                        let result = jmap.query(&query).await;
+                        Msg::Loaded { generation, result }
+                    });
+                }
+                Effect::Reconcile { generation, query } => {
+                    let jmap = self.jmap.clone();
+                    self.supersede(async move {
+                        let result = jmap.reconcile(&query).await;
+                        Msg::Reconciled { generation, result }
                     });
                 }
                 Effect::SetEmails { job, update } => {
@@ -235,5 +263,19 @@ impl<J: Jmap> Executor<J> {
             }
         }
         ControlFlow::Continue(())
+    }
+
+    /// Runs a queue query, aborting the one before it if that is still
+    /// running, and sends its result.
+    fn supersede(&mut self, query: impl Future<Output = Msg> + Send + 'static) {
+        self.query.cancel();
+        self.query = CancellationToken::new();
+        let cancelled = self.query.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Some(msg) = cancelled.run_until_cancelled(query).await {
+                let _ = tx.send(msg);
+            }
+        });
     }
 }

@@ -8,13 +8,16 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 
+use futures::stream::BoxStream;
 use serde_json::Value;
 
 pub mod fake;
 pub mod http;
+pub mod push;
 pub mod wire;
 
 pub use http::HttpJmap;
+pub use push::Push;
 pub use wire::*;
 
 /// The JMAP calls blorp makes, at the method level.
@@ -32,6 +35,19 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// by the second stage is left out. A method error in any request fails
     /// the whole query.
     fn query(&self, query: &EmailQuery) -> impl Future<Output = Result<QueryResult, Error>> + Send;
+
+    /// A reconcile's fetch: [`Jmap::query`] with `Mailbox/get` for every
+    /// mailbox added to its first request, ahead of the query's calls.
+    fn reconcile(
+        &self,
+        query: &EmailQuery,
+    ) -> impl Future<Output = Result<Reconciled, Error>> + Send;
+
+    /// Opens the push stream for `Email` and `Mailbox` changes, with no
+    /// `closeafter` and a ping every [`push::PING_SECS`] seconds, or gives
+    /// `None` when the session advertises no push stream. The stream ends,
+    /// or ends in an error, when the connection drops.
+    fn events(&self) -> impl Future<Output = Result<Option<PushStream>, Error>> + Send;
 
     /// The emails with `ids`, in `Email/get` calls of at most the session's
     /// `maxObjectsInGet` ids, in requests of at most its
@@ -89,6 +105,18 @@ pub struct QueryResult {
     /// Every email of those threads.
     pub emails: Vec<Email>,
 }
+
+/// The result of a [`Jmap::reconcile`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Reconciled {
+    /// Every mailbox in the account.
+    pub mailboxes: Vec<Mailbox>,
+    /// The query's result.
+    pub result: QueryResult,
+}
+
+/// An open push stream's events.
+pub type PushStream = BoxStream<'static, Result<Push, Error>>;
 
 /// A failed JMAP request. Never carries the token.
 #[derive(Debug, Clone, PartialEq, Eq)]

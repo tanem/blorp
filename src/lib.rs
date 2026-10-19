@@ -22,6 +22,7 @@ pub mod private_file;
 pub mod prompt;
 pub mod queue;
 pub mod run;
+pub mod sync;
 pub mod ui;
 pub mod undo;
 

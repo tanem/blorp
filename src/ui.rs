@@ -348,6 +348,7 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('V') => Some(Msg::Visual),
         KeyCode::Char('.') => Some(Msg::Repeat),
         KeyCode::Char('D') => Some(Msg::ToggleDryRun),
+        KeyCode::Char('R') => Some(Msg::Refresh),
         KeyCode::Char('/') => Some(Msg::OpenFilter),
         KeyCode::Char(':') => Some(Msg::OpenCommand),
         KeyCode::Char('t') => Some(Msg::ToggleSort),

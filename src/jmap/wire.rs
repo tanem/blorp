@@ -20,6 +20,9 @@ pub struct Session {
     pub primary_accounts: HashMap<String, String>,
     pub username: String,
     pub api_url: String,
+    /// The push stream's URL, a template or, as Fastmail gives it, bare.
+    #[serde(default)]
+    pub event_source_url: Option<String>,
 }
 
 impl Session {

@@ -42,6 +42,40 @@ impl Queue {
         }
     }
 
+    /// Replaces the rows with `threads`, the queue as Fastmail now has it
+    /// in sorted order, after a reconcile. The cursor stays on its thread
+    /// if that is still in the queue, and otherwise on the same row number,
+    /// or the last row if there are fewer. Marks on threads that left are
+    /// dropped. A visual range keeps the threads of it still in the queue:
+    /// when the thread it was opened on has left, it is opened instead on
+    /// the one still present that was nearest that end, and it closes only
+    /// when every thread in it has left.
+    pub fn reconcile(&mut self, threads: Vec<Thread>) {
+        let current = self.current().map(|t| t.id.clone());
+        let range: Vec<String> = match (self.visual(), &self.anchor) {
+            (Some(rows), Some(anchor)) => {
+                let ids = self.threads[rows].iter().map(|t| t.id.clone());
+                if self.index_of(anchor) <= Some(self.cursor) {
+                    ids.collect()
+                } else {
+                    ids.rev().collect()
+                }
+            }
+            _ => Vec::new(),
+        };
+        self.threads = threads;
+        if let Some(index) = current.and_then(|id| self.index_of(&id)) {
+            self.cursor = index;
+        }
+        self.cursor = self.cursor.min(self.last());
+        let threads = &self.threads;
+        let present = |id: &String| threads.iter().any(|t| t.id == *id);
+        self.marks.retain(present);
+        if self.anchor.is_some() {
+            self.anchor = range.into_iter().find(present);
+        }
+    }
+
     /// The thread under the cursor.
     pub fn current(&self) -> Option<&Thread> {
         self.threads.get(self.cursor)

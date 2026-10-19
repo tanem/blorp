@@ -157,7 +157,7 @@ fn a_confirmed_archive_changes_nothing_more() {
 }
 
 #[test]
-fn not_updated_rolls_the_archive_back_and_reruns_the_query() {
+fn not_updated_rolls_the_archive_back_and_reconciles() {
     let mut h = Harness::loaded(store());
     h.keys("j");
     h.keys("e");
@@ -177,7 +177,7 @@ fn not_updated_rolls_the_archive_back_and_reruns_the_query() {
     );
     assert_eq!(
         effects,
-        [Effect::Query {
+        [Effect::Reconcile {
             generation: 2,
             query: inbox_query(),
         }]
@@ -185,7 +185,7 @@ fn not_updated_rolls_the_archive_back_and_reruns_the_query() {
 }
 
 #[test]
-fn a_failed_request_rolls_the_archive_back_and_reruns_the_query() {
+fn a_failed_request_rolls_the_archive_back_and_reconciles() {
     let mut h = Harness::loaded(store());
     h.keys("e");
 
@@ -201,7 +201,7 @@ fn a_failed_request_rolls_the_archive_back_and_reruns_the_query() {
     );
     assert_eq!(
         effects,
-        [Effect::Query {
+        [Effect::Reconcile {
             generation: 2,
             query: inbox_query(),
         }]
@@ -211,21 +211,31 @@ fn a_failed_request_rolls_the_archive_back_and_reruns_the_query() {
 }
 
 #[test]
-fn a_rollback_does_not_repeat_a_thread_the_rerun_query_brought_back() {
+fn a_failed_archive_reconciles_once_the_outbox_drains() {
     let mut h = Harness::loaded(store());
     h.keys("ee");
-    let rerun = h.send(Msg::Sent {
+
+    let effects = h.send(Msg::Sent {
         job: 1,
         result: Err(Error::Status(503)),
     });
-    h.resolve(rerun);
-    assert_eq!(h.subjects(), ["Re: Trip", "Lunch", "Invoice"]);
 
-    h.send(Msg::Sent {
+    assert_eq!(effects, [], "the second archive is still in the outbox");
+    assert_eq!(h.subjects(), ["Re: Trip", "Invoice"]);
+
+    let effects = h.send(Msg::Sent {
         job: 2,
         result: Err(Error::Status(503)),
     });
 
+    assert_eq!(
+        effects,
+        [Effect::Reconcile {
+            generation: 2,
+            query: inbox_query(),
+        }]
+    );
+    h.resolve(effects);
     assert_eq!(h.subjects(), ["Re: Trip", "Lunch", "Invoice"]);
 }
 
