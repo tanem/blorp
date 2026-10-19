@@ -346,10 +346,11 @@ pub enum Action {
     /// otherwise unread. It is not on the undo history: the
     /// [`Action::Read`] it resolves to is.
     ToggleRead,
-    /// Flag every email of the selection's threads, or unflag them.
+    /// Flag every email of the selection's threads, or unflag them: what
+    /// `f` and `:flag` resolve to.
     Flag(bool),
-    /// `:read` or `:unread`: mark every email of the selection's threads
-    /// read, or unread.
+    /// Mark every email of the selection's threads read, or unread: what
+    /// `r` resolves to, and `:read` or `:unread`.
     Read(bool),
     /// A due snoozed thread going back to where it was snoozed from. It is
     /// not on the undo history.
@@ -378,8 +379,9 @@ impl Action {
             Action::Archive => "Archived",
             Action::Snooze(_) => "Snoozed",
             Action::Unsnooze => "Unsnoozed",
-            Action::ToggleFlag => "Toggled the flag of",
-            Action::ToggleRead => "Toggled the read state of",
+            Action::ToggleFlag | Action::ToggleRead => {
+                unreachable!("a toggle is recorded as what it resolves to")
+            }
             Action::Flag(true) => "Flagged",
             Action::Flag(false) => "Unflagged",
             Action::Read(_) => "Marked",
@@ -1183,41 +1185,12 @@ impl App {
     /// before the colon.
     fn run(&mut self, command: Command, count: Option<usize>) -> Vec<Effect> {
         let msg = match command {
-            Command::Archive => {
-                if self.queue.selection(count.unwrap_or(1)).is_empty() {
-                    self.status = "Nothing selected".into();
-                    return Vec::new();
-                }
-                self.pending_count = count;
-                Msg::Archive
-            }
-            Command::Snooze(when) => {
-                if self.queue.selection(count.unwrap_or(1)).is_empty() {
-                    self.status = "Nothing selected".into();
-                    return Vec::new();
-                }
-                self.pending_count = count;
-                Msg::Snooze(when)
-            }
-            Command::Unsnooze => {
-                if self.queue.selection(count.unwrap_or(1)).is_empty() {
-                    self.status = "Nothing selected".into();
-                    return Vec::new();
-                }
-                self.pending_count = count;
-                Msg::Unsnooze
-            }
-            Command::Flag | Command::Read | Command::Unread => {
-                if self.queue.selection(count.unwrap_or(1)).is_empty() {
-                    self.status = "Nothing selected".into();
-                    return Vec::new();
-                }
-                self.pending_count = count;
-                match command {
-                    Command::Flag => Msg::ToggleFlag,
-                    _ => Msg::SetRead(command == Command::Read),
-                }
-            }
+            Command::Archive => return self.run_on_selection(Msg::Archive, count),
+            Command::Snooze(when) => return self.run_on_selection(Msg::Snooze(when), count),
+            Command::Unsnooze => return self.run_on_selection(Msg::Unsnooze, count),
+            Command::Flag => return self.run_on_selection(Msg::ToggleFlag, count),
+            Command::Read => return self.run_on_selection(Msg::SetRead(true), count),
+            Command::Unread => return self.run_on_selection(Msg::SetRead(false), count),
             Command::Undo(n) => {
                 self.pending_count = n.or(count);
                 Msg::Undo
@@ -1236,13 +1209,24 @@ impl App {
         update(self, msg)
     }
 
+    /// Runs `msg`, an action on the selection, with `count` as the count
+    /// typed before the colon, or says nothing is selected.
+    fn run_on_selection(&mut self, msg: Msg, count: Option<usize>) -> Vec<Effect> {
+        if self.queue.selection(count.unwrap_or(1)).is_empty() {
+            self.status = "Nothing selected".into();
+            return Vec::new();
+        }
+        self.pending_count = count;
+        update(self, msg)
+    }
+
     fn perform(&mut self, repeat: Repeat) -> Vec<Effect> {
         match repeat.action {
             Action::Archive => self.archive(repeat),
             Action::Snooze(until) => self.snooze(repeat, until),
             Action::Unsnooze => self.unsnooze(repeat),
             Action::ToggleFlag | Action::ToggleRead | Action::Flag(_) | Action::Read(_) => {
-                self.mark(repeat)
+                self.set_keyword(repeat)
             }
             Action::Return => Vec::new(),
         }
@@ -1403,7 +1387,7 @@ impl App {
             self.report("Nothing to snooze");
             return Vec::new();
         }
-        self.act(repeat, threads, update, entries)
+        self.act(repeat, repeat.action, threads, update, entries)
     }
 
     /// Sets the return time of the threads at `rows`, in the snooze mailbox
@@ -1442,7 +1426,7 @@ impl App {
             threads.push(thread.clone());
             entries.insert(thread.id.clone(), entry);
         }
-        self.act(repeat, threads, EmailUpdate::new(), entries)
+        self.act(repeat, repeat.action, threads, EmailUpdate::new(), entries)
     }
 
     /// Returns the selection from the snooze mailbox now, as a due return
@@ -1472,7 +1456,7 @@ impl App {
             self.report("Nothing to unsnooze");
             return Vec::new();
         }
-        self.act(repeat, threads, update, entries)
+        self.act(repeat, repeat.action, threads, update, entries)
     }
 
     /// The return of `thread` from the snooze mailbox, whose schedule entry
@@ -1622,14 +1606,14 @@ impl App {
             self.report("Nothing to archive");
             return Vec::new();
         }
-        self.act(repeat, threads, update, BTreeMap::new())
+        self.act(repeat, repeat.action, threads, update, BTreeMap::new())
     }
 
     /// Flags or unflags, or marks read or unread, every email of the
     /// selection's threads in every mailbox, a toggle deciding which by the
     /// selection as it is now. Each thread stays in the queue and keeps its
     /// schedule entry. Closes the visual range.
-    fn mark(&mut self, repeat: Repeat) -> Vec<Effect> {
+    fn set_keyword(&mut self, repeat: Repeat) -> Vec<Effect> {
         let rows = self.queue.selection(repeat.count.unwrap_or(1));
         self.queue.close_visual();
         if rows.is_empty() {
@@ -1676,24 +1660,23 @@ impl App {
                 Some((thread.id.clone(), entry))
             })
             .collect();
-        let effects = self.act(Repeat { action, ..repeat }, threads, update, entries);
-        // `.` repeats the toggle, deciding again on the selection then.
-        self.last_action = Some(repeat);
-        effects
+        self.act(repeat, action, threads, update, entries)
     }
 
-    /// Records an action on `touched` as one undo entry and as what `.`
-    /// repeats, applies it to the queue and the schedule, reports it, and
-    /// sends `update`, or in dry run logs it. Each thread's schedule entry
-    /// becomes its entry in `entries`, or goes when it has none there.
+    /// Records `action` on `touched` as one undo entry and `repeat` as what
+    /// `.` repeats, applies it to the queue and the schedule, reports it,
+    /// and sends `update`, or in dry run logs it. The two differ when
+    /// `repeat` is a toggle, which `.` decides again. Each thread's
+    /// schedule entry becomes its entry in `entries`, or goes when it has
+    /// none there.
     fn act(
         &mut self,
         repeat: Repeat,
+        action: Action,
         touched: Vec<Thread>,
         update: EmailUpdate,
         mut entries: BTreeMap<String, snooze::Entry>,
     ) -> Vec<Effect> {
-        let action = repeat.action;
         self.last_action = Some(repeat);
         let schedule = touched
             .iter()
