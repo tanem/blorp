@@ -98,7 +98,7 @@ fn u_puts_an_archived_thread_back_with_the_cursor_on_it() {
     );
     assert_eq!(h.resolve(effects), []);
     assert_eq!(h.status(), "Undone: archive 1 thread");
-    let effects = h.send(Msg::Show("mb-inbox".into()));
+    let effects = h.send(Msg::SetFilter("in:inbox".into()));
     h.resolve(effects);
     assert_eq!(h.subjects(), ["Trip", "Lunch", "Invoice"]);
 }
@@ -133,7 +133,7 @@ fn an_email_changed_elsewhere_since_the_action_is_skipped_and_the_entry_pops() {
     assert!(matches!(effects[..], [Effect::Query { .. }]), "{effects:?}");
     h.resolve(effects);
     assert_eq!(h.subjects(), ["Trip", "Invoice"]);
-    let effects = h.send(Msg::Show("mb-travel".into()));
+    let effects = h.send(Msg::SetFilter("in:Travel".into()));
     h.resolve(effects);
     assert_eq!(h.subjects(), ["Lunch", "Trip", "Hotel"]);
 }
@@ -206,7 +206,7 @@ fn ctrl_r_redoes_an_undone_archive() {
         }]
     );
     assert_eq!(h.resolve(effects), []);
-    let effects = h.send(Msg::Show("mb-archive".into()));
+    let effects = h.send(Msg::SetFilter("in:archive".into()));
     h.resolve(effects);
     assert_eq!(h.subjects(), ["Lunch"]);
 }
@@ -229,12 +229,12 @@ fn a_new_action_after_an_undo_discards_the_redo() {
 #[test]
 fn undo_from_another_queue_restores_the_thread_and_names_its_mailbox() {
     let mut h = Harness::loaded(store());
-    let effects = h.send(Msg::Show("mb-travel".into()));
+    let effects = h.send(Msg::SetFilter("in:Travel".into()));
     h.resolve(effects);
     assert_eq!(h.subjects(), ["Trip", "Hotel"]);
     h.keys("j");
     archive(&mut h);
-    let effects = h.send(Msg::Show("mb-inbox".into()));
+    let effects = h.send(Msg::SetFilter("in:inbox".into()));
     h.resolve(effects);
 
     let effects = h.keys("u");
@@ -242,7 +242,7 @@ fn undo_from_another_queue_restores_the_thread_and_names_its_mailbox() {
     assert_eq!(h.status(), "Undone: archive 1 thread (in Travel)");
     assert_eq!(h.subjects(), ["Trip", "Lunch", "Invoice"]);
     h.resolve(effects);
-    let effects = h.send(Msg::Show("mb-travel".into()));
+    let effects = h.send(Msg::SetFilter("in:Travel".into()));
     h.resolve(effects);
     assert_eq!(h.subjects(), ["Trip", "Hotel"]);
 }
@@ -252,7 +252,7 @@ fn undo_takes_the_thread_out_of_a_queue_it_no_longer_belongs_in() {
     let mut h = Harness::loaded(store());
     h.keys("j");
     archive(&mut h);
-    let effects = h.send(Msg::Show("mb-archive".into()));
+    let effects = h.send(Msg::SetFilter("in:archive".into()));
     h.resolve(effects);
     assert_eq!(h.subjects(), ["Lunch"]);
 
@@ -301,10 +301,10 @@ fn undo_puts_each_email_back_where_it_was() {
     );
     h.resolve(effects);
 
-    let effects = h.send(Msg::Show("mb-archive".into()));
+    let effects = h.send(Msg::SetFilter("in:archive".into()));
     h.resolve(effects);
     assert_eq!(h.subjects().len(), 1, "e2 is still in Archive");
-    let effects = h.send(Msg::Show("mb-inbox".into()));
+    let effects = h.send(Msg::SetFilter("in:inbox".into()));
     h.resolve(effects);
     assert_eq!(h.subjects().len(), 1);
 }
@@ -437,7 +437,7 @@ fn a_failed_action_leaves_the_history() {
 fn the_history_is_shared_across_queues() {
     let mut h = Harness::loaded(store());
     archive(&mut h);
-    let effects = h.send(Msg::Show("mb-travel".into()));
+    let effects = h.send(Msg::SetFilter("in:Travel".into()));
     h.resolve(effects);
 
     assert_eq!(h.app.undo_depth(), 1);

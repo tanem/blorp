@@ -2,10 +2,12 @@
 //! through (ADR 0001).
 
 use jiff::Timestamp;
-use serde_json::{Value, json};
+use serde_json::Value;
 
+use crate::filter;
 use crate::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, QueryResult, SetResult};
-use crate::mail::{Mailboxes, Role, Thread};
+use crate::mail::{Email, Mailboxes, QueueMailbox, Role, Thread};
+use crate::prompt::{History as PromptHistory, Key, Prompt};
 use crate::queue::Queue;
 use crate::undo::{Change, Entry, History, Replay, Replayed, Side, State};
 
@@ -21,12 +23,12 @@ pub struct App {
     pub now: Timestamp,
     mailboxes: Mailboxes,
     queue: Queue,
-    queue_name: String,
-    /// The id of the mailbox the queue shows.
-    queue_mailbox: Option<String>,
-    /// The `Email/query` the queue was loaded with, re-run after a failed
-    /// action.
-    queue_query: Option<EmailQuery>,
+    /// What the queue shows, once a filter has been applied.
+    shown: Option<Shown>,
+    sort: Sort,
+    /// The `/` prompt, while it is open.
+    filter_prompt: Option<FilterPrompt>,
+    filter_history: PromptHistory,
     total: usize,
     generation: u64,
     loading: bool,
@@ -41,6 +43,53 @@ pub struct App {
     job: u64,
     /// Actions, undos, and redos sent and not yet answered, oldest first.
     in_flight: Vec<InFlight>,
+}
+
+/// The filter a queue shows and what it selects.
+#[derive(Debug, Clone)]
+struct Shown {
+    /// The filter text, trimmed.
+    filter: String,
+    /// The queue mailbox's path, or `All mail` for `in:any`.
+    name: String,
+    mailbox: QueueMailbox,
+    /// The `Email/query` the queue is loaded with, re-run after a failed
+    /// action.
+    query: EmailQuery,
+}
+
+/// The order a queue sorts in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sort {
+    Newest,
+    Oldest,
+}
+
+impl Sort {
+    /// Whether the query sorts oldest first.
+    fn ascending(self) -> bool {
+        self == Sort::Oldest
+    }
+
+    /// `newest` or `oldest`, as the statusline shows it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Sort::Newest => "newest",
+            Sort::Oldest => "oldest",
+        }
+    }
+}
+
+/// The open `/` prompt, and the queue as it was when it opened, for Esc to
+/// put back.
+#[derive(Debug)]
+struct FilterPrompt {
+    prompt: Prompt,
+    shown: Option<Shown>,
+    queue: Queue,
+    total: usize,
+    /// Whether an edit has run a query, which changes the rows.
+    queried: bool,
 }
 
 /// A job in the outbox: the entry it applies, kept to put back if it
@@ -121,8 +170,15 @@ struct Repeat {
 pub enum Msg {
     /// Launch: load the Inbox queue.
     Start,
-    /// Load the queue of the mailbox with this id, newest first.
-    Show(String),
+    /// Show the queue this filter text selects, or report why it selects
+    /// none.
+    SetFilter(String),
+    /// `/`: open the filter prompt holding the current filter.
+    OpenFilter,
+    /// A key typed at the open prompt.
+    Prompt(Key),
+    /// `t`: toggle newest and oldest first.
+    ToggleSort,
     Down,
     Up,
     Top,
@@ -209,9 +265,10 @@ impl App {
             now,
             mailboxes,
             queue: Queue::default(),
-            queue_name: String::new(),
-            queue_mailbox: None,
-            queue_query: None,
+            shown: None,
+            sort: Sort::Newest,
+            filter_prompt: None,
+            filter_history: PromptHistory::default(),
             total: 0,
             generation: 0,
             loading: false,
@@ -241,8 +298,28 @@ impl App {
         &self.queue
     }
 
+    /// The queue mailbox's path, or `All mail` for `in:any`.
     pub fn queue_name(&self) -> &str {
-        &self.queue_name
+        self.shown.as_ref().map_or("", |s| &s.name)
+    }
+
+    /// The filter text of the queue shown.
+    pub fn filter(&self) -> &str {
+        self.shown.as_ref().map_or("", |s| &s.filter)
+    }
+
+    pub fn sort(&self) -> Sort {
+        self.sort
+    }
+
+    /// The text at the `/` prompt, while it is open.
+    pub fn prompt(&self) -> Option<&str> {
+        self.filter_prompt.as_ref().map(|p| p.prompt.text())
+    }
+
+    /// The cursor at the `/` prompt, in characters, while it is open.
+    pub fn prompt_cursor(&self) -> Option<usize> {
+        self.filter_prompt.as_ref().map(|p| p.prompt.cursor())
     }
 
     /// How many threads match the queue's query, including any beyond
@@ -284,7 +361,6 @@ impl App {
     fn load(&mut self, query: EmailQuery) -> Vec<Effect> {
         self.generation += 1;
         self.loading = true;
-        self.queue_query = Some(query.clone());
         vec![Effect::Query {
             generation: self.generation,
             query,
@@ -300,20 +376,150 @@ impl App {
         };
     }
 
-    fn show(&mut self, mailbox_id: &str) -> Vec<Effect> {
-        let Some(mailbox) = self.mailboxes.by_id(mailbox_id) else {
-            self.status = "No such mailbox".into();
+    /// What filter `text` selects in the current sort, or why it selects
+    /// nothing.
+    fn select(&self, text: &str) -> Result<Shown, filter::Error> {
+        let resolved = filter::parse(text)?.resolve(&self.mailboxes)?;
+        Ok(Shown {
+            filter: text.trim().into(),
+            name: resolved.name,
+            mailbox: resolved.mailbox,
+            query: EmailQuery {
+                filter: resolved.condition,
+                ascending: self.sort.ascending(),
+                limit: QUEUE_LIMIT,
+            },
+        })
+    }
+
+    /// Shows the queue filter `text` selects, or reports why it selects
+    /// nothing and leaves the queue as it is.
+    fn set_filter(&mut self, text: &str) -> Vec<Effect> {
+        match self.select(text) {
+            Ok(shown) => self.show(shown),
+            Err(error) => {
+                self.status = error.to_string();
+                Vec::new()
+            }
+        }
+    }
+
+    /// Shows `shown`. When its query is not the one the queue was loaded
+    /// with, the selection is cleared, the cursor goes to the first row,
+    /// and the query is run.
+    fn show(&mut self, shown: Shown) -> Vec<Effect> {
+        let same = self.shown.as_ref().is_some_and(|s| s.query == shown.query);
+        let query = shown.query.clone();
+        self.shown = Some(shown);
+        if same {
+            return Vec::new();
+        }
+        self.load_new(query)
+    }
+
+    /// Clears the selection, puts the cursor on the first row, and runs
+    /// `query`, for a queue whose filter or sort has changed.
+    fn load_new(&mut self, query: EmailQuery) -> Vec<Effect> {
+        self.queue.clear_selection();
+        self.queue.to_first();
+        self.load(query)
+    }
+
+    /// Runs the shown queue's query again, if a queue is shown.
+    fn reload(&mut self) -> Vec<Effect> {
+        match self.shown.as_ref().map(|s| s.query.clone()) {
+            Some(query) => self.load(query),
+            None => Vec::new(),
+        }
+    }
+
+    /// Flips the sort and reloads the queue in it, clearing the selection
+    /// and putting the cursor on the first row.
+    fn toggle_sort(&mut self) -> Vec<Effect> {
+        self.sort = match self.sort {
+            Sort::Newest => Sort::Oldest,
+            Sort::Oldest => Sort::Newest,
+        };
+        let Some(shown) = &mut self.shown else {
             return Vec::new();
         };
-        self.queue_name = mailbox.name.clone();
-        self.queue_mailbox = Some(mailbox.id.clone());
-        self.queue.clear_selection();
-        let query = EmailQuery {
-            filter: json!({"inMailbox": mailbox.id}),
-            ascending: false,
-            limit: QUEUE_LIMIT,
-        };
-        self.load(query)
+        shown.query.ascending = self.sort.ascending();
+        let query = shown.query.clone();
+        self.load_new(query)
+    }
+
+    /// Opens the `/` prompt holding the current filter, dropping a pending
+    /// count, closing the visual range, and clearing the status message.
+    fn open_filter(&mut self) {
+        self.take_count();
+        self.queue.close_visual();
+        self.status.clear();
+        self.filter_prompt = Some(FilterPrompt {
+            prompt: Prompt::new(self.filter()),
+            shown: self.shown.clone(),
+            queue: self.queue.clone(),
+            total: self.total,
+            queried: false,
+        });
+    }
+
+    /// Handles a key at the `/` prompt. Each edit shows the queue the text
+    /// selects, if it selects one. Enter keeps it, or for text that selects
+    /// nothing puts the earlier queue back and reports why; either way the
+    /// text goes into the prompt's history. Esc puts the earlier queue back.
+    fn filter_key(&mut self, key: Key) -> Vec<Effect> {
+        match key {
+            Key::Enter => {
+                let Some(open) = self.filter_prompt.take() else {
+                    return Vec::new();
+                };
+                let text = open.prompt.text();
+                self.filter_history.push(text);
+                match self.select(text) {
+                    Ok(shown) => {
+                        self.status.clear();
+                        self.show(shown)
+                    }
+                    Err(error) => {
+                        let effects = self.restore(open);
+                        self.status = error.to_string();
+                        effects
+                    }
+                }
+            }
+            Key::Esc => match self.filter_prompt.take() {
+                Some(open) => self.restore(open),
+                None => Vec::new(),
+            },
+            key => {
+                let Some(open) = &mut self.filter_prompt else {
+                    return Vec::new();
+                };
+                open.prompt.edit(key, &self.filter_history);
+                let text = open.prompt.text().to_string();
+                let Ok(shown) = self.select(&text) else {
+                    return Vec::new();
+                };
+                let effects = self.show(shown);
+                if let Some(open) = &mut self.filter_prompt {
+                    open.queried |= !effects.is_empty();
+                }
+                effects
+            }
+        }
+    }
+
+    /// Puts back the queue as it was when the prompt opened. When an edit
+    /// ran a query, the earlier rows, cursor, and marks come back at once
+    /// and the earlier query is run again.
+    fn restore(&mut self, open: FilterPrompt) -> Vec<Effect> {
+        self.shown = open.shown;
+        if !open.queried {
+            return Vec::new();
+        }
+        self.queue = open.queue;
+        self.total = open.total;
+        self.reload()
     }
 
     fn perform(&mut self, repeat: Repeat) -> Vec<Effect> {
@@ -328,7 +534,7 @@ impl App {
     fn archive(&mut self, repeat: Repeat) -> Vec<Effect> {
         let rows = self.queue.selection(repeat.count.unwrap_or(1));
         self.queue.close_visual();
-        let Some(from) = self.queue_mailbox.clone() else {
+        let Some(from) = self.shown.as_ref().map(|s| s.mailbox.clone()) else {
             return Vec::new();
         };
         if rows.is_empty() {
@@ -338,11 +544,10 @@ impl App {
             self.report("No Archive mailbox");
             return Vec::new();
         };
-        if from == archive.id {
+        if from == QueueMailbox::One(archive.id.clone()) {
             self.report("Already in Archive");
             return Vec::new();
         }
-        let patch = move_patch(&from, &archive.id);
         let mut threads = Vec::new();
         let mut update = EmailUpdate::new();
         for row in rows {
@@ -353,7 +558,10 @@ impl App {
                     .emails
                     .iter()
                     .filter(|email| self.mailboxes.moves(email, &from))
-                    .map(|email| (email.id.clone(), patch.clone())),
+                    .filter_map(|email| {
+                        let patch = move_patch(email, &from, &archive.id)?;
+                        Some((email.id.clone(), patch))
+                    }),
             );
             if update.len() > before {
                 threads.push(thread.clone());
@@ -496,7 +704,7 @@ impl App {
     /// whether it belongs there. A thread belongs in the queue when a move
     /// action would take one of its emails out of the queue mailbox.
     fn apply(&mut self, entry: &Entry, side: Side) -> Placed {
-        let ascending = self.queue_query.as_ref().is_some_and(|q| q.ascending);
+        let ascending = self.sort.ascending();
         let mut placed = Placed::default();
         for snapshot in &entry.threads {
             let index = self.queue.index_of(&snapshot.id);
@@ -531,12 +739,14 @@ impl App {
     /// Whether `thread` belongs in the queue: a move action would take one
     /// of its emails out of the queue mailbox.
     fn belongs(&self, thread: &Thread) -> bool {
-        self.queue_mailbox.as_ref().is_some_and(|from| {
-            thread
-                .emails
-                .iter()
-                .any(|email| self.mailboxes.moves(email, from))
-        })
+        self.shown
+            .as_ref()
+            .is_some_and(|Shown { mailbox: from, .. }| {
+                thread
+                    .emails
+                    .iter()
+                    .any(|email| self.mailboxes.moves(email, from))
+            })
     }
 
     /// Handles an action's or a redo's `Email/set` result.
@@ -597,10 +807,7 @@ impl App {
                 threads(n)
             );
         }
-        match self.queue_query.clone() {
-            Some(query) => self.load(query),
-            None => Vec::new(),
-        }
+        self.reload()
     }
 }
 
@@ -639,26 +846,34 @@ fn not_updated(n: usize) -> String {
     }
 }
 
-/// The patch that moves an email from mailbox `from` to mailbox `to`.
-fn move_patch(from: &str, to: &str) -> EmailPatch {
-    EmailPatch::from([
-        (format!("mailboxIds/{from}"), Value::Null),
-        (format!("mailboxIds/{to}"), Value::Bool(true)),
-    ])
+/// The patch that moves `email` out of each mailbox of the queue mailbox
+/// `from` it is in, other than `to`, and into mailbox `to`, or none when it
+/// is in no such mailbox.
+fn move_patch(email: &Email, from: &QueueMailbox, to: &str) -> Option<EmailPatch> {
+    let mut patch: EmailPatch = email
+        .mailbox_ids
+        .iter()
+        .filter(|id| *id != to && from.contains(id))
+        .map(|id| (format!("mailboxIds/{id}"), Value::Null))
+        .collect();
+    if patch.is_empty() {
+        return None;
+    }
+    patch.insert(format!("mailboxIds/{to}"), Value::Bool(true));
+    Some(patch)
 }
 
 /// Applies `msg` to `app` and returns what the executor should do. Pure.
 pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
     match msg {
-        Msg::Start => {
-            let Some(inbox) = app.mailboxes.by_role(Role::Inbox) else {
-                app.status = "No Inbox mailbox".into();
-                return Vec::new();
-            };
-            let id = inbox.id.clone();
-            app.show(&id)
+        Msg::Start => app.set_filter(""),
+        Msg::SetFilter(text) => app.set_filter(&text),
+        Msg::OpenFilter => {
+            app.open_filter();
+            Vec::new()
         }
-        Msg::Show(mailbox_id) => app.show(&mailbox_id),
+        Msg::Prompt(key) => app.filter_key(key),
+        Msg::ToggleSort => app.toggle_sort(),
         Msg::Digit(digit) => {
             let count = app.pending_count.unwrap_or(0);
             if count > 0 || digit > 0 {

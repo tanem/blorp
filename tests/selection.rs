@@ -78,7 +78,7 @@ fn a_count_archives_that_many_rows_from_the_cursor_in_one_email_set() {
     assert_eq!(h.status(), "Archived 3 threads");
     assert_eq!(h.app.undo_depth(), 1);
     assert_eq!(h.resolve(effects), []);
-    let effects = h.send(Msg::Show("mb-archive".into()));
+    let effects = h.send(Msg::SetFilter("in:archive".into()));
     h.resolve(effects);
     assert_eq!(h.subjects(), ["Two", "Three", "Four"]);
 }
@@ -256,11 +256,11 @@ fn shift_v_leaves_the_visual_range() {
 }
 
 #[test]
-fn showing_a_queue_clears_the_marks_and_the_visual_range() {
+fn changing_the_filter_clears_the_marks_and_the_visual_range() {
     let mut h = Harness::loaded(store());
     h.keys("xjV");
 
-    let effects = h.send(Msg::Show("mb-inbox".into()));
+    let effects = h.send(Msg::SetFilter("-is:flagged".into()));
     h.resolve(effects);
 
     assert!(!h.app.queue().marked(0));
@@ -378,11 +378,11 @@ fn an_action_that_did_nothing_is_not_what_dot_repeats() {
     let mut h = Harness::loaded(store());
     let effects = h.keys("2e");
     h.resolve(effects);
-    let effects = h.send(Msg::Show("mb-archive".into()));
+    let effects = h.send(Msg::SetFilter("in:archive".into()));
     h.resolve(effects);
     h.keys("e");
     assert_eq!(h.status(), "Already in Archive");
-    let effects = h.send(Msg::Show("mb-inbox".into()));
+    let effects = h.send(Msg::SetFilter("in:inbox".into()));
     h.resolve(effects);
 
     h.keys(".");
@@ -395,11 +395,11 @@ fn a_count_before_a_dot_that_did_nothing_does_not_replace_the_original_count() {
     let mut h = Harness::loaded(store());
     let effects = h.keys("2e");
     h.resolve(effects);
-    let effects = h.send(Msg::Show("mb-archive".into()));
+    let effects = h.send(Msg::SetFilter("in:archive".into()));
     h.resolve(effects);
     h.keys("5.");
     assert_eq!(h.status(), "Already in Archive");
-    let effects = h.send(Msg::Show("mb-inbox".into()));
+    let effects = h.send(Msg::SetFilter("in:inbox".into()));
     h.resolve(effects);
 
     h.keys(".");

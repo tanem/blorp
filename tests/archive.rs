@@ -121,7 +121,7 @@ fn e_in_archive_does_nothing_and_says_so() {
     let mut h = Harness::loaded(store());
     let effects = h.keys("e");
     h.resolve(effects);
-    let effects = h.send(Msg::Show("mb-archive".into()));
+    let effects = h.send(Msg::SetFilter("in:archive".into()));
     h.resolve(effects);
     assert_eq!(h.subjects(), ["Re: Trip", "Receipt"]);
 
@@ -282,7 +282,7 @@ fn dry_run_from_launch_marks_every_action_message() {
     h.keys("e");
     assert_eq!(h.status(), "[dry] Archived 1 thread");
 
-    let effects = h.send(Msg::Show("mb-archive".into()));
+    let effects = h.send(Msg::SetFilter("in:archive".into()));
     h.resolve(effects);
     h.keys("e");
     assert_eq!(h.status(), "[dry] Already in Archive");

@@ -1,6 +1,7 @@
 //! The in-memory snapshot of fetched mailboxes, threads, and emails.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 
 use jiff::Timestamp;
 
@@ -41,6 +42,52 @@ pub struct Mailbox {
     pub role: Option<Role>,
 }
 
+/// The name of the snooze mailbox, which blorp creates without a role.
+pub const SNOOZE_MAILBOX: &str = "Snoozed (blorp)";
+
+/// The mailbox a queue shows: one mailbox, or for `in:any` every mailbox
+/// but those excluded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueMailbox {
+    One(String),
+    /// Every mailbox except these ids, in the order the server listed them.
+    Any(Vec<String>),
+}
+
+impl QueueMailbox {
+    /// Whether the mailbox with `id` is part of the queue mailbox.
+    pub fn contains(&self, id: &str) -> bool {
+        match self {
+            QueueMailbox::One(one) => one == id,
+            QueueMailbox::Any(excluded) => !excluded.iter().any(|e| e == id),
+        }
+    }
+}
+
+/// Why a mailbox name resolved to no single mailbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameError {
+    /// Holds the name as written.
+    NoMatch(String),
+    /// Holds the name as written and the path of each match.
+    Ambiguous(String, Vec<String>),
+}
+
+impl fmt::Display for NameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NameError::NoMatch(name) => write!(f, "No mailbox matches \"{name}\""),
+            NameError::Ambiguous(name, paths) => write!(
+                f,
+                "Mailbox name \"{name}\" is ambiguous: {}",
+                paths.join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NameError {}
+
 /// Every mailbox in the account.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Mailboxes(Vec<Mailbox>);
@@ -56,18 +103,79 @@ impl Mailboxes {
         self.0.iter().find(|m| m.id == id)
     }
 
+    /// Every mailbox, in the order the server listed them.
+    pub fn iter(&self) -> impl Iterator<Item = &Mailbox> {
+        self.0.iter()
+    }
+
+    /// The mailbox's name after its parents' names, joined with `/`, as in
+    /// `Work/Receipts`.
+    pub fn path(&self, mailbox: &Mailbox) -> String {
+        let mut names = vec![mailbox.name.as_str()];
+        let mut parent = mailbox.parent_id.as_deref();
+        while let Some(m) = parent.and_then(|id| self.by_id(id)) {
+            if names.len() > self.0.len() {
+                break;
+            }
+            names.push(&m.name);
+            parent = m.parent_id.as_deref();
+        }
+        names.reverse();
+        names.join("/")
+    }
+
+    /// The mailbox `name` refers to, matching case-insensitively and
+    /// exactly: the role names `inbox`, `archive`, `trash`, and `junk` match
+    /// the mailbox carrying that role, then a name matches a mailbox's path,
+    /// as in `Work/Receipts`, and failing that its own name. A name matching
+    /// none, or several at the same step, is an error.
+    pub fn resolve(&self, name: &str) -> Result<&Mailbox, NameError> {
+        let lower = name.to_lowercase();
+        let role = match lower.as_str() {
+            "inbox" => Some(Role::Inbox),
+            "archive" => Some(Role::Archive),
+            "trash" => Some(Role::Trash),
+            "junk" => Some(Role::Junk),
+            _ => None,
+        };
+        if let Some(mailbox) = role.and_then(|role| self.by_role(role)) {
+            return Ok(mailbox);
+        }
+        let by_path: Vec<&Mailbox> = self
+            .0
+            .iter()
+            .filter(|m| self.path(m).to_lowercase() == lower)
+            .collect();
+        let matches = if by_path.is_empty() {
+            self.0
+                .iter()
+                .filter(|m| m.name.to_lowercase() == lower)
+                .collect()
+        } else {
+            by_path
+        };
+        match matches.as_slice() {
+            [] => Err(NameError::NoMatch(name.into())),
+            [one] => Ok(one),
+            several => Err(NameError::Ambiguous(
+                name.into(),
+                several.iter().map(|m| self.path(m)).collect(),
+            )),
+        }
+    }
+
     /// Whether a move action out of the queue mailbox `from` moves `email`.
     /// It moves an email in `from` that is in no Drafts or Sent mailbox and
-    /// in no Trash or Junk mailbox other than `from`, so a Trash or Junk
-    /// queue can move its own emails out.
-    pub fn moves(&self, email: &Email, from: &str) -> bool {
-        email.mailbox_ids.contains(from)
+    /// in no Trash or Junk mailbox outside `from`, so a Trash or Junk queue
+    /// can move its own emails out.
+    pub fn moves(&self, email: &Email, from: &QueueMailbox) -> bool {
+        email.mailbox_ids.iter().any(|id| from.contains(id))
             && !email
                 .mailbox_ids
                 .iter()
                 .any(|id| match self.by_id(id).and_then(|m| m.role) {
                     Some(Role::Drafts | Role::Sent) => true,
-                    Some(Role::Trash | Role::Junk) => id != from,
+                    Some(Role::Trash | Role::Junk) => !from.contains(id),
                     _ => false,
                 })
     }
@@ -248,7 +356,7 @@ mod tests {
             (&["drafts"], "drafts", false),
         ] {
             assert_eq!(
-                m.moves(&email(mailbox_ids), from),
+                m.moves(&email(mailbox_ids), &QueueMailbox::One(from.into())),
                 moved,
                 "{mailbox_ids:?} from {from}"
             );
