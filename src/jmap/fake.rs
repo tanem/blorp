@@ -14,23 +14,28 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::StreamExt;
 use serde_json::Value;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 pub mod api;
 
 use super::{Email, EmailAddress, EmailPatch, EmailQuery, EmailUpdate, Error, Jmap, Limits};
-use super::{Mailbox, QueryResult, SetResult, Thread};
+use super::{Mailbox, Push, PushStream, QueryResult, Reconciled, SetResult, Thread};
 
 /// A call made to a [`FakeJmap`], in the order made.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Call {
     GetMailboxes,
     Query(EmailQuery),
+    Reconcile(EmailQuery),
     GetEmails(Vec<String>),
     SetEmails(EmailUpdate),
 }
 
-/// A fake JMAP server: a store, a call log, and failure injection.
+/// A fake JMAP server: a store, a call log, failure injection, and push
+/// streams the test sends events on. Opening a push stream is counted
+/// apart from the call log and takes no injected failure or delay.
 #[derive(Clone)]
 pub struct FakeJmap {
     inner: Arc<Mutex<Inner>>,
@@ -43,6 +48,12 @@ struct Inner {
     /// they waited.
     answered: Vec<Call>,
     injected: VecDeque<Injected>,
+    /// The senders of the push streams opened and not yet closed.
+    streams: Vec<UnboundedSender<Result<Push, Error>>>,
+    /// How many push streams have been asked for.
+    streams_opened: usize,
+    /// How many of the next push stream openings fail.
+    refused_streams: usize,
 }
 
 enum Injected {
@@ -58,6 +69,9 @@ impl FakeJmap {
                 calls: Vec::new(),
                 answered: Vec::new(),
                 injected: VecDeque::new(),
+                streams: Vec::new(),
+                streams_opened: 0,
+                refused_streams: 0,
             })),
         }
     }
@@ -75,6 +89,29 @@ impl FakeJmap {
         inner
             .injected
             .extend((0..n).map(|_| Injected::Delay(delay)));
+    }
+
+    /// Sends `event` on every open push stream.
+    pub fn push(&self, event: Push) {
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .streams
+            .retain(|stream| stream.send(Ok(event)).is_ok());
+    }
+
+    /// Ends every open push stream, as a dropped connection does.
+    pub fn close_streams(&self) {
+        self.inner.lock().unwrap().streams.clear();
+    }
+
+    /// Makes the next `n` push stream openings fail.
+    pub fn refuse_streams(&self, n: usize) {
+        self.inner.lock().unwrap().refused_streams += n;
+    }
+
+    /// How many push streams have been asked for, including those refused.
+    pub fn streams_opened(&self) -> usize {
+        self.inner.lock().unwrap().streams_opened
     }
 
     /// Every call made so far.
@@ -126,6 +163,28 @@ impl Jmap for FakeJmap {
             .await
     }
 
+    async fn reconcile(&self, query: &EmailQuery) -> Result<Reconciled, Error> {
+        self.call(Call::Reconcile(query.clone()), |store| {
+            store.reconcile(query)
+        })
+        .await
+    }
+
+    async fn events(&self) -> Result<Option<PushStream>, Error> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.streams_opened += 1;
+        if inner.refused_streams > 0 {
+            inner.refused_streams -= 1;
+            return Err(Error::Status(503));
+        }
+        let (tx, rx) = unbounded_channel();
+        inner.streams.push(tx);
+        let stream = futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        });
+        Ok(Some(stream.boxed()))
+    }
+
     async fn get_emails(&self, ids: &[String]) -> Result<Vec<Email>, Error> {
         self.call(Call::GetEmails(ids.to_vec()), |store| {
             let mut emails = Vec::new();
@@ -164,6 +223,23 @@ impl Store {
         self.mailboxes.clone()
     }
 
+    /// Adds a top-level mailbox with no role, as the web client would.
+    pub fn add_mailbox(&mut self, id: &str, name: &str) {
+        self.mailboxes.push(Mailbox {
+            id: id.into(),
+            name: name.into(),
+            parent_id: None,
+            role: None,
+        });
+    }
+
+    /// Renames the mailbox with `id`, as the web client would.
+    pub fn rename_mailbox(&mut self, id: &str, name: &str) {
+        if let Some(mailbox) = self.mailboxes.iter_mut().find(|m| m.id == id) {
+            mailbox.name = name.into();
+        }
+    }
+
     /// Evaluates `query` the way [`Jmap::query`] does: the same calls the
     /// reqwest adapter makes, each get held to [`MAX_OBJECTS_IN_GET`], with
     /// the threads' emails fetched in gets of at most that many ids.
@@ -186,6 +262,14 @@ impl Store {
             threads,
             emails,
         })
+    }
+
+    /// Evaluates `query` the way [`Jmap::reconcile`] does: every mailbox,
+    /// then [`Store::query`].
+    pub fn reconcile(&self, query: &EmailQuery) -> Result<Reconciled, Error> {
+        let (mailboxes, _) = self.get_mailboxes(None)?;
+        let result = self.query(query)?;
+        Ok(Reconciled { mailboxes, result })
     }
 
     /// `Email/query` with `collapseThreads`: the ids of one email per

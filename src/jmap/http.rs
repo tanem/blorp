@@ -5,13 +5,15 @@ use std::error::Error as _;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::{CORE, Email, EmailQuery, EmailUpdate, Error, Invocation, Jmap, Limits, MAIL};
-use super::{Mailbox, QueryResult, Request, Response, Session, SetResult, Thread};
+use super::{Mailbox, PushStream, QueryResult, Reconciled, Request, Response, Session};
+use super::{SetResult, Thread, push};
 
 /// Fastmail's session resource.
 pub const FASTMAIL_SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
@@ -31,13 +33,17 @@ const EMAIL_PROPERTIES: [&str; 8] = [
     "hasAttachment",
 ];
 
-/// A JMAP client bound to one session's API URL, primary mail account, and
-/// request limits.
+/// A JMAP client bound to one session's API URL, push stream URL, primary
+/// mail account, and request limits.
 #[derive(Clone)]
 pub struct HttpJmap {
     http: reqwest::Client,
+    /// The client for the push stream, which has no request timeout, since
+    /// the stream stays open.
+    events_http: reqwest::Client,
     token: Arc<SecretString>,
     api_url: String,
+    event_source_url: Option<String>,
     account_id: String,
     limits: Limits,
 }
@@ -45,8 +51,9 @@ pub struct HttpJmap {
 impl HttpJmap {
     /// Fetches the session at `session_url`, checks that it advertises the
     /// mail capability, and binds a client to its primary mail account. The
-    /// session URL and the API URL it names must be HTTPS, or plain HTTP to
-    /// a loopback address, since the token is sent to both.
+    /// session URL and the API and push stream URLs it names must be HTTPS,
+    /// or plain HTTP to a loopback address, since the token is sent to
+    /// each.
     pub async fn connect(
         session_url: &str,
         token: impl Into<Arc<SecretString>>,
@@ -54,6 +61,10 @@ impl HttpJmap {
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(transport)?;
+        let events_http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .map_err(transport)?;
         let token = token.into();
@@ -64,11 +75,16 @@ impl HttpJmap {
             .map_err(transport)?;
         let session: Session = read_json(response).await?;
         require_secure(&session.api_url)?;
+        if let Some(url) = &session.event_source_url {
+            require_secure(url)?;
+        }
         let account_id = session.mail_account().ok_or(Error::NoMailCapability)?;
         let jmap = HttpJmap {
             http,
+            events_http,
             token,
             api_url: session.api_url.clone(),
+            event_source_url: session.event_source_url.clone(),
             account_id: account_id.to_string(),
             limits: session.limits(),
         };
@@ -130,6 +146,71 @@ impl HttpJmap {
         }
         Ok(response.method_responses)
     }
+
+    /// The two-stage fetch [`Jmap::query`] describes, with `Mailbox/get`
+    /// for every mailbox ahead of the query's calls in the first request
+    /// when `mailboxes` is true. The mailbox list is empty when it is false.
+    async fn fetch(&self, query: &EmailQuery, mailboxes: bool) -> Result<Reconciled, Error> {
+        let account = &self.account_id;
+        let mut calls = Vec::new();
+        if mailboxes {
+            calls.push(call(
+                "Mailbox/get",
+                json!({"accountId": account, "ids": null, "properties": MAILBOX_PROPERTIES}),
+                "m",
+            ));
+        }
+        calls.extend([
+            call(
+                "Email/query",
+                json!({
+                    "accountId": account,
+                    "filter": query.filter,
+                    "sort": [{"property": "receivedAt", "isAscending": query.ascending}],
+                    "collapseThreads": true,
+                    "limit": query.limit,
+                    "calculateTotal": true
+                }),
+                "0",
+            ),
+            call(
+                "Email/get",
+                json!({
+                    "accountId": account,
+                    "#ids": {"resultOf": "0", "name": "Email/query", "path": "/ids"},
+                    "properties": ["threadId"]
+                }),
+                "1",
+            ),
+            call(
+                "Thread/get",
+                json!({
+                    "accountId": account,
+                    "#ids": {"resultOf": "1", "name": "Email/get", "path": "/list/*/threadId"}
+                }),
+                "2",
+            ),
+        ]);
+        let responses = self.send(calls).await?;
+        let mailboxes = if mailboxes {
+            let got: GetResponse<Mailbox> = response_of(&responses, "Mailbox/get", "m")?;
+            got.list
+        } else {
+            Vec::new()
+        };
+        let ids: QueryResponse = response_of(&responses, "Email/query", "0")?;
+        let hits: GetResponse<Hit> = response_of(&responses, "Email/get", "1")?;
+        let threads: GetResponse<Thread> = response_of(&responses, "Thread/get", "2")?;
+        let email_ids = member_ids(&ids.ids, &hits.list, &threads.list);
+        let emails = self.get_emails(&email_ids).await?;
+        let result = QueryResult {
+            total: ids.total.unwrap_or(ids.ids.len()),
+            ids: ids.ids,
+            threads: threads.list,
+            emails,
+        };
+        Ok(Reconciled { mailboxes, result })
+    }
 }
 
 impl Jmap for HttpJmap {
@@ -146,51 +227,31 @@ impl Jmap for HttpJmap {
     }
 
     async fn query(&self, query: &EmailQuery) -> Result<QueryResult, Error> {
-        let account = &self.account_id;
-        let responses = self
-            .send(vec![
-                call(
-                    "Email/query",
-                    json!({
-                        "accountId": account,
-                        "filter": query.filter,
-                        "sort": [{"property": "receivedAt", "isAscending": query.ascending}],
-                        "collapseThreads": true,
-                        "limit": query.limit,
-                        "calculateTotal": true
-                    }),
-                    "0",
-                ),
-                call(
-                    "Email/get",
-                    json!({
-                        "accountId": account,
-                        "#ids": {"resultOf": "0", "name": "Email/query", "path": "/ids"},
-                        "properties": ["threadId"]
-                    }),
-                    "1",
-                ),
-                call(
-                    "Thread/get",
-                    json!({
-                        "accountId": account,
-                        "#ids": {"resultOf": "1", "name": "Email/get", "path": "/list/*/threadId"}
-                    }),
-                    "2",
-                ),
-            ])
-            .await?;
-        let ids: QueryResponse = response_of(&responses, "Email/query", "0")?;
-        let hits: GetResponse<Hit> = response_of(&responses, "Email/get", "1")?;
-        let threads: GetResponse<Thread> = response_of(&responses, "Thread/get", "2")?;
-        let email_ids = member_ids(&ids.ids, &hits.list, &threads.list);
-        let emails = self.get_emails(&email_ids).await?;
-        Ok(QueryResult {
-            total: ids.total.unwrap_or(ids.ids.len()),
-            ids: ids.ids,
-            threads: threads.list,
-            emails,
-        })
+        Ok(self.fetch(query, false).await?.result)
+    }
+
+    async fn reconcile(&self, query: &EmailQuery) -> Result<Reconciled, Error> {
+        self.fetch(query, true).await
+    }
+
+    async fn events(&self) -> Result<Option<PushStream>, Error> {
+        let Some(url) = &self.event_source_url else {
+            return Ok(None);
+        };
+        let request = self
+            .events_http
+            .get(push::event_source_url(url))
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header(reqwest::header::CACHE_CONTROL, "no-cache");
+        let response = authorize(request, &self.token)
+            .send()
+            .await
+            .map_err(transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(Error::Status(status.as_u16()));
+        }
+        Ok(Some(push::pushes(response.bytes_stream()).boxed()))
     }
 
     async fn get_emails(&self, ids: &[String]) -> Result<Vec<Email>, Error> {

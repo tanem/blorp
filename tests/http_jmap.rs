@@ -1,7 +1,8 @@
-use blorp::jmap::{EmailQuery, EmailUpdate, Error, HttpJmap, Jmap, Mailbox, QueryResult};
+use blorp::jmap::{EmailQuery, EmailUpdate, Error, HttpJmap, Jmap, Mailbox, Push, QueryResult};
+use futures::StreamExt;
 use secrecy::SecretString;
 use serde_json::{Value, json};
-use wiremock::matchers::{body_json, header, method, path};
+use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 mod common;
@@ -555,6 +556,151 @@ async fn connect_refuses_an_api_url_that_is_not_https() {
         result.err(),
         Some(Error::InsecureUrl(
             "http://api.example.invalid/jmap/api/".into()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn reconcile_puts_mailbox_get_in_the_query_s_first_request() {
+    let server = MockServer::start().await;
+    serve_session(&server, mail_capabilities()).await;
+    let mut first = first_stage(json!({"inMailbox": "mb1"}));
+    first["methodCalls"].as_array_mut().unwrap().insert(
+        0,
+        json!(["Mailbox/get", {
+            "accountId": "u1a2b3c4", "ids": null,
+            "properties": ["id", "name", "parentId", "role"]
+        }, "m"]),
+    );
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(body_json(first))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [
+                ["Mailbox/get", {"accountId": "u1a2b3c4", "state": "1", "list": [
+                    {"id": "mb1", "name": "Inbox", "parentId": null, "role": "inbox"}
+                ], "notFound": []}, "m"],
+                ["Email/query", {"accountId": "u1a2b3c4", "ids": ["Me2"], "position": 0, "total": 1}, "0"],
+                ["Email/get", {"accountId": "u1a2b3c4", "list": [{"id": "Me2", "threadId": "Tt1"}], "notFound": []}, "1"],
+                ["Thread/get", {"accountId": "u1a2b3c4", "list": [{"id": "Tt1", "emailIds": ["Me2"]}], "notFound": []}, "2"]
+            ],
+            "sessionState": "0"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(body_json(json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "methodCalls": [member_get(&ids(&["Me2"]), "0")]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [
+                ["Email/get", {"accountId": "u1a2b3c4", "list": [email("Me2", "2026-10-17T09:30:00Z")], "notFound": []}, "0"]
+            ],
+            "sessionState": "0"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let jmap = connect(&server).await.unwrap();
+
+    let reconciled = jmap
+        .reconcile(&EmailQuery {
+            filter: json!({"inMailbox": "mb1"}),
+            ascending: false,
+            limit: 500,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(reconciled.mailboxes.len(), 1);
+    assert_eq!(reconciled.mailboxes[0].role.as_deref(), Some("inbox"));
+    assert_eq!(reconciled.result.ids, ["Me2"]);
+    assert_eq!(reconciled.result.emails.len(), 1);
+}
+
+#[tokio::test]
+async fn events_opens_the_push_stream_with_the_bearer_token_and_reads_it() {
+    let server = MockServer::start().await;
+    serve_session(&server, mail_capabilities()).await;
+    Mock::given(method("GET"))
+        .and(path("/event/"))
+        .and(query_param("types", "Email,Mailbox"))
+        .and(query_param("closeafter", "no"))
+        .and(query_param("ping", "300"))
+        .and(header("authorization", "Bearer test-token-123"))
+        .and(header("accept", "text/event-stream"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    ": new event source connection\r\n\r\n",
+                    "event: state\r\n",
+                    "data: {\"@type\":\"StateChange\",\"changed\":{},\"type\":\"connect\"}\r\n\r\n",
+                    "event: ping\r\ndata: {\"interval\":300}\r\n\r\n",
+                )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let jmap = connect(&server).await.unwrap();
+
+    let stream = jmap.events().await.unwrap().expect("a push stream");
+    let events: Vec<_> = stream.collect().await;
+
+    assert_eq!(events, [Ok(Push::State), Ok(Push::Ping)]);
+}
+
+#[tokio::test]
+async fn events_reports_a_refused_push_stream_as_its_status() {
+    let server = MockServer::start().await;
+    serve_session(&server, mail_capabilities()).await;
+    Mock::given(method("GET"))
+        .and(path("/event/"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let jmap = connect(&server).await.unwrap();
+
+    let result = jmap.events().await;
+
+    assert_eq!(result.err(), Some(Error::Status(503)));
+}
+
+#[tokio::test]
+async fn events_gives_none_for_a_session_without_a_push_stream() {
+    let server = MockServer::start().await;
+    let mut session = session(&server, mail_capabilities());
+    session.as_object_mut().unwrap().remove("eventSourceUrl");
+    Mock::given(method("GET"))
+        .and(path("/jmap/session"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(session))
+        .mount(&server)
+        .await;
+    let jmap = connect(&server).await.unwrap();
+
+    assert!(jmap.events().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn connect_refuses_an_event_source_url_that_is_not_https() {
+    let server = MockServer::start().await;
+    let mut session = session(&server, mail_capabilities());
+    session["eventSourceUrl"] = json!("http://api.example.invalid/jmap/event/");
+    Mock::given(method("GET"))
+        .and(path("/jmap/session"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(session))
+        .mount(&server)
+        .await;
+
+    let result = connect(&server).await;
+
+    assert_eq!(
+        result.err(),
+        Some(Error::InsecureUrl(
+            "http://api.example.invalid/jmap/event/".into()
         ))
     );
 }

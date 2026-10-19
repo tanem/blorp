@@ -130,7 +130,10 @@ fn an_email_changed_elsewhere_since_the_action_is_skipped_and_the_entry_pops() {
         "Undone: archive 0 of 1 thread, 1 changed elsewhere"
     );
     assert_eq!(h.app.undo_depth(), 0);
-    assert!(matches!(effects[..], [Effect::Query { .. }]), "{effects:?}");
+    assert!(
+        matches!(effects[..], [Effect::Reconcile { .. }]),
+        "{effects:?}"
+    );
     h.resolve(effects);
     assert_eq!(h.subjects(), ["Trip", "Invoice"]);
     let effects = h.send(Msg::SetFilter("in:Travel".into()));
@@ -378,7 +381,10 @@ fn a_failed_undo_is_rolled_back_and_dropped() {
         h.status(),
         "Could not undo archive 1 thread: Fastmail returned HTTP 503"
     );
-    assert!(matches!(effects[..], [Effect::Query { .. }]), "{effects:?}");
+    assert!(
+        matches!(effects[..], [Effect::Reconcile { .. }]),
+        "{effects:?}"
+    );
     assert_eq!(h.app.undo_depth(), 0);
     h.ctrl('r');
     assert_eq!(h.status(), "Nothing to redo");
@@ -511,7 +517,10 @@ fn a_failed_redo_is_rolled_back_and_dropped() {
         h.status(),
         "Could not redo archive 1 thread: Fastmail returned HTTP 503"
     );
-    assert!(matches!(effects[..], [Effect::Query { .. }]), "{effects:?}");
+    assert!(
+        matches!(effects[..], [Effect::Reconcile { .. }]),
+        "{effects:?}"
+    );
     assert_eq!(h.app.undo_depth(), 0);
 }
 

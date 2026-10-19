@@ -1,11 +1,12 @@
 //! A test harness around [`App`]: feeds keys through the keymap into
-//! `update` and answers queries from a fake store.
+//! `update` and answers queries and reconciles from a fake store.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jiff::Timestamp;
 
 use crate::app::{App, Effect, Msg, update};
 use crate::jmap::fake::Store;
+use crate::jmap::{EmailQuery, Error, Reconciled};
 use crate::mail::Mailboxes;
 use crate::ui;
 use crate::undo::Replayed;
@@ -67,6 +68,10 @@ impl Harness {
                     let result = self.store.query(&query);
                     rest.extend(self.send(Msg::Loaded { generation, result }));
                 }
+                Effect::Reconcile { generation, query } => {
+                    let result = self.reconcile(&query);
+                    rest.extend(self.send(Msg::Reconciled { generation, result }));
+                }
                 Effect::SetEmails { job, update } => {
                     let result = Ok(self.store.set_emails(&update));
                     rest.extend(self.send(Msg::Sent { job, result }));
@@ -90,6 +95,11 @@ impl Harness {
             }
         }
         rest
+    }
+
+    /// What a reconcile of `query` gets from the store now.
+    pub fn reconcile(&self, query: &EmailQuery) -> Result<Reconciled, Error> {
+        self.store.reconcile(query)
     }
 
     /// Types each character as a key press.
