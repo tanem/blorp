@@ -338,6 +338,19 @@ pub enum Action {
     Snooze(Timestamp),
     /// `:unsnooze`: return snoozed threads now.
     Unsnooze,
+    /// `f` or `:flag`: unflag every email of the selection when any is
+    /// flagged, otherwise flag every email. It is not on the undo history:
+    /// the [`Action::Flag`] it resolves to is.
+    ToggleFlag,
+    /// `r`: mark every email of the selection read when any is unread,
+    /// otherwise unread. It is not on the undo history: the
+    /// [`Action::Read`] it resolves to is.
+    ToggleRead,
+    /// Flag every email of the selection's threads, or unflag them.
+    Flag(bool),
+    /// `:read` or `:unread`: mark every email of the selection's threads
+    /// read, or unread.
+    Read(bool),
     /// A due snoozed thread going back to where it was snoozed from. It is
     /// not on the undo history.
     Return,
@@ -350,6 +363,12 @@ impl Action {
             Action::Archive => "archive",
             Action::Snooze(_) => "snooze",
             Action::Unsnooze => "unsnooze",
+            Action::ToggleFlag => "toggle flag",
+            Action::ToggleRead => "toggle read",
+            Action::Flag(true) => "flag",
+            Action::Flag(false) => "unflag",
+            Action::Read(true) => "mark read",
+            Action::Read(false) => "mark unread",
             Action::Return => "return",
         }
     }
@@ -359,6 +378,11 @@ impl Action {
             Action::Archive => "Archived",
             Action::Snooze(_) => "Snoozed",
             Action::Unsnooze => "Unsnoozed",
+            Action::ToggleFlag => "Toggled the flag of",
+            Action::ToggleRead => "Toggled the read state of",
+            Action::Flag(true) => "Flagged",
+            Action::Flag(false) => "Unflagged",
+            Action::Read(_) => "Marked",
             Action::Return => "Returned",
         }
     }
@@ -408,6 +432,14 @@ pub enum Msg {
     Snooze(When),
     /// `:unsnooze`: return the selection from the snooze mailbox now.
     Unsnooze,
+    /// `f` or `:flag`: unflag the selection when any of it is flagged,
+    /// otherwise flag it.
+    ToggleFlag,
+    /// `r`: mark the selection read when any of it is unread, otherwise
+    /// unread.
+    ToggleRead,
+    /// `:read` or `:unread`: mark the selection read, or unread.
+    SetRead(bool),
     /// `x`: mark or unmark the row under the cursor, or as many rows as the
     /// count, and move past them.
     Mark,
@@ -1175,6 +1207,17 @@ impl App {
                 self.pending_count = count;
                 Msg::Unsnooze
             }
+            Command::Flag | Command::Read | Command::Unread => {
+                if self.queue.selection(count.unwrap_or(1)).is_empty() {
+                    self.status = "Nothing selected".into();
+                    return Vec::new();
+                }
+                self.pending_count = count;
+                match command {
+                    Command::Flag => Msg::ToggleFlag,
+                    _ => Msg::SetRead(command == Command::Read),
+                }
+            }
             Command::Undo(n) => {
                 self.pending_count = n.or(count);
                 Msg::Undo
@@ -1198,6 +1241,9 @@ impl App {
             Action::Archive => self.archive(repeat),
             Action::Snooze(until) => self.snooze(repeat, until),
             Action::Unsnooze => self.unsnooze(repeat),
+            Action::ToggleFlag | Action::ToggleRead | Action::Flag(_) | Action::Read(_) => {
+                self.mark(repeat)
+            }
             Action::Return => Vec::new(),
         }
     }
@@ -1579,6 +1625,63 @@ impl App {
         self.act(repeat, threads, update, BTreeMap::new())
     }
 
+    /// Flags or unflags, or marks read or unread, every email of the
+    /// selection's threads in every mailbox, a toggle deciding which by the
+    /// selection as it is now. Each thread stays in the queue and keeps its
+    /// schedule entry. Closes the visual range.
+    fn mark(&mut self, repeat: Repeat) -> Vec<Effect> {
+        let rows = self.queue.selection(repeat.count.unwrap_or(1));
+        self.queue.close_visual();
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let selected = || rows.iter().map(|&row| &self.queue.threads()[row]);
+        let action = match repeat.action {
+            Action::ToggleFlag => Action::Flag(!selected().any(Thread::flagged)),
+            Action::ToggleRead => Action::Read(selected().any(Thread::unread)),
+            action => action,
+        };
+        let (keyword, on, has): (&str, bool, fn(&Email) -> bool) = match action {
+            Action::Flag(on) => ("$flagged", on, |email| email.flagged),
+            Action::Read(on) => ("$seen", on, |email| email.seen),
+            _ => return Vec::new(),
+        };
+        let value = if on { Value::Bool(true) } else { Value::Null };
+        let mut threads = Vec::new();
+        let mut update = EmailUpdate::new();
+        for thread in selected() {
+            let before = update.len();
+            update.extend(
+                thread
+                    .emails
+                    .iter()
+                    .filter(|email| has(email) != on)
+                    .map(|email| {
+                        let patch = [(format!("keywords/{keyword}"), value.clone())].into();
+                        (email.id.clone(), patch)
+                    }),
+            );
+            if update.len() > before {
+                threads.push(thread.clone());
+            }
+        }
+        if update.is_empty() {
+            self.report(format!("Nothing to {}", action.name()));
+            return Vec::new();
+        }
+        let entries = threads
+            .iter()
+            .filter_map(|thread| {
+                let entry = self.schedule().get(&thread.id)?.clone();
+                Some((thread.id.clone(), entry))
+            })
+            .collect();
+        let effects = self.act(Repeat { action, ..repeat }, threads, update, entries);
+        // `.` repeats the toggle, deciding again on the selection then.
+        self.last_action = Some(repeat);
+        effects
+    }
+
     /// Records an action on `touched` as one undo entry and as what `.`
     /// repeats, applies it to the queue and the schedule, reports it, and
     /// sends `update`, or in dry run logs it. Each thread's schedule entry
@@ -1609,12 +1712,14 @@ impl App {
             .history
             .record(action, touched, changes, schedule)
             .clone();
-        let until = match action {
+        let suffix = match action {
             Action::Snooze(until) => format!(" until {}", self.describe(until)),
+            Action::Read(true) => " read".into(),
+            Action::Read(false) => " unread".into(),
             _ => String::new(),
         };
         self.report(format!(
-            "{} {}{until}",
+            "{} {}{suffix}",
             action.done(),
             threads(entry.threads.len())
         ));
@@ -2333,6 +2438,27 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             let count = app.take_count();
             app.perform(Repeat {
                 action: Action::Unsnooze,
+                count,
+            })
+        }
+        Msg::ToggleFlag => {
+            let count = app.take_count();
+            app.perform(Repeat {
+                action: Action::ToggleFlag,
+                count,
+            })
+        }
+        Msg::ToggleRead => {
+            let count = app.take_count();
+            app.perform(Repeat {
+                action: Action::ToggleRead,
+                count,
+            })
+        }
+        Msg::SetRead(on) => {
+            let count = app.take_count();
+            app.perform(Repeat {
+                action: Action::Read(on),
                 count,
             })
         }

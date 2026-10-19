@@ -11,9 +11,9 @@ use crate::snooze::{self, When};
 
 /// Each command name followed by its aliases, in the order Tab offers
 /// them.
-const NAMES: [&str; 15] = [
-    "archive", "e", "snooze", "z", "unsnooze", "uz", "undo", "u", "redo", "filter", "sort",
-    "refresh", "dry", "quit", "q",
+const NAMES: [&str; 20] = [
+    "archive", "e", "snooze", "z", "unsnooze", "uz", "flag", "f", "read", "r", "unread", "undo",
+    "u", "redo", "filter", "sort", "refresh", "dry", "quit", "q",
 ];
 
 /// A command typed at the `:` prompt.
@@ -25,6 +25,12 @@ pub enum Command {
     Snooze(When),
     /// `:unsnooze`, `:uz`: return the selection from the snooze mailbox now.
     Unsnooze,
+    /// `:flag`, `:f`: toggle the flag, as `f` does.
+    Flag,
+    /// `:read`, `:r`: mark read.
+    Read,
+    /// `:unread`: mark unread.
+    Unread,
     /// `:undo [count]`, `:u [count]`. The count given here is used in place
     /// of one typed before the colon.
     Undo(Option<usize>),
@@ -88,6 +94,9 @@ pub fn parse(text: &str) -> Result<Option<Command>, Error> {
             }
         },
         "unsnooze" | "uz" => bare(Command::Unsnooze, ":unsnooze")?,
+        "flag" | "f" => bare(Command::Flag, ":flag")?,
+        "read" | "r" => bare(Command::Read, ":read")?,
+        "unread" => bare(Command::Unread, ":unread")?,
         "undo" | "u" => match rest {
             "" => Command::Undo(None),
             count => match count.parse() {

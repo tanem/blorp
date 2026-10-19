@@ -498,3 +498,65 @@ fn the_launch_check_answered_after_a_reconcile_returned_the_thread_sends_nothing
     assert_eq!(effects, vec![]);
     assert_eq!(h.status(), "Returned 1 thread from snooze");
 }
+
+#[test]
+fn f_in_the_snooze_mailbox_keeps_the_entry_and_writes_no_schedule() {
+    let (mut h, _) = Harness::launched(store(), false, schedule());
+    open_snooze_queue(&mut h);
+
+    let effects = h.keys("f");
+
+    assert_eq!(
+        effects,
+        [Effect::SetEmails {
+            job: 1,
+            update: update(&[("e1", json!({"keywords/$flagged": true}))]),
+        }]
+    );
+    h.resolve(effects);
+    assert_eq!(h.app.schedule(), &schedule());
+    assert_eq!(h.subjects(), ["Renewal", "Flights", "Re: Hotel"]);
+
+    let effects = h.keys("u");
+    h.settle(effects);
+    assert_eq!(h.app.schedule(), &schedule());
+}
+
+#[test]
+fn r_on_a_returned_thread_keeps_it_where_its_return_sorted_it() {
+    let store = Store::builder()
+        .role_mailbox("mb-inbox", "Inbox", "inbox")
+        .email(
+            EmailSpec::new("e1", "t1", "2026-10-03T09:00:00Z")
+                .in_mailbox("mb-inbox")
+                .subject("Renewal"),
+        )
+        .email(
+            EmailSpec::new("e5", "t5", "2026-10-18T10:00:00Z")
+                .in_mailbox("mb-inbox")
+                .subject("Lunch"),
+        )
+        .build();
+    let mut schedule = Schedule::default();
+    schedule.set(
+        "t1",
+        Some(Entry {
+            returned_at: Some(at("2026-10-18T11:30:00Z")),
+            ..entry("e1", "mb-inbox", "2026-10-18T11:30:00Z")
+        }),
+    );
+    let (mut h, _) = Harness::launched(store, false, schedule.clone());
+    assert_eq!(h.subjects(), ["Renewal", "Lunch"]);
+
+    let effects = h.keys("r");
+
+    assert_eq!(
+        effects,
+        [Effect::SetEmails {
+            job: 1,
+            update: update(&[("e1", json!({"keywords/$seen": true}))]),
+        }]
+    );
+    assert_eq!(h.subjects(), ["Renewal", "Lunch"]);
+    assert_eq!(h.app.schedule(), &schedule);
+}
