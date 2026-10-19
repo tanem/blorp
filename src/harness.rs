@@ -99,9 +99,7 @@ impl Harness {
 
     /// What a reconcile of `query` gets from the store now.
     pub fn reconcile(&self, query: &EmailQuery) -> Result<Reconciled, Error> {
-        let (mailboxes, _) = self.store.get_mailboxes(None)?;
-        let result = self.store.query(query)?;
-        Ok(Reconciled { mailboxes, result })
+        self.store.reconcile(query)
     }
 
     /// Types each character as a key press.

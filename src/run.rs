@@ -12,9 +12,9 @@ use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
-use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::app::{App, Effect, Msg, update};
 use crate::jmap::{EmailUpdate, Error, Fatal, Jmap};
@@ -96,7 +96,7 @@ where
 {
     let (tx, mut rx) = unbounded_channel();
     let outbox = outbox(jmap.clone(), tx.clone());
-    let _sync = AbortOnDrop(tokio::spawn(sync::run(jmap.clone(), tx.clone())));
+    let _sync = AbortOnDropHandle::new(tokio::spawn(sync::run(jmap.clone(), tx.clone())));
     let mut executor = Executor {
         jmap,
         tx,
@@ -147,16 +147,6 @@ where
                 Some(Msg::ReconcileTick)
             }
         };
-    }
-}
-
-/// Aborts a task when dropped, so the `sync` task stops with the state
-/// task.
-struct AbortOnDrop(JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }
 

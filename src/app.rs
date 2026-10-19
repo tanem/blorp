@@ -59,10 +59,12 @@ pub struct App {
     reconciling: Option<Reconciling>,
     /// A reconcile waiting for the query in flight to land and the outbox
     /// to drain.
-    wanted: Option<Trigger>,
+    pending_reconcile: Option<Trigger>,
 }
 
-/// What asked for a reconcile.
+/// What asked for a reconcile. `Refresh` orders after `Auto`, so the
+/// greater of two triggers waiting for one reconcile is the one it runs
+/// as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Trigger {
     /// A push event, the tick, or the end of an action that failed or
@@ -373,7 +375,7 @@ impl App {
             in_flight: Vec::new(),
             next_reconcile_at: now + RECONCILE_INTERVAL,
             reconciling: None,
-            wanted: None,
+            pending_reconcile: None,
         }
     }
 
@@ -582,7 +584,9 @@ impl App {
     }
 
     /// Turns dry run on or off. A change clears the undo history, so real
-    /// and simulated entries never share it.
+    /// and simulated entries never share it, and makes a reconcile `R`
+    /// asked for before it an automatic one, so it neither resets a dry-run
+    /// queue nor clears the history again.
     fn set_dry_run(&mut self, on: bool) {
         let mode = if on { "on" } else { "off" };
         if on == self.dry_run {
@@ -591,6 +595,10 @@ impl App {
         }
         self.dry_run = on;
         self.history.clear();
+        self.pending_reconcile = self.pending_reconcile.min(Some(Trigger::Auto));
+        if let Some(reconciling) = &mut self.reconciling {
+            reconciling.trigger = Trigger::Auto;
+        }
         self.status = format!("Dry run {mode}, undo history cleared");
     }
 
@@ -1065,7 +1073,7 @@ impl App {
                 threads(n)
             );
         } else if skipped.is_empty() {
-            return self.run_wanted();
+            return self.run_pending_reconcile();
         } else {
             let changed = entry.threads_with(&skipped);
             self.history.narrow(entry.id, &skipped);
@@ -1083,13 +1091,16 @@ impl App {
     /// Re-runs the shown queue's query with `Mailbox/get`, to bring the
     /// queue and the mailbox list back in line with Fastmail. While a query
     /// is in flight or the outbox is busy it waits, and runs once both are
-    /// done.
+    /// done. In dry run only `R` runs one.
     fn reconcile(&mut self, trigger: Trigger) -> Vec<Effect> {
+        if self.dry_run && trigger == Trigger::Auto {
+            return Vec::new();
+        }
         let Some(query) = self.shown.as_ref().map(|s| s.query.clone()) else {
             return Vec::new();
         };
         if self.busy() {
-            self.wanted = self.wanted.max(Some(trigger));
+            self.pending_reconcile = self.pending_reconcile.max(Some(trigger));
             return Vec::new();
         }
         self.generation += 1;
@@ -1110,14 +1121,12 @@ impl App {
         self.loading || self.reconciling.is_some() || !self.in_flight.is_empty()
     }
 
-    /// Runs the reconcile that was waiting, once nothing holds it back. One
-    /// that only the tick or a push event asked for is dropped in dry run.
-    fn run_wanted(&mut self) -> Vec<Effect> {
+    /// Runs the reconcile that was waiting, once nothing holds it back.
+    fn run_pending_reconcile(&mut self) -> Vec<Effect> {
         if self.busy() {
             return Vec::new();
         }
-        match self.wanted.take() {
-            Some(Trigger::Auto) if self.dry_run => Vec::new(),
+        match self.pending_reconcile.take() {
             Some(trigger) => self.reconcile(trigger),
             None => Vec::new(),
         }
@@ -1146,17 +1155,17 @@ impl App {
                 }
             }
             Ok(_) if self.job != reconciling.job || !self.in_flight.is_empty() => {
-                self.wanted = self.wanted.max(Some(trigger));
+                self.pending_reconcile = self.pending_reconcile.max(Some(trigger));
             }
             Ok(_) if self.dry_run && trigger == Trigger::Auto => {}
             Ok(reconciled) => self.apply_reconciled(reconciled, trigger),
         }
-        self.run_wanted()
+        self.run_pending_reconcile()
     }
 
     /// Replaces the mailbox list and the queue's rows with Fastmail's. The
-    /// filter keeps the mailbox ids it resolved to. In dry run, which only
-    /// `R` gets here in, the undo history is cleared too.
+    /// filter keeps the mailbox ids it resolved to. Only `R` reaches here
+    /// in dry run, where the undo history is cleared too.
     fn apply_reconciled(&mut self, reconciled: Reconciled, trigger: Trigger) {
         self.mailboxes = Mailboxes::from(reconciled.mailboxes);
         self.total = reconciled.result.total;
@@ -1326,13 +1335,9 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             app.spinner = app.spinner.wrapping_add(1);
             Vec::new()
         }
-        Msg::Wake if app.dry_run => Vec::new(),
         Msg::Wake => app.reconcile(Trigger::Auto),
         Msg::ReconcileTick => {
             app.next_reconcile_at = app.now + RECONCILE_INTERVAL;
-            if app.dry_run {
-                return Vec::new();
-            }
             app.reconcile(Trigger::Auto)
         }
         Msg::Refresh => {
@@ -1357,7 +1362,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
                 }
                 Err(error) => app.status = error.to_string(),
             }
-            app.run_wanted()
+            app.run_pending_reconcile()
         }
     }
 }

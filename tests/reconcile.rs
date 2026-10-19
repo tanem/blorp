@@ -5,6 +5,7 @@ use blorp::app::{Effect, Mode, Msg};
 use blorp::harness::{Harness, NOW};
 use blorp::jmap::fake::{EmailSpec, Store};
 use blorp::jmap::{EmailQuery, EmailUpdate, Error, Fatal};
+use crossterm::event::{KeyCode, KeyEvent};
 use jiff::{SignedDuration, Timestamp};
 use serde_json::{Value, json};
 
@@ -356,9 +357,7 @@ fn the_refresh_command_reconciles_at_once() {
     let mut h = Harness::loaded(store());
     h.keys(":refresh");
 
-    let effects = h.key(crossterm::event::KeyEvent::from(
-        crossterm::event::KeyCode::Enter,
-    ));
+    let effects = h.key(KeyEvent::from(KeyCode::Enter));
 
     assert!(
         matches!(effects[..], [Effect::Reconcile { .. }]),
@@ -380,9 +379,7 @@ fn a_failed_refresh_is_reported_and_a_failed_tick_is_not() {
     assert_eq!(h.subjects().len(), 5);
 
     h.keys(":");
-    h.key(crossterm::event::KeyEvent::from(
-        crossterm::event::KeyCode::Esc,
-    ));
+    h.key(KeyEvent::from(KeyCode::Esc));
     let sent = h.send(Msg::Wake);
     let generation = reconcile_generation(&sent);
     h.send(Msg::Reconciled {
@@ -448,4 +445,29 @@ fn a_reconcile_from_before_dry_run_turned_on_is_discarded() {
 
     assert_eq!(h.subjects(), ["Two", "Three", "Four", "Five"]);
     assert_eq!(h.app.undo_depth(), 1);
+}
+
+#[test]
+fn an_r_waiting_when_dry_run_turns_on_runs_as_an_automatic_reconcile() {
+    let mut h = Harness::loaded(store());
+    let archive = h.keys("e");
+    assert_eq!(h.keys("R"), [], "R waits for the outbox");
+
+    h.keys("D");
+
+    assert_eq!(h.resolve(archive), [], "dry run drops it");
+    assert_eq!(h.status(), "Dry run on, undo history cleared");
+}
+
+#[test]
+fn an_r_in_flight_when_dry_run_turns_on_does_not_reset_the_queue() {
+    let mut h = Harness::loaded(store());
+    let sent = h.keys("R");
+    h.keys("De");
+
+    assert_eq!(h.resolve(sent), []);
+
+    assert_eq!(h.subjects(), ["Two", "Three", "Four", "Five"]);
+    assert_eq!(h.app.undo_depth(), 1);
+    assert!(!h.app.loading());
 }

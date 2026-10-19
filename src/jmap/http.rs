@@ -149,12 +149,8 @@ impl HttpJmap {
 
     /// The two-stage fetch [`Jmap::query`] describes, with `Mailbox/get`
     /// for every mailbox ahead of the query's calls in the first request
-    /// when `mailboxes` is true.
-    async fn fetch(
-        &self,
-        query: &EmailQuery,
-        mailboxes: bool,
-    ) -> Result<(Option<Vec<Mailbox>>, QueryResult), Error> {
+    /// when `mailboxes` is true. The mailbox list is empty when it is false.
+    async fn fetch(&self, query: &EmailQuery, mailboxes: bool) -> Result<Reconciled, Error> {
         let account = &self.account_id;
         let mut calls = Vec::new();
         if mailboxes {
@@ -198,9 +194,9 @@ impl HttpJmap {
         let responses = self.send(calls).await?;
         let mailboxes = if mailboxes {
             let got: GetResponse<Mailbox> = response_of(&responses, "Mailbox/get", "m")?;
-            Some(got.list)
+            got.list
         } else {
-            None
+            Vec::new()
         };
         let ids: QueryResponse = response_of(&responses, "Email/query", "0")?;
         let hits: GetResponse<Hit> = response_of(&responses, "Email/get", "1")?;
@@ -213,7 +209,7 @@ impl HttpJmap {
             threads: threads.list,
             emails,
         };
-        Ok((mailboxes, result))
+        Ok(Reconciled { mailboxes, result })
     }
 }
 
@@ -231,16 +227,11 @@ impl Jmap for HttpJmap {
     }
 
     async fn query(&self, query: &EmailQuery) -> Result<QueryResult, Error> {
-        let (_, result) = self.fetch(query, false).await?;
-        Ok(result)
+        Ok(self.fetch(query, false).await?.result)
     }
 
     async fn reconcile(&self, query: &EmailQuery) -> Result<Reconciled, Error> {
-        let (mailboxes, result) = self.fetch(query, true).await?;
-        Ok(Reconciled {
-            mailboxes: mailboxes.unwrap_or_default(),
-            result,
-        })
+        self.fetch(query, true).await
     }
 
     async fn events(&self) -> Result<Option<PushStream>, Error> {

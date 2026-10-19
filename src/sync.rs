@@ -1,5 +1,5 @@
 //! The `sync` task: keeps the push stream open and sends [`Msg::Wake`] on
-//! each of its `state` events. The reconcile tick is not here but in
+//! each of its events. The reconcile tick is not here but in
 //! `update` (ADR 0002).
 
 use std::hash::{BuildHasher, RandomState};
@@ -46,7 +46,8 @@ impl Default for Backoff {
 
 impl Backoff {
     /// The wait before reconnecting after a connection that stayed open
-    /// for `lasted`, zero when it did not open: the current base plus
+    /// for `lasted`, counted from when it opened, zero when it did not
+    /// open: the current base plus
     /// `jitter`. A connection that stayed open [`STABLE`] or longer starts
     /// the base again from [`BACKOFF_START`]. The base then doubles, up to
     /// [`BACKOFF_CAP`].
@@ -67,14 +68,14 @@ fn jitter() -> Duration {
 }
 
 /// Runs the push stream until `tx` closes or the session turns out to
-/// have no push stream. Each `state` event, including the first on every
-/// connection, is sent as [`Msg::Wake`]. A stream that fails to open, ends,
+/// have no push stream. Each event, `state` or `ping`, including the first
+/// on every connection, is sent as [`Msg::Wake`]. A stream that fails to
+/// open, ends,
 /// fails, or stays silent for [`WATCHDOG`] is opened again after the
 /// [`Backoff`] wait.
 pub async fn run<J: Jmap>(jmap: J, tx: UnboundedSender<Msg>) {
     let mut backoff = Backoff::default();
     loop {
-        let opened = Instant::now();
         let mut stream = match jmap.events().await {
             Ok(Some(stream)) => stream,
             Ok(None) => return,
@@ -85,14 +86,14 @@ pub async fn run<J: Jmap>(jmap: J, tx: UnboundedSender<Msg>) {
             }
         };
         tracing::debug!("push stream open");
+        let opened = Instant::now();
         loop {
             match tokio::time::timeout(WATCHDOG, stream.next()).await {
-                Ok(Some(Ok(Push::State))) => {
+                Ok(Some(Ok(Push::State | Push::Ping))) => {
                     if tx.send(Msg::Wake).is_err() {
                         return;
                     }
                 }
-                Ok(Some(Ok(Push::Ping))) => {}
                 Ok(Some(Err(error))) => {
                     tracing::info!("push stream failed: {error}");
                     break;

@@ -104,7 +104,7 @@ async fn keys_do_not_put_the_tick_off() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn each_state_event_reconciles_at_once() {
+async fn each_push_event_reconciles_at_once() {
     let jmap = FakeJmap::new(inbox());
     let state = start(&jmap, &[]).await;
     sleep_ms(500).await;
@@ -115,10 +115,6 @@ async fn each_state_event_reconciles_at_once() {
     assert_eq!(reconciles(&jmap), 1);
 
     jmap.push(Push::Ping);
-    sleep_ms(10).await;
-    assert_eq!(reconciles(&jmap), 1, "a ping is not a change");
-
-    jmap.push(Push::State);
     sleep_ms(10).await;
     assert_eq!(
         jmap.calls()[2..],

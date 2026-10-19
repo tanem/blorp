@@ -165,9 +165,7 @@ impl Jmap for FakeJmap {
 
     async fn reconcile(&self, query: &EmailQuery) -> Result<Reconciled, Error> {
         self.call(Call::Reconcile(query.clone()), |store| {
-            let (mailboxes, _) = store.get_mailboxes(None)?;
-            let result = store.query(query)?;
-            Ok(Reconciled { mailboxes, result })
+            store.reconcile(query)
         })
         .await
     }
@@ -264,6 +262,14 @@ impl Store {
             threads,
             emails,
         })
+    }
+
+    /// Evaluates `query` the way [`Jmap::reconcile`] does: every mailbox,
+    /// then [`Store::query`].
+    pub fn reconcile(&self, query: &EmailQuery) -> Result<Reconciled, Error> {
+        let (mailboxes, _) = self.get_mailboxes(None)?;
+        let result = self.query(query)?;
+        Ok(Reconciled { mailboxes, result })
     }
 
     /// `Email/query` with `collapseThreads`: the ids of one email per
