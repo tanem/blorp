@@ -147,7 +147,7 @@ impl HttpJmap {
         Ok(response.method_responses)
     }
 
-    /// The two-stage fetch [`Jmap::query`] describes, with `Mailbox/get`
+    /// The staged fetch [`Jmap::query`] describes, with `Mailbox/get`
     /// for every mailbox ahead of the query's calls in the first request
     /// when `mailboxes` is true. The mailbox list is empty when it is false.
     async fn fetch(&self, query: &EmailQuery, mailboxes: bool) -> Result<Reconciled, Error> {

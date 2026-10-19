@@ -25,18 +25,16 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// `Mailbox/get` for every mailbox in the account.
     fn get_mailboxes(&self) -> impl Future<Output = Result<Vec<Mailbox>, Error>> + Send;
 
-    /// The threads matching `query` and every email of them, in two stages
+    /// The threads matching `query` and every email of them, in stages
     /// that are not atomic. First, one request chains `Email/query` with
     /// `collapseThreads`, `Email/get` for the hits' threads, and `Thread/get`
     /// by back-reference. Next, when the query names extra threads, they
     /// are fetched in `Thread/get` calls of at most the session's
     /// `maxObjectsInGet` ids, in requests of at most its `maxCallsInRequest`
-    /// calls. Then the threads' emails are fetched with
-    /// `Email/get` calls of at most the session's `maxObjectsInGet` ids, in
-    /// requests of at most its `maxCallsInRequest` calls, sent one after
-    /// another; none is sent for an empty queue. An email gone
-    /// by the second stage is left out. A method error in any request fails
-    /// the whole query.
+    /// calls, sent one after another. Last, the threads' emails are fetched
+    /// in `Email/get` calls under the same limits; none is sent for an empty
+    /// queue. An extra thread or an email gone by its stage is left out. A
+    /// method error in any request fails the whole query.
     fn query(&self, query: &EmailQuery) -> impl Future<Output = Result<QueryResult, Error>> + Send;
 
     /// A reconcile's fetch: [`Jmap::query`] with `Mailbox/get` for every
