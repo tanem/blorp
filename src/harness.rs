@@ -121,8 +121,12 @@ impl Harness {
                     let result = self.store.query(&query);
                     rest.extend(self.send(Msg::Loaded { generation, result }));
                 }
-                Effect::Reconcile { generation, query } => {
-                    let result = self.reconcile(&query);
+                Effect::Reconcile {
+                    generation,
+                    query,
+                    snoozed,
+                } => {
+                    let result = self.store.reconcile(&query, snoozed.as_ref());
                     rest.extend(self.send(Msg::Reconciled { generation, result }));
                 }
                 Effect::SetEmails { job, update } => {
@@ -163,9 +167,10 @@ impl Harness {
         self.store.query(query)
     }
 
-    /// What a reconcile of `query` gets from the store now.
+    /// What a reconcile of `query`, with no snooze mailbox query, gets
+    /// from the store now.
     pub fn reconcile(&self, query: &EmailQuery) -> Result<Reconciled, Error> {
-        self.store.reconcile(query)
+        self.store.reconcile(query, None)
     }
 
     /// Types each character as a key press.

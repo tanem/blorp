@@ -232,10 +232,14 @@ impl<J: Jmap> Executor<J> {
                         Msg::Loaded { generation, result }
                     });
                 }
-                Effect::Reconcile { generation, query } => {
+                Effect::Reconcile {
+                    generation,
+                    query,
+                    snoozed,
+                } => {
                     let jmap = self.jmap.clone();
                     self.supersede(async move {
-                        let result = jmap.reconcile(&query).await;
+                        let result = jmap.reconcile(&query, snoozed.as_ref()).await;
                         Msg::Reconciled { generation, result }
                     });
                 }

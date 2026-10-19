@@ -71,7 +71,7 @@ async fn start(jmap: &FakeJmap, keys: &'static [(u64, char)]) -> JoinHandle<io::
 fn reconciles(jmap: &FakeJmap) -> usize {
     jmap.calls()
         .iter()
-        .filter(|call| matches!(call, Call::Reconcile(_)))
+        .filter(|call| matches!(call, Call::Reconcile(..)))
         .count()
 }
 
@@ -120,8 +120,8 @@ async fn each_push_event_reconciles_at_once() {
     assert_eq!(
         jmap.calls()[2..],
         [
-            Call::Reconcile(inbox_query()),
-            Call::Reconcile(inbox_query())
+            Call::Reconcile(inbox_query(), None),
+            Call::Reconcile(inbox_query(), None)
         ]
     );
     state.abort();
@@ -192,7 +192,7 @@ async fn a_reconcile_that_spans_an_action_is_discarded_and_run_again() {
     assert!(
         matches!(
             calls[..],
-            [Call::Reconcile(_), Call::SetEmails(_), Call::Reconcile(_)]
+            [Call::Reconcile(..), Call::SetEmails(_), Call::Reconcile(..)]
         ),
         "{calls:?}"
     );

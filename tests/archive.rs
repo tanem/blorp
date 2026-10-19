@@ -181,6 +181,7 @@ fn not_updated_rolls_the_archive_back_and_reconciles() {
         [Effect::Reconcile {
             generation: 2,
             query: inbox_query(),
+            snoozed: None,
         }]
     );
 }
@@ -205,6 +206,7 @@ fn a_failed_request_rolls_the_archive_back_and_reconciles() {
         [Effect::Reconcile {
             generation: 2,
             query: inbox_query(),
+            snoozed: None,
         }]
     );
     h.resolve(effects);
@@ -234,6 +236,7 @@ fn a_failed_archive_reconciles_once_the_outbox_drains() {
         [Effect::Reconcile {
             generation: 2,
             query: inbox_query(),
+            snoozed: None,
         }]
     );
     h.resolve(effects);

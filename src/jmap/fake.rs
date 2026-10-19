@@ -29,7 +29,8 @@ use super::{Mailbox, Push, PushStream, QueryResult, Reconciled, SetResult, Threa
 pub enum Call {
     GetMailboxes,
     Query(EmailQuery),
-    Reconcile(EmailQuery),
+    /// The queue's query, and the snooze mailbox's when one was given.
+    Reconcile(EmailQuery, Option<EmailQuery>),
     GetEmails(Vec<String>),
     SetEmails(EmailUpdate),
     CreateMailbox(String),
@@ -165,9 +166,13 @@ impl Jmap for FakeJmap {
             .await
     }
 
-    async fn reconcile(&self, query: &EmailQuery) -> Result<Reconciled, Error> {
-        self.call(Call::Reconcile(query.clone()), |store| {
-            store.reconcile(query)
+    async fn reconcile(
+        &self,
+        query: &EmailQuery,
+        snoozed: Option<&EmailQuery>,
+    ) -> Result<Reconciled, Error> {
+        self.call(Call::Reconcile(query.clone(), snoozed.cloned()), |store| {
+            store.reconcile(query, snoozed)
         })
         .await
     }
@@ -269,6 +274,14 @@ impl Store {
         Ok(mailbox)
     }
 
+    /// Adds `email`, as a delivery or a filing rule would.
+    pub fn deliver(&mut self, email: EmailSpec) {
+        if !email.to.is_empty() {
+            self.to.insert(email.email.id.clone(), email.to);
+        }
+        self.emails.push(email.email);
+    }
+
     /// Deletes the mailbox with `id`, as the web client would.
     pub fn remove_mailbox(&mut self, id: &str) {
         self.mailboxes.retain(|m| m.id != id);
@@ -315,12 +328,21 @@ impl Store {
         })
     }
 
-    /// Evaluates `query` the way [`Jmap::reconcile`] does: every mailbox,
-    /// then [`Store::query`].
-    pub fn reconcile(&self, query: &EmailQuery) -> Result<Reconciled, Error> {
+    /// Evaluates `query` and `snoozed` the way [`Jmap::reconcile`] does:
+    /// every mailbox, then [`Store::query`] for each.
+    pub fn reconcile(
+        &self,
+        query: &EmailQuery,
+        snoozed: Option<&EmailQuery>,
+    ) -> Result<Reconciled, Error> {
         let (mailboxes, _) = self.get_mailboxes(None)?;
         let result = self.query(query)?;
-        Ok(Reconciled { mailboxes, result })
+        let snoozed = snoozed.map(|snoozed| self.query(snoozed)).transpose()?;
+        Ok(Reconciled {
+            mailboxes,
+            result,
+            snoozed,
+        })
     }
 
     /// `Email/query` with `collapseThreads`: the ids of one email per

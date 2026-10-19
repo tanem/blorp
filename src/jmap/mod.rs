@@ -38,10 +38,13 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     fn query(&self, query: &EmailQuery) -> impl Future<Output = Result<QueryResult, Error>> + Send;
 
     /// A reconcile's fetch: [`Jmap::query`] with `Mailbox/get` for every
-    /// mailbox added to its first request, ahead of the query's calls.
+    /// mailbox added to its first request, ahead of the query's calls, and
+    /// when `snoozed` is given, that query's first-stage calls after them.
+    /// The later stages of `query`, then of `snoozed`, follow.
     fn reconcile(
         &self,
         query: &EmailQuery,
+        snoozed: Option<&EmailQuery>,
     ) -> impl Future<Output = Result<Reconciled, Error>> + Send;
 
     /// Opens the push stream for `Email` and `Mailbox` changes, with no
@@ -124,6 +127,8 @@ pub struct Reconciled {
     pub mailboxes: Vec<Mailbox>,
     /// The query's result.
     pub result: QueryResult,
+    /// The result of the snooze mailbox's query, when one was given.
+    pub snoozed: Option<QueryResult>,
 }
 
 /// An open push stream's events.

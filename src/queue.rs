@@ -130,6 +130,16 @@ impl Queue {
         self.threads.insert(index, thread);
     }
 
+    /// Sorts the rows by `key`, lowest first when `ascending`, keeping the
+    /// order between ties. The cursor keeps its row number.
+    pub fn resort(&mut self, ascending: bool, key: impl Fn(&Thread) -> Timestamp) {
+        if ascending {
+            self.threads.sort_by_key(|t| key(t));
+        } else {
+            self.threads.sort_by_key(|t| std::cmp::Reverse(key(t)));
+        }
+    }
+
     pub fn down(&mut self, rows: usize) {
         self.cursor = self.cursor.saturating_add(rows).min(self.last());
     }

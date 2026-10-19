@@ -227,10 +227,7 @@ fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> 
         Span::styled(format!("{} ", fit(sender, SENDER_WIDTH)), text),
         Span::styled(fit(subject, subject_width), text),
         Span::styled(format!(" {count:>COUNT_WIDTH$}"), dim),
-        Span::styled(
-            format!(" {:>AGE_WIDTH$}", age(app.now, hit.received_at)),
-            dim,
-        ),
+        Span::styled(format!(" {:>AGE_WIDTH$}", when(app, thread)), dim),
     ]);
     if at_cursor {
         line.style(Style::new().add_modifier(Modifier::REVERSED))
@@ -293,7 +290,7 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         right.push(Span::raw(" "));
     }
     right.push(Span::styled(
-        format!(" {} ", app.sort().name()),
+        format!(" {} ", app.sort_name()),
         Style::new().fg(Color::DarkGray),
     ));
     right.push(Span::styled(
@@ -342,6 +339,17 @@ fn fit(text: &str, width: usize) -> String {
     used += 1;
     out.push_str(&" ".repeat(width.saturating_sub(used)));
     out
+}
+
+/// The age column: how long ago the thread's matching email arrived, or in
+/// the snooze mailbox how long until the thread returns, `now` when it is
+/// due or has no schedule entry.
+fn when(app: &App, thread: &Thread) -> String {
+    if app.in_snooze_mailbox() {
+        let returns = app.schedule().get(&thread.id).map(|e| e.return_at);
+        return age(returns.unwrap_or(app.now), app.now);
+    }
+    age(app.now, thread.hit().received_at)
 }
 
 /// How long ago `then` was, in the largest whole unit: `now`, `5m`, `3h`,
@@ -694,6 +702,52 @@ mod tests {
         let statusline = screen.lines().nth(22).unwrap();
         assert!(statusline.contains(" Archive  in:archive "), "{statusline}");
         assert!(statusline.contains(" oldest "), "{statusline}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn the_snooze_mailbox_shows_when_each_thread_returns_soonest_first() {
+        let store = Store::builder()
+            .role_mailbox("mb-inbox", "Inbox", "inbox")
+            .mailbox("mb-snooze", "Snoozed (blorp)")
+            .email(
+                EmailSpec::new("e1", "t1", "2026-10-01T09:00:00Z")
+                    .in_mailbox("mb-snooze")
+                    .seen()
+                    .from("Insurer", "renewals@example.invalid")
+                    .subject("Renewal"),
+            )
+            .email(
+                EmailSpec::new("e2", "t2", "2026-10-02T09:00:00Z")
+                    .in_mailbox("mb-snooze")
+                    .seen()
+                    .from("Airline", "trips@example.invalid")
+                    .subject("Flights"),
+            )
+            .email(
+                EmailSpec::new("e3", "t3", "2026-10-03T09:00:00Z")
+                    .in_mailbox("mb-snooze")
+                    .seen()
+                    .from("Hotel", "stay@example.invalid")
+                    .subject("Booking"),
+            )
+            .build();
+        let entry = |email: &str, return_at: &str| crate::snooze::Entry {
+            emails: [(email.into(), "mb-inbox".into())].into(),
+            snoozed_at: "2026-10-10T09:00:00Z".parse().unwrap(),
+            return_at: return_at.parse().unwrap(),
+            returned_at: None,
+        };
+        let mut schedule = crate::snooze::Schedule::default();
+        schedule.set("t1", Some(entry("e1", "2026-10-25T08:00:00Z")));
+        schedule.set("t2", Some(entry("e2", "2026-10-18T15:00:00Z")));
+        let mut h = Harness::with_schedule(store, schedule);
+        let effects = h.send(Msg::SetFilter("in:\"Snoozed (blorp)\"".into()));
+        h.resolve(effects);
+
+        let screen = render(&h, 80, 24);
+        let statusline = screen.lines().nth(22).unwrap();
+        assert!(statusline.contains(" soonest "), "{statusline}");
         insta::assert_snapshot!(screen);
     }
 

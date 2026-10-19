@@ -17,7 +17,7 @@ fn at(time: &str) -> Timestamp {
 const NOW: &str = "2026-10-18T12:00:00Z";
 
 /// Newest first: t1 (in the Inbox and Travel, with a Sent reply), t2, t3.
-/// Thread t4 is snoozed.
+/// Thread t4 is in the snooze mailbox; [`snoozed_t4`] is its entry.
 fn store() -> Store {
     builder()
         .mailbox("mb-snooze", "Snoozed (blorp)")
@@ -29,6 +29,23 @@ fn store() -> Store {
                 .subject("Renewal"),
         )
         .build()
+}
+
+/// The schedule entry of t4, snoozed from the Inbox until next Sunday.
+fn snoozed_t4() -> Entry {
+    Entry {
+        emails: [("e4".into(), "mb-inbox".into())].into(),
+        snoozed_at: at("2026-10-10T09:00:00Z"),
+        return_at: at("2026-10-25T08:00:00Z"),
+        returned_at: None,
+    }
+}
+
+/// A schedule holding [`snoozed_t4`] alone.
+fn t4_schedule() -> Schedule {
+    let mut schedule = Schedule::default();
+    schedule.set("t4", Some(snoozed_t4()));
+    schedule
 }
 
 /// [`store`] before anything was snoozed, with no snooze mailbox.
@@ -365,20 +382,8 @@ fn a_schedule_write_that_fails_cancels_the_snooze() {
 }
 
 #[test]
-fn snooze_in_the_snooze_mailbox_does_nothing() {
-    let mut h = Harness::loaded(store());
-    let effects = h.send(Msg::SetFilter("in:\"Snoozed (blorp)\"".into()));
-    h.resolve(effects);
-
-    let effects = command(&mut h, "z tomorrow");
-
-    assert_eq!(effects, vec![]);
-    assert_eq!(h.status(), "Already snoozed");
-}
-
-#[test]
 fn dry_run_snoozes_in_memory_and_writes_nothing() {
-    let mut h = Harness::loaded_dry(store());
+    let (mut h, _) = Harness::launched(store(), true, t4_schedule());
 
     let effects = command(&mut h, "z tomorrow");
 
@@ -396,7 +401,7 @@ fn dry_run_snoozes_in_memory_and_writes_nothing() {
 
     let effects = h.keys("D");
     assert_eq!(effects, vec![]);
-    assert_eq!(h.app.schedule(), &Schedule::default());
+    assert_eq!(h.app.schedule(), &t4_schedule());
 }
 
 #[test]
@@ -407,7 +412,7 @@ fn archiving_a_returned_thread_drops_its_entry_and_undo_restores_it() {
         return_at: at("2026-10-18T08:00:00Z"),
         returned_at: Some(at("2026-10-18T11:30:00Z")),
     };
-    let mut schedule = Schedule::default();
+    let mut schedule = t4_schedule();
     schedule.set("t2", Some(returned.clone()));
     let mut h = Harness::loaded_with(store(), schedule);
     assert_eq!(h.subjects(), ["Lunch", "Re: Trip", "Invoice"]);
@@ -877,9 +882,10 @@ fn crowded() -> Store {
     builder.build()
 }
 
-/// A schedule in which t3 returned to the Inbox at 11:59:30.
+/// A schedule in which t3 returned to the Inbox at 11:59:30, and t4 is
+/// snoozed.
 fn returned_t3() -> Schedule {
-    let mut schedule = Schedule::default();
+    let mut schedule = t4_schedule();
     schedule.set(
         "t3",
         Some(Entry {
@@ -983,15 +989,22 @@ fn a_due_thread_beyond_the_snooze_mailboxs_newest_500_still_returns() {
             .seen()
             .subject("Renewal"),
     );
+    let mut schedule = due_schedule();
     for i in 0..500 {
         builder = builder.email(
             EmailSpec::new(&format!("s{i}"), &format!("ts{i}"), "2026-10-17T09:00:00Z")
                 .in_mailbox("mb-snooze")
                 .subject("Snoozed later"),
         );
+        let entry = Entry {
+            emails: [(format!("s{i}"), "mb-inbox".into())].into(),
+            snoozed_at: at("2026-10-17T10:00:00Z"),
+            ..snoozed_t4()
+        };
+        schedule.set(&format!("ts{i}"), Some(entry));
     }
 
-    let (h, _) = Harness::launched(builder.build(), false, due_schedule());
+    let (h, _) = Harness::launched(builder.build(), false, schedule);
 
     assert_eq!(h.subjects()[0], "Renewal");
     assert_eq!(

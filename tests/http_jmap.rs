@@ -609,12 +609,15 @@ async fn reconcile_puts_mailbox_get_in_the_query_s_first_request() {
     let jmap = connect(&server).await.unwrap();
 
     let reconciled = jmap
-        .reconcile(&EmailQuery {
-            filter: json!({"inMailbox": "mb1"}),
-            ascending: false,
-            limit: 500,
-            extra_threads: Vec::new(),
-        })
+        .reconcile(
+            &EmailQuery {
+                filter: json!({"inMailbox": "mb1"}),
+                ascending: false,
+                limit: 500,
+                extra_threads: Vec::new(),
+            },
+            None,
+        )
         .await
         .unwrap();
 
@@ -622,6 +625,130 @@ async fn reconcile_puts_mailbox_get_in_the_query_s_first_request() {
     assert_eq!(reconciled.mailboxes[0].role.as_deref(), Some("inbox"));
     assert_eq!(reconciled.result.ids, ["Me2"]);
     assert_eq!(reconciled.result.emails.len(), 1);
+}
+
+#[tokio::test]
+async fn reconcile_puts_the_snooze_mailbox_chain_in_the_first_request_after_the_queue_s() {
+    let server = MockServer::start().await;
+    serve_session(&server, mail_capabilities()).await;
+    let mut first = first_stage(json!({"inMailbox": "mb1"}));
+    let calls = first["methodCalls"].as_array_mut().unwrap();
+    calls.insert(
+        0,
+        json!(["Mailbox/get", {
+            "accountId": "u1a2b3c4", "ids": null,
+            "properties": ["id", "name", "parentId", "role"]
+        }, "m"]),
+    );
+    calls.extend([
+        json!(["Email/query", {
+            "accountId": "u1a2b3c4",
+            "filter": {"inMailbox": "mbS"},
+            "sort": [{"property": "receivedAt", "isAscending": false}],
+            "collapseThreads": true,
+            "limit": 500,
+            "calculateTotal": true
+        }, "s0"]),
+        json!(["Email/get", {
+            "accountId": "u1a2b3c4",
+            "#ids": {"resultOf": "s0", "name": "Email/query", "path": "/ids"},
+            "properties": ["threadId"]
+        }, "s1"]),
+        json!(["Thread/get", {
+            "accountId": "u1a2b3c4",
+            "#ids": {"resultOf": "s1", "name": "Email/get", "path": "/list/*/threadId"}
+        }, "s2"]),
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(body_json(first))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [
+                ["Mailbox/get", {"accountId": "u1a2b3c4", "state": "1", "list": [
+                    {"id": "mb1", "name": "Inbox", "parentId": null, "role": "inbox"},
+                    {"id": "mbS", "name": "Snoozed (blorp)", "parentId": null, "role": null}
+                ], "notFound": []}, "m"],
+                ["Email/query", {"accountId": "u1a2b3c4", "ids": ["Me2"], "position": 0, "total": 1}, "0"],
+                ["Email/get", {"accountId": "u1a2b3c4", "list": [{"id": "Me2", "threadId": "Tt1"}], "notFound": []}, "1"],
+                ["Thread/get", {"accountId": "u1a2b3c4", "list": [{"id": "Tt1", "emailIds": ["Me2"]}], "notFound": []}, "2"],
+                ["Email/query", {"accountId": "u1a2b3c4", "ids": ["Ms5"], "position": 0, "total": 1}, "s0"],
+                ["Email/get", {"accountId": "u1a2b3c4", "list": [{"id": "Ms5", "threadId": "Ts5"}], "notFound": []}, "s1"],
+                ["Thread/get", {"accountId": "u1a2b3c4", "list": [{"id": "Ts5", "emailIds": ["Ms5"]}], "notFound": []}, "s2"]
+            ],
+            "sessionState": "0"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(body_json(json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "methodCalls": [member_get(&ids(&["Me2"]), "0")]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [
+                ["Email/get", {"accountId": "u1a2b3c4", "list": [email("Me2", "2026-10-17T09:30:00Z")], "notFound": []}, "0"]
+            ],
+            "sessionState": "0"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(body_json(json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "methodCalls": [["Thread/get", {"accountId": "u1a2b3c4", "ids": ["Ts9"]}, "0"]]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [
+                ["Thread/get", {"accountId": "u1a2b3c4", "list": [{"id": "Ts9", "emailIds": ["Ms9"]}], "notFound": []}, "0"]
+            ],
+            "sessionState": "0"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .and(body_json(json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "methodCalls": [member_get(&ids(&["Ms5", "Ms9"]), "0")]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "methodResponses": [
+                ["Email/get", {"accountId": "u1a2b3c4", "list": [
+                    email("Ms5", "2026-10-01T09:00:00Z"),
+                    email("Ms9", "2026-09-01T09:00:00Z")
+                ], "notFound": []}, "0"]
+            ],
+            "sessionState": "0"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let jmap = connect(&server).await.unwrap();
+    let query = |mailbox: &str, extra_threads: &[&str]| EmailQuery {
+        filter: json!({"inMailbox": mailbox}),
+        ascending: false,
+        limit: 500,
+        extra_threads: ids(extra_threads),
+    };
+
+    let reconciled = jmap
+        .reconcile(&query("mb1", &[]), Some(&query("mbS", &["Ts9"])))
+        .await
+        .unwrap();
+
+    assert_eq!(reconciled.mailboxes.len(), 2);
+    assert_eq!(reconciled.result.ids, ["Me2"]);
+    assert_eq!(reconciled.result.emails.len(), 1);
+    let snoozed = reconciled.snoozed.expect("the snooze mailbox's result");
+    assert_eq!(snoozed.ids, ["Ms5"]);
+    assert_eq!(snoozed.extra_threads.len(), 1);
+    let emails: Vec<&str> = snoozed.emails.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(emails, ["Ms5", "Ms9"]);
 }
 
 #[tokio::test]
