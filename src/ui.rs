@@ -400,6 +400,8 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('q') => Some(Msg::Quit),
         KeyCode::Char('e') => Some(Msg::Archive),
         KeyCode::Char('z') => Some(Msg::OpenSnooze),
+        KeyCode::Char('f') => Some(Msg::ToggleFlag),
+        KeyCode::Char('r') => Some(Msg::ToggleRead),
         KeyCode::Char('u') => Some(Msg::Undo),
         KeyCode::Char('x') => Some(Msg::Mark),
         KeyCode::Char('X') => Some(Msg::ClearMarks),
