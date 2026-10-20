@@ -200,6 +200,13 @@ impl Mailboxes {
         }
     }
 
+    /// Whether `mailbox` can be a move's mailbox: any but Drafts, Sent, and
+    /// the snooze mailbox.
+    pub fn is_move_target(&self, mailbox: &Mailbox) -> bool {
+        !matches!(mailbox.role, Some(Role::Drafts | Role::Sent))
+            && self.snooze().is_none_or(|snooze| snooze.id != mailbox.id)
+    }
+
     /// Whether a move action out of the queue mailbox `from` moves `email`.
     /// It moves an email in `from` that is in no Drafts or Sent mailbox and
     /// in no Trash or Junk mailbox outside `from`, so a Trash or Junk queue

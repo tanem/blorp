@@ -1,0 +1,28 @@
+---
+source: src/ui.rs
+expression: screen
+---
+"  1 ●  Ana Lopez            Lunch on Friday?                                  2m"
+"  2    Ravi Shah            Re: Trip to Wellington                        3   5h"
+"  1  ⚑ billing@shop.exampl… Your order 48213 has shipped and will arri…       3d"
+"  2 ●⚑ Maximiliana Feather… (no subject)                                      4w"
+"  3    Old Friend           Catching up                                       1y"
+"                                                                                "
+"                   ┌ Move to ───────────────────────────────┐                   "
+"                   │ >                                      │                   "
+"                   │   Archive                              │                   "
+"                   │   Family                               │                   "
+"                   │   Inbox                                │                   "
+"                   │   Newsletters                          │                   "
+"                   │   Old Stuff                            │                   "
+"                   │   Receipts                             │                   "
+"                   │   Trash                                │                   "
+"                   │   Travel                               │                   "
+"                   │   Work                                 │                   "
+"                   │   Work/Plans                           │                   "
+"                   └────────────────────────────────────────┘                   "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+" NORMAL  Inbox                                                      newest  2/5 "
+"                                                                                "

@@ -378,7 +378,12 @@ fn candidates(h: &Harness) -> Option<(Vec<&str>, usize)> {
 /// Opens the command line, types `text`, presses Tab, and returns the
 /// text and the candidates.
 fn tab(text: &str) -> (String, Vec<String>) {
-    let mut h = Harness::loaded(store());
+    tab_in(store(), text)
+}
+
+/// As [`tab`], over `store`.
+fn tab_in(store: Store, text: &str) -> (String, Vec<String>) {
+    let mut h = Harness::loaded(store);
     h.keys(":");
     h.keys(text);
     press(&mut h, KeyCode::Tab);
@@ -396,8 +401,9 @@ fn tab_and_shift_tab_cycle_through_the_command_names_and_aliases() {
 
     press(&mut h, KeyCode::Tab);
     let names = vec![
-        "archive", "e", "snooze", "z", "unsnooze", "uz", "flag", "f", "read", "r", "unread",
-        "undo", "u", "redo", "filter", "sort", "refresh", "dry", "quit", "q",
+        "archive", "e", "delete", "d", "spam", "move", "m", "snooze", "z", "unsnooze", "uz",
+        "flag", "f", "read", "r", "unread", "undo", "u", "redo", "filter", "sort", "refresh",
+        "dry", "quit", "q",
     ];
     assert_eq!(candidates(&h), Some((names.clone(), 0)));
     assert_eq!(h.app.prompt(), Some("archive"));
@@ -407,7 +413,7 @@ fn tab_and_shift_tab_cycle_through_the_command_names_and_aliases() {
     press(&mut h, KeyCode::BackTab);
     press(&mut h, KeyCode::BackTab);
     assert_eq!(h.app.prompt(), Some("q"));
-    assert_eq!(candidates(&h), Some((names, 19)));
+    assert_eq!(candidates(&h), Some((names, 24)));
     assert_eq!(h.app.prompt_cursor(), Some(1));
 }
 
@@ -534,6 +540,50 @@ fn tab_completes_the_word_under_the_cursor() {
         assert_eq!(text_after, completed, "{text:?}");
         assert_eq!(candidates, shown, "{text:?}");
     }
+}
+
+#[test]
+fn tab_after_move_completes_the_rest_of_the_line_as_a_mailbox_path_unquoted() {
+    for (text, completed, shown) in [
+        (
+            "move ",
+            "move Archive",
+            vec!["Archive", "Home", "Inbox", "Old Stuff", "Travel", "Work"],
+        ),
+        ("m tr", "m Travel", vec!["Travel"]),
+        ("move d", "move d", vec![]),
+        ("move s", "move s", vec![]),
+        ("move ol", "move Old Stuff", vec!["Old Stuff"]),
+        ("move old s", "move Old Stuff", vec!["Old Stuff"]),
+        (
+            "move work/re",
+            "move Work/Receipts",
+            vec!["Work/Receipts", "Work/Reports"],
+        ),
+        ("move  home/r", "move  Home/Receipts", vec!["Home/Receipts"]),
+    ] {
+        let (text_after, candidates) = tab(text);
+        assert_eq!(text_after, completed, "{text:?}");
+        assert_eq!(candidates, shown, "{text:?}");
+    }
+}
+
+#[test]
+fn tab_after_move_leaves_out_the_snooze_mailbox() {
+    let store = Store::builder()
+        .role_mailbox("mb-inbox", "Inbox", "inbox")
+        .mailbox("mb-snooze", "Snoozed (blorp)")
+        .mailbox("mb-school", "School")
+        .build();
+
+    assert_eq!(
+        tab_in(store.clone(), "move s"),
+        ("move School".to_string(), vec!["School".to_string()])
+    );
+    assert_eq!(
+        tab_in(store, "filter in:s").1,
+        ["in:School", "in:\"Snoozed (blorp)\""]
+    );
 }
 
 #[test]
