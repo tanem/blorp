@@ -69,6 +69,7 @@ fn builder() -> blorp::jmap::fake::StoreBuilder {
         )
 }
 
+/// The store [`builder`] describes.
 fn store() -> Store {
     builder().build()
 }
@@ -87,6 +88,7 @@ fn moved(ids: &[&str], from: &str, to: &str) -> EmailUpdate {
         .collect()
 }
 
+/// The update of each `Email/set` among `effects`.
 fn sets(effects: &[Effect]) -> Vec<&EmailUpdate> {
     effects
         .iter()
@@ -215,6 +217,18 @@ fn colon_move_reports_an_unknown_or_ambiguous_name_and_never_opens_the_picker() 
 }
 
 #[test]
+fn colon_move_on_an_empty_queue_says_nothing_is_selected_before_resolving_the_name() {
+    let mut h = Harness::loaded(
+        Store::builder()
+            .role_mailbox("mb-inbox", "Inbox", "inbox")
+            .build(),
+    );
+
+    assert_eq!(command(&mut h, "move Nowhere"), []);
+    assert_eq!(h.status(), "Nothing selected");
+}
+
+#[test]
 fn colon_move_to_the_snooze_mailbox_says_to_use_z_whether_or_not_it_exists() {
     let without = store();
     let with = builder().mailbox("mb-snooze", "Snoozed (blorp)").build();
@@ -250,8 +264,21 @@ fn colon_delete_and_colon_spam_act_on_the_selection_with_their_aliases() {
     assert_eq!(h.status(), "Marked 2 threads as spam");
 }
 
+/// Presses `code` with no modifier.
 fn press(h: &mut Harness, code: KeyCode) -> Vec<Effect> {
     h.key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+/// Types each character of `keys` as a key press, `\n` as Enter.
+fn type_keys(h: &mut Harness, keys: &str) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    for c in keys.chars() {
+        effects.extend(match c {
+            '\n' => press(h, KeyCode::Enter),
+            c => h.keys(&c.to_string()),
+        });
+    }
+    effects
 }
 
 #[test]
@@ -398,13 +425,7 @@ fn every_move_is_undone_and_redone() {
         ("mtravel\n", "mb-travel"),
     ] {
         let mut h = Harness::loaded(store());
-        let mut effects = Vec::new();
-        for c in keys.chars() {
-            effects.extend(match c {
-                '\n' => press(&mut h, KeyCode::Enter),
-                c => h.keys(&c.to_string()),
-            });
-        }
+        let effects = type_keys(&mut h, keys);
         h.settle(effects);
         assert_eq!(h.subjects(), ["Lunch", "Invoice", "Re: Prize"], "{keys}");
 
@@ -494,13 +515,7 @@ fn delete_spam_and_move_in_the_snooze_mailbox_cancel_the_entry_and_undo_restores
     ] {
         let (mut h, _) = Harness::launched(store(), false, schedule.clone());
         open(&mut h, "in:\"Snoozed (blorp)\"");
-        let mut effects = Vec::new();
-        for c in keys.chars() {
-            effects.extend(match c {
-                '\n' => press(&mut h, KeyCode::Enter),
-                c => h.keys(&c.to_string()),
-            });
-        }
+        let effects = type_keys(&mut h, keys);
 
         assert_eq!(sets(&effects), [&moved(&["e6"], "mb-snooze", to)], "{keys}");
         assert!(

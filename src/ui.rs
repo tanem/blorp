@@ -585,6 +585,7 @@ mod tests {
         busy_inbox_builder().build()
     }
 
+    /// The store [`busy_inbox`] builds, to add to.
     fn busy_inbox_builder() -> crate::jmap::fake::StoreBuilder {
         Store::builder()
             .role_mailbox("mb-inbox", "Inbox", "inbox")

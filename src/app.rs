@@ -1271,6 +1271,10 @@ impl App {
             Command::Delete => return self.run_on_selection(Msg::Delete, count),
             Command::Spam => return self.run_on_selection(Msg::Spam, count),
             Command::Move(name) => {
+                if self.queue.selection(count.unwrap_or(1)).is_empty() {
+                    self.status = "Nothing selected".into();
+                    return Vec::new();
+                }
                 let to = match self.mailboxes.resolve(&name) {
                     Ok(mailbox) => mailbox.id.clone(),
                     Err(_) if name.to_lowercase() == SNOOZE_MAILBOX.to_lowercase() => {
@@ -1364,10 +1368,10 @@ impl App {
     /// match, Down and Up move, Enter moves to the mailbox under the
     /// cursor, and Esc closes the picker and the visual range.
     fn move_picker_key(&mut self, key: PickerKey) -> Vec<Effect> {
-        let Some(picker) = &self.move_picker else {
+        let Some(typed) = self.move_picker.as_ref().map(|p| p.typed.clone()) else {
             return Vec::new();
         };
-        let matches = self.move_matches(&picker.typed);
+        let matches = self.move_matches(&typed);
         let Some(picker) = &mut self.move_picker else {
             return Vec::new();
         };
@@ -1788,7 +1792,7 @@ impl App {
             Action::Delete => (Role::Trash, "Trash"),
             Action::Spam => (Role::Junk, "Junk"),
             Action::Move(to) => return self.move_to(to, from),
-            _ => return Err(format!("Cannot {}", action.name())),
+            _ => unreachable!("only a move reaches move_target"),
         };
         let in_role = |role| {
             self.mailboxes
