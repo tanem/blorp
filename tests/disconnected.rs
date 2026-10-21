@@ -511,7 +511,7 @@ fn a_launch_query_that_fails_for_good_leaves_the_snooze_check_to_the_probe() {
 }
 
 #[test]
-fn r_while_a_probe_is_in_flight_waits_for_it_and_is_dropped_when_it_fails() {
+fn r_while_a_probe_is_in_flight_sends_no_second_probe_when_it_fails() {
     let mut h = disconnected();
     h.app.now = h.app.next_reconcile_at();
     let generation = reconcile_generation(&h.send(Msg::ReconcileTick));
@@ -586,4 +586,40 @@ fn a_reconcile_waiting_while_disconnected_runs_as_the_next_probe() {
     );
     assert!(h.app.loading(), "it runs as the R that waited");
     assert_eq!(h.resolve(effects), [], "and nothing waits behind it");
+}
+
+#[test]
+fn a_reconcile_waiting_runs_once_the_launch_snooze_check_reconnects() {
+    let mut store = store();
+    store.add_mailbox("mb-snoozed", "Snoozed (blorp)");
+    let mut h = Harness::new(store);
+    let query = match &h.start()[..] {
+        [Effect::Query { query, .. }] => query.clone(),
+        other => panic!("{other:?}"),
+    };
+    let result = h.query(&query);
+    let snoozed = match &h.send(Msg::Loaded {
+        generation: 1,
+        result,
+    })[..]
+    {
+        [Effect::QuerySnoozed { query, .. }] => query.clone(),
+        other => panic!("{other:?}"),
+    };
+    h.keys("e");
+    assert_eq!(h.send(Msg::Wake), [], "the push event waits for the outbox");
+    h.send(Msg::Sent {
+        job: 1,
+        result: Err(unreachable()),
+    });
+    assert!(!h.app.connected());
+
+    let result = h.query(&snoozed);
+    let effects = h.send(Msg::SnoozedLoaded { result });
+
+    assert!(h.app.connected());
+    assert!(
+        matches!(effects[..], [Effect::Reconcile { .. }]),
+        "{effects:?}"
+    );
 }

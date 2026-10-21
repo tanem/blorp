@@ -2554,16 +2554,19 @@ impl App {
             return vec![Effect::Fatal(fatal)];
         }
         self.record_reply(&result);
-        match result {
+        let mut effects = match result {
             Ok(_) if sent != Some(self.job) || !self.in_flight.is_empty() => Vec::new(),
             Ok(result) => self.return_due(Thread::all_from_query(result)),
-            // The probe that reconnects runs the check.
+            // The next reconcile runs the check.
             Err(error) if error.class() == Class::Transient => Vec::new(),
             Err(error) => {
                 self.status = format!("Could not check snoozed threads: {error}");
                 Vec::new()
             }
-        }
+        };
+        // A reply that reconnects lets a reconcile waiting to run go.
+        effects.extend(self.run_pending_reconcile());
+        effects
     }
 
     /// Whether a result from `from` is still to come, so that a retry it
@@ -2729,9 +2732,9 @@ impl App {
     /// mailbox's query for the due-snooze check, to bring the queue, the
     /// mailbox list, and the snoozed threads back in line with Fastmail.
     /// While a query is in flight or the outbox is busy it waits, and runs
-    /// once both are done, and a reconcile that runs takes the place of
-    /// one waiting. In dry run only `R` runs one, and a probe while
-    /// disconnected.
+    /// once both are done, or while disconnected as the next probe. A
+    /// reconcile that runs takes the place of one waiting. In dry run only
+    /// `R` runs one, and a probe while disconnected.
     fn reconcile(&mut self, trigger: Trigger) -> Vec<Effect> {
         if self.dry_run && trigger == Trigger::Auto && self.connected {
             return Vec::new();
