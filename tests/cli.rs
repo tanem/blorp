@@ -26,35 +26,21 @@ fn version_prints_the_name_and_version() {
 }
 
 #[test]
-fn dry_run_is_rejected_alongside_a_subcommand() {
-    for args in [
-        ["--dry-run", "setup"],
-        ["setup", "--dry-run"],
-        ["--dry-run", "logout"],
-    ] {
-        let output = blorp(&args);
-
-        assert_eq!(output.status.code(), Some(2), "{args:?}");
-    }
-}
-
-#[test]
 fn help_lists_the_commands_and_flags() {
     let output = blorp(&["--help"]);
 
     assert!(output.status.success());
     let help = text(&output.stdout);
-    for item in ["setup", "logout", "--dry-run", "--version", "--help"] {
+    for item in ["setup", "logout", "--version", "--help"] {
         assert!(help.contains(item), "help is missing {item}:\n{help}");
     }
 }
 
 #[test]
-fn dry_run_is_accepted_on_the_bare_command() {
-    let cli = Cli::try_parse_from(["blorp", "--dry-run"]).unwrap();
+fn an_unknown_flag_is_rejected() {
+    let output = blorp(&["--dry-run"]);
 
-    assert!(cli.dry_run);
-    assert!(cli.command.is_none());
+    assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 //! The blorp binary in a pseudo-terminal against a local JMAP server: the
-//! Inbox, motions and counts, resize, quitting, and a rejected token.
+//! Inbox, `j` and `k`, resize, quitting, and a rejected token.
 
 use blorp::jmap::fake::{EmailSpec, Store};
 use jiff::{SignedDuration, Timestamp};
@@ -7,7 +7,7 @@ use jiff::{SignedDuration, Timestamp};
 mod e2e;
 
 use e2e::server::LocalJmap;
-use e2e::{Blorp, Modes, REJECTED, Sandbox, TOKEN, rows, statusline};
+use e2e::{Blorp, Modes, REJECTED, Sandbox, TOKEN, statusline};
 
 /// RFC 3339 for `minutes` before now, so ages on screen do not depend on
 /// the date the tests run.
@@ -101,25 +101,25 @@ async fn the_inbox_loads_with_its_rows_and_statusline_at_80x24() {
     let (_sandbox, mut blorp) = start(&server, 80, 24);
 
     blorp.wait_statusline("1/5");
-    blorp.keys("2j");
+    blorp.keys("jj");
     blorp.wait_statusline("3/5");
 
     let rows = blorp.rows();
     assert_eq!(
         rows[..7],
         [
-            " Inbox  Unread  Flagged  Snoozed",
-            "  2 ●  Ana Lopez            Lunch on Friday?                                  2m",
-            "  1    Ravi Shah            Re: Trip to Wellington                        3   5h",
-            "  3  ⚑ billing@shop.exampl… Your order 48213 has shipped and will arri…       3d",
-            "  1 ●⚑ Maximiliana Feather… (no subject)                                      4w",
-            "  2    Old Friend           Catching up                                       1y",
+            "●  Ana Lopez            Lunch on Friday?                                      2m",
+            "   Ravi Shah            Re: Trip to Wellington                            3   5h",
+            " ⚑ billing@shop.exampl… Your order 48213 has shipped and will arrive b…       3d",
+            "●⚑ Maximiliana Feather… (no subject)                                          4w",
+            "   Old Friend           Catching up                                           1y",
+            "",
             "",
         ]
     );
     assert_eq!(
         rows[22],
-        " NORMAL  Inbox                                                      newest  3/5"
+        " Inbox                                                                      3/5"
     );
     assert_eq!(rows[23], "");
 }
@@ -130,47 +130,31 @@ async fn the_inbox_loads_with_its_rows_and_statusline_at_120x40() {
     let (_sandbox, mut blorp) = start(&server, 120, 40);
 
     blorp.wait_statusline("1/5");
-    blorp.keys("2j");
+    blorp.keys("jj");
     blorp.wait_statusline("3/5");
 
     let rows = blorp.rows();
     assert_eq!(
         rows[..7],
         [
-            " Inbox  Unread  Flagged  Snoozed",
-            "  2 ●  Ana Lopez            Lunch on Friday?                                                                          2m",
-            "  1    Ravi Shah            Re: Trip to Wellington                                                                3   5h",
-            "  3  ⚑ billing@shop.exampl… Your order 48213 has shipped and will arrive between Tuesday and Thursday next week       3d",
-            "  1 ●⚑ Maximiliana Feather… (no subject)                                                                              4w",
-            "  2    Old Friend           Catching up                                                                               1y",
+            "●  Ana Lopez            Lunch on Friday?                                                                              2m",
+            "   Ravi Shah            Re: Trip to Wellington                                                                    3   5h",
+            " ⚑ billing@shop.exampl… Your order 48213 has shipped and will arrive between Tuesday and Thursday next week           3d",
+            "●⚑ Maximiliana Feather… (no subject)                                                                                  4w",
+            "   Old Friend           Catching up                                                                                   1y",
+            "",
             "",
         ]
     );
     assert_eq!(
         rows[38],
-        " NORMAL  Inbox                                                                                              newest  3/5"
+        " Inbox                                                                                                              3/5"
     );
     assert_eq!(rows[39], "");
 }
 
 #[tokio::test]
-async fn a_filter_and_the_sort_select_the_queue_from_the_server() {
-    let server = LocalJmap::start(busy_inbox(), TOKEN).await;
-    let (_sandbox, mut blorp) = start(&server, 80, 24);
-    blorp.wait_statusline("1/5");
-
-    blorp.keys("/is:unread\r");
-    blorp.wait_statusline("is:unread                                           newest  1/2");
-    blorp.keys("t");
-    blorp.wait_statusline("oldest  1/2");
-    blorp.wait_for("the oldest unread thread first", |screen| {
-        let rows = rows(screen);
-        rows[1].contains("(no subject)") && rows[2].contains("Lunch on Friday?")
-    });
-}
-
-#[tokio::test]
-async fn motions_and_counts_move_the_cursor() {
+async fn j_and_k_move_the_cursor_and_other_keys_do_nothing() {
     let server = LocalJmap::start(numbered_inbox(30), TOKEN).await;
     let (_sandbox, mut blorp) = start(&server, 80, 24);
     blorp.wait_statusline(" 1/30");
@@ -178,37 +162,16 @@ async fn motions_and_counts_move_the_cursor() {
     for (keys, position) in [
         ("j", " 2/30"),
         ("k", " 1/30"),
-        ("3j", " 4/30"),
-        ("12G", " 12/30"),
-        ("G", " 30/30"),
-        ("g", " 1/30"),
+        ("jjj", " 4/30"),
+        ("3jGgek", " 4/30"),
     ] {
         blorp.keys(keys);
         blorp.wait_statusline(position);
     }
     assert!(
-        blorp.rows()[1].contains("Subject 1 "),
+        blorp.rows()[3].contains("Subject 4 "),
         "the cursor row is on screen"
     );
-}
-
-#[tokio::test]
-async fn esc_and_enter_drop_a_pending_count() {
-    let server = LocalJmap::start(numbered_inbox(30), TOKEN).await;
-    let (_sandbox, mut blorp) = start(&server, 80, 24);
-    blorp.wait_statusline(" 1/30");
-
-    for (cancel, from, to) in [("\x1b", "1/30", " 2/30"), ("\r", "2/30", " 3/30")] {
-        blorp.keys("5");
-        blorp.wait_statusline(&format!("5  newest  {from}"));
-        blorp.keys(cancel);
-        blorp.wait_for("the count to be dropped", |screen| {
-            let statusline = statusline(screen);
-            statusline.ends_with(from) && !statusline.contains("5  ")
-        });
-        blorp.keys("j");
-        blorp.wait_statusline(to);
-    }
 }
 
 #[tokio::test]

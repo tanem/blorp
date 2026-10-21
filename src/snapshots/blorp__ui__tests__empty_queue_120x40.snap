@@ -2,7 +2,6 @@
 source: src/ui.rs
 expression: "render(&h, 120, 40)"
 ---
-" Inbox  Unread  Flagged  Snoozed                                                                                        "
 "No threads                                                                                                              "
 "                                                                                                                        "
 "                                                                                                                        "
@@ -40,5 +39,6 @@ expression: "render(&h, 120, 40)"
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "
-" NORMAL  Inbox                                                                                              newest  0/0 "
+"                                                                                                                        "
+" Inbox                                                                                                              0/0 "
 "                                                                                                                        "

@@ -5,9 +5,9 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use blorp::jmap::{Class, EmailUpdate, Error, Fatal, HttpJmap, Jmap, Timeouts};
+use blorp::jmap::{Class, Error, Fatal, HttpJmap, Jmap, Timeouts};
 use secrecy::SecretString;
-use serde_json::{Value, json};
+use serde_json::json;
 use tracing_subscriber::fmt::MakeWriter;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -220,42 +220,6 @@ async fn server_unavailable_and_server_fail_are_transient_and_other_method_error
 }
 
 #[tokio::test]
-async fn a_rate_limit_set_error_fails_the_update_as_transient() {
-    let server = MockServer::start().await;
-    let jmap = connect(&server).await;
-    answer(
-        &server,
-        ResponseTemplate::new(200).set_body_json(json!({
-            "methodResponses": [[
-                "Email/set",
-                {
-                    "accountId": "u1a2b3c4",
-                    "newState": "2",
-                    "updated": {"e1": null},
-                    "notUpdated": {"e2": {"type": "rateLimit"}}
-                },
-                "0"
-            ]],
-            "sessionState": "0"
-        })),
-    )
-    .await;
-    let patch = || [("keywords/$seen".to_string(), Value::Bool(true))].into();
-    let update = EmailUpdate::from([("e1".into(), patch()), ("e2".into(), patch())]);
-
-    let error = jmap.set_emails(&update).await.unwrap_err();
-
-    assert_eq!(
-        error,
-        Error::Method {
-            method: "Email/set".into(),
-            kind: "rateLimit".into(),
-        }
-    );
-    assert_eq!(error.class(), Class::Transient);
-}
-
-#[tokio::test]
 async fn other_4xx_statuses_are_bugs_and_401_and_403_fatal() {
     for (status, class) in [
         (400, Class::Bug),
@@ -276,7 +240,7 @@ async fn other_4xx_statuses_are_bugs_and_401_and_403_fatal() {
 #[test]
 fn a_bug_reads_as_fastmail_error_and_its_type() {
     let method = Error::Method {
-        method: "Email/set".into(),
+        method: "Email/query".into(),
         kind: "invalidArguments".into(),
     };
     assert_eq!(method.to_string(), "Fastmail error: invalidArguments");

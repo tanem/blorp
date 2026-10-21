@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use blorp::jmap::http::FASTMAIL_SESSION_URL;
 use blorp::jmap::{CORE, EmailQuery, HttpJmap, Jmap};
-use blorp::mail::{Mailboxes, Role};
+use blorp::mail::Mailboxes;
 use secrecy::SecretString;
 use serde_json::json;
 
@@ -27,7 +27,7 @@ async fn session_mailboxes_and_an_inbox_query_have_the_expected_shapes() {
         .await
         .expect("session with the mail capability");
     assert!(session.mail_account().is_some());
-    for limit in ["maxObjectsInGet", "maxObjectsInSet", "maxCallsInRequest"] {
+    for limit in ["maxObjectsInGet", "maxCallsInRequest"] {
         // The message leaves out the value, which comes from the live session.
         assert!(
             session.capabilities[CORE][limit]
@@ -38,16 +38,12 @@ async fn session_mailboxes_and_an_inbox_query_have_the_expected_shapes() {
     }
 
     let mailboxes = Mailboxes::from(jmap.get_mailboxes().await.expect("Mailbox/get"));
-    let inbox = mailboxes
-        .by_role(Role::Inbox)
-        .expect("a mailbox with the inbox role");
+    let inbox = mailboxes.inbox().expect("a mailbox with the inbox role");
 
     let result = jmap
         .query(&EmailQuery {
             filter: json!({"inMailbox": inbox.id}),
-            ascending: false,
             limit: 500,
-            extra_threads: Vec::new(),
         })
         .await
         .expect("the two-stage Inbox query");
@@ -78,7 +74,7 @@ async fn session_mailboxes_and_an_inbox_query_have_the_expected_shapes() {
 }
 
 /// The cursor row and the queue length from a statusline such as
-/// ` NORMAL  Inbox    1/500 of 6443`.
+/// ` Inbox    1/500 of 6443`.
 fn position(statusline: &str) -> Option<(usize, usize)> {
     let words: Vec<&str> = statusline.split_whitespace().collect();
     let position = match words.as_slice() {
@@ -92,12 +88,9 @@ fn position(statusline: &str) -> Option<(usize, usize)> {
 
 #[test]
 fn position_reads_the_row_and_length_with_or_without_a_total() {
-    assert_eq!(
-        position(" NORMAL  Inbox      1/500 of 6443"),
-        Some((1, 500))
-    );
-    assert_eq!(position(" NORMAL  Inbox      2/37"), Some((2, 37)));
-    assert_eq!(position(" NORMAL  Inbox"), None);
+    assert_eq!(position(" Inbox      1/500 of 6443"), Some((1, 500)));
+    assert_eq!(position(" Inbox      2/37"), Some((2, 37)));
+    assert_eq!(position(" Inbox"), None);
 }
 
 #[test]

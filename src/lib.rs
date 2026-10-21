@@ -1,4 +1,4 @@
-//! blorp triages a Fastmail account's mailboxes over JMAP.
+//! blorp shows a Fastmail account's Inbox over JMAP.
 
 use std::env;
 use std::io;
@@ -6,29 +6,22 @@ use std::process::ExitCode;
 
 use crossterm::event::EventStream;
 use jiff::Timestamp;
-use jiff::tz::TimeZone;
 use secrecy::SecretString;
 use tracing_appender::non_blocking::WorkerGuard;
 
 pub mod app;
 pub mod cli;
-pub mod command;
 pub mod config;
-pub mod filter;
 pub mod harness;
-pub mod help;
 pub mod jmap;
 pub mod keymap;
 pub mod log;
 pub mod mail;
 pub mod private_file;
-pub mod prompt;
 pub mod queue;
 pub mod run;
-pub mod snooze;
 pub mod sync;
 pub mod ui;
-pub mod undo;
 
 use cli::{Cli, Command, CommandError, Keychain, Stdin, StoreError, TokenFile, TokenStore};
 use config::DebugOverrides;
@@ -40,7 +33,7 @@ use run::Exit;
 /// Runs blorp for parsed arguments and returns the process exit code.
 pub fn run(cli: Cli) -> ExitCode {
     let result = match cli.command {
-        None => tui(cli.dry_run),
+        None => tui(),
         Some(Command::Setup) => setup(),
         Some(Command::Logout) => logout(),
     };
@@ -132,27 +125,15 @@ fn logout() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Everything up to `Mailbox/get` runs on the plain terminal, the config
-/// file first and then setup when no token is found; only then does the
-/// TUI take over. A config file that does not parse, or that names a view
-/// `save` or `delete`, stops the launch. The session fetch and
-/// `Mailbox/get` are retried on the usual schedule.
-fn tui(dry_run: bool) -> Result<(), Failure> {
-    let config_file =
-        config::config_dir(|name| env::var_os(name)).map(|dir| dir.join(config::FILE_NAME));
-    let views = match &config_file {
-        Some(file) => {
-            config::load(file).map_err(|e| format!("could not read {}: {e}", file.display()))?
-        }
-        None => config::default_views(),
-    };
+/// Everything up to `Mailbox/get` runs on the plain terminal, with setup
+/// first when no token is found; only then does the TUI take over. The
+/// session fetch and `Mailbox/get` are retried on the usual schedule.
+fn tui() -> Result<(), Failure> {
     let overrides = debug_overrides();
     let store = token_store(&overrides)?;
     let token = cli::find_token(env_token(), &*store)?;
     let session_url = session_url(&overrides);
     let _log = start_log()?;
-    let schedule_file =
-        config::state_dir(|name| env::var_os(name)).map(|dir| dir.join(snooze::FILE_NAME));
     runtime()?.block_on(async {
         let (jmap, _session) = match token {
             Some(token) => {
@@ -165,27 +146,7 @@ fn tui(dry_run: bool) -> Result<(), Failure> {
             }
             None => cli::setup(&*store, &mut Stdin, &mut io::stdout(), &session_url).await?,
         };
-        let mut app = run::launch(&jmap, Timestamp::now())
-            .await?
-            .with_time_zone(TimeZone::system());
-        if let Some(file) = &schedule_file {
-            let loaded = snooze::load(file, Timestamp::now())
-                .map_err(|e| format!("could not read {}: {e}", file.display()))?;
-            app = app.with_schedule(file.clone(), loaded.schedule);
-            if let Some(broken) = loaded.broken {
-                app = app.with_status(format!(
-                    "The snooze schedule did not parse; it was moved to {}",
-                    broken.display()
-                ));
-            }
-        }
-        if let Some(file) = config_file {
-            app = app.with_views(file, views);
-        }
-        let app = app.with_dry_run(dry_run);
-        if dry_run {
-            println!("Dry run: actions are logged, not sent to Fastmail.");
-        }
+        let app = run::launch(&jmap, Timestamp::now()).await?;
         let mut terminal = ratatui::try_init().map_err(|e| {
             ratatui::restore();
             e.to_string()
@@ -201,10 +162,6 @@ fn tui(dry_run: bool) -> Result<(), Failure> {
         ratatui::restore();
         match result.map_err(|e| e.to_string())? {
             Exit::Quit => Ok(()),
-            Exit::Unconfirmed(n) => {
-                println!("{}", run::unconfirmed(n));
-                Ok(())
-            }
             Exit::Fatal(fatal) => Err(Failure::Fatal(fatal)),
         }
     })

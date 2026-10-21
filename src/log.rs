@@ -7,8 +7,8 @@ use std::path::Path;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
-/// The filter when `BLORP_LOG` is unset: warnings, and every dry-run action.
-pub const DEFAULT_FILTER: &str = "warn,blorp::dry_run=info";
+/// The filter when `BLORP_LOG` is unset: warnings and errors.
+pub const DEFAULT_FILTER: &str = "warn";
 
 /// Truncates the log at `path` and installs a non-blocking subscriber that
 /// writes to it, filtered by `filter` in `RUST_LOG` syntax or by

@@ -39,9 +39,7 @@ fn inbox() -> Store {
 fn inbox_query() -> EmailQuery {
     EmailQuery {
         filter: json!({"inMailbox": "mb-inbox"}),
-        ascending: false,
         limit: 500,
-        extra_threads: Vec::new(),
     }
 }
 
@@ -120,8 +118,8 @@ async fn each_push_event_reconciles_at_once() {
     assert_eq!(
         jmap.calls()[2..],
         [
-            Call::Reconcile(inbox_query(), None),
-            Call::Reconcile(inbox_query(), None)
+            Call::Reconcile(inbox_query()),
+            Call::Reconcile(inbox_query())
         ]
     );
     state.abort();
@@ -178,24 +176,21 @@ async fn a_silent_stream_is_dead_after_330_seconds() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_reconcile_that_spans_an_action_is_discarded_and_run_again() {
+async fn a_push_event_during_a_reconcile_runs_another_once_it_lands() {
     let jmap = FakeJmap::new(inbox());
-    let state = start(&jmap, &[(61_000, 'e')]).await;
-    sleep_ms(59_500).await;
+    let state = start(&jmap, &[]).await;
+    sleep_ms(500).await;
     jmap.delay_next(1, Duration::from_secs(5));
+    jmap.push(Push::State);
+    sleep_ms(10).await;
 
-    sleep_ms(3_000).await;
-    assert_eq!(reconciles(&jmap), 1);
-    sleep_ms(5_000).await;
+    jmap.push(Push::State);
+    sleep_ms(1_000).await;
+    assert_eq!(reconciles(&jmap), 1, "the second waits for the first");
+    sleep_ms(4_500).await;
 
-    let calls: Vec<Call> = jmap.calls()[2..].to_vec();
-    assert!(
-        matches!(
-            calls[..],
-            [Call::Reconcile(..), Call::SetEmails(_), Call::Reconcile(..)]
-        ),
-        "{calls:?}"
-    );
+    assert_eq!(reconciles(&jmap), 2);
+    assert_eq!(jmap.answered().len(), 4);
     state.abort();
 }
 
@@ -217,13 +212,10 @@ async fn a_push_stream_refused_for_the_token_ends_the_session_at_once() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_push_stream_refused_for_the_token_ends_the_session_in_dry_run() {
+async fn a_push_stream_refused_when_it_opens_again_ends_the_session() {
     let jmap = FakeJmap::new(inbox());
-    let state = start(&jmap, &[(100, 'D')]).await;
+    let state = start(&jmap, &[]).await;
     sleep_ms(500).await;
-    jmap.push(Push::State);
-    sleep_ms(10).await;
-    assert_eq!(reconciles(&jmap), 0, "dry run ignores the push stream");
 
     jmap.refuse_stream_with(Error::Status(401));
     jmap.close_streams();

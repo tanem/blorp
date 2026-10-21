@@ -29,8 +29,8 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// The bytes that switch a terminal to the alternate screen.
 const ALTERNATE_SCREEN: &str = "\x1b[?1049h";
 
-/// A temp directory for one run of blorp: its home, its state and config
-/// directories, and its token file. Every spawned binary gets an
+/// A temp directory for one run of blorp: its home, its state directory,
+/// and its token file. Every spawned binary gets an
 /// environment holding only these and what the test adds, so it reaches no
 /// keychain, nothing under the real home directory, and no
 /// `BLORP_API_TOKEN` from the shell that runs the tests.
@@ -81,11 +81,6 @@ impl Sandbox {
         self.dir.path().join("home/state/blorp")
     }
 
-    /// The config file, under `XDG_CONFIG_HOME`.
-    pub fn config_path(&self) -> PathBuf {
-        self.dir.path().join("home/config/blorp/config.toml")
-    }
-
     /// The log file blorp writes under its state directory.
     pub fn log_path(&self) -> PathBuf {
         self.state_dir().join("blorp.log")
@@ -118,7 +113,6 @@ impl Sandbox {
         let base = [
             ("HOME", home.to_str().unwrap()),
             ("XDG_STATE_HOME", &format!("{}/state", home.display())),
-            ("XDG_CONFIG_HOME", &format!("{}/config", home.display())),
             ("BLORP_TOKEN_STORE", token_path.to_str().unwrap()),
             ("TERM", "xterm-256color"),
         ];

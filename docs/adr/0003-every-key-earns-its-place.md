@@ -1,0 +1,3 @@
+# Every key earns its place
+
+blorp starts from a minimal set of keys, `j`, `k`, and `q`, and a key or interaction is added only when using blorp shows it is needed, with one issue per key that names the need. We chose this over building a large surface first and trimming it afterwards: blorp had about 30 key bindings, a `:` command line, a filter language, saved views, snooze, undo, and dry run before it saw daily use, and most of that had not been asked for by use. The cost is that features already built were removed with their code, tests, and docs, and one that turns out to be needed is re-added from git history, reworked for the code as it then is.

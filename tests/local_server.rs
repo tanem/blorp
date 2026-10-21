@@ -2,9 +2,7 @@
 //! use, which serves a fake store.
 
 use blorp::jmap::fake::{EmailSpec, Store};
-use blorp::jmap::{
-    CORE, EmailPatch, EmailQuery, EmailUpdate, Error, HttpJmap, Jmap, MAIL, Mailbox, Thread,
-};
+use blorp::jmap::{CORE, EmailQuery, Error, HttpJmap, Jmap, MAIL, Mailbox, Thread};
 use secrecy::SecretString;
 use serde_json::{Value, json};
 
@@ -16,7 +14,7 @@ use e2e::server::{ACCOUNT_ID, LocalJmap};
 fn store() -> Store {
     Store::builder()
         .role_mailbox("mb-inbox", "Inbox", "inbox")
-        .child_mailbox("mb-travel", "Travel", "mb-inbox")
+        .mailbox("mb-travel", "Travel")
         .email(
             EmailSpec::new("e1", "t1", "2026-10-18T09:00:00Z")
                 .in_mailbox("mb-inbox")
@@ -38,9 +36,7 @@ async fn connect(server: &LocalJmap, token: &str) -> Result<HttpJmap, Error> {
 fn inbox(limit: usize) -> EmailQuery {
     EmailQuery {
         filter: json!({"inMailbox": "mb-inbox"}),
-        ascending: false,
         limit,
-        extra_threads: Vec::new(),
     }
 }
 
@@ -87,13 +83,11 @@ async fn mailbox_get_returns_the_stores_mailboxes() {
             Mailbox {
                 id: "mb-inbox".into(),
                 name: "Inbox".into(),
-                parent_id: None,
                 role: Some("inbox".into()),
             },
             Mailbox {
                 id: "mb-travel".into(),
                 name: "Travel".into(),
-                parent_id: Some("mb-inbox".into()),
                 role: None,
             },
         ]
@@ -131,12 +125,10 @@ async fn a_query_follows_the_back_references_to_every_email_of_each_thread() {
 }
 
 /// `threads` threads in the Inbox, each of `per_thread` emails received a
-/// second apart, and an empty Archive.
+/// second apart.
 fn long_threads(threads: usize, per_thread: usize) -> Store {
     let start: jiff::Timestamp = "2026-10-01T00:00:00Z".parse().unwrap();
-    let mut builder = Store::builder()
-        .role_mailbox("mb-inbox", "Inbox", "inbox")
-        .role_mailbox("mb-archive", "Archive", "archive");
+    let mut builder = Store::builder().role_mailbox("mb-inbox", "Inbox", "inbox");
     for t in 0..threads {
         for e in 0..per_thread {
             let received = start + jiff::SignedDuration::from_secs((t * per_thread + e) as i64);
@@ -264,175 +256,4 @@ async fn an_empty_queue_sends_only_the_first_request() {
 
     assert_eq!(result, Default::default());
     assert_eq!(server.api_requests().await.len(), 1);
-}
-
-#[tokio::test]
-async fn the_session_advertises_fastmails_max_objects_in_set() {
-    let server = LocalJmap::start(store(), TOKEN).await;
-
-    let (_, session) = HttpJmap::connect(&server.session_url(), SecretString::from(TOKEN))
-        .await
-        .unwrap();
-
-    assert_eq!(session.capabilities[CORE]["maxObjectsInSet"], 4096);
-}
-
-/// An `Email/set` update moving each of `ids` from the Inbox to Archive.
-fn archive_all(ids: impl IntoIterator<Item = String>) -> EmailUpdate {
-    let patch: EmailPatch = [
-        ("mailboxIds/mb-inbox".to_string(), Value::Null),
-        ("mailboxIds/mb-archive".to_string(), Value::Bool(true)),
-    ]
-    .into();
-    ids.into_iter().map(|id| (id, patch.clone())).collect()
-}
-
-fn email_ids(threads: usize, per_thread: usize) -> Vec<String> {
-    (0..threads)
-        .flat_map(|t| (0..per_thread).map(move |e| format!("e{t}-{e}")))
-        .collect()
-}
-
-#[tokio::test]
-async fn an_email_set_of_more_than_max_objects_in_set_is_refused() {
-    let server = LocalJmap::start(long_threads(1, 4097), TOKEN).await;
-    let update = archive_all(email_ids(1, 4097));
-
-    let response = reqwest::Client::new()
-        .post(server.api_url())
-        .bearer_auth(TOKEN)
-        .json(&json!({
-            "using": [CORE, MAIL],
-            "methodCalls": [["Email/set", {"accountId": ACCOUNT_ID, "update": update}, "0"]]
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    let body = response.json::<Value>().await.unwrap();
-    assert_eq!(
-        body["methodResponses"],
-        json!([["error", {"type": "requestTooLarge"}, "0"]])
-    );
-}
-
-#[tokio::test]
-async fn a_set_of_more_emails_than_max_objects_in_set_goes_in_chunks() {
-    let server = LocalJmap::start(long_threads(1, 4100), TOKEN).await;
-    let jmap = connect(&server, TOKEN).await.unwrap();
-
-    let result = jmap
-        .set_emails(&archive_all(email_ids(1, 4100)))
-        .await
-        .unwrap();
-
-    assert_eq!(result.not_updated, Vec::<String>::new());
-    let requests = server.api_requests().await;
-    let sets: Vec<usize> = calls(&requests)
-        .into_iter()
-        .flatten()
-        .filter(|(name, _)| *name == "Email/set")
-        .map(|(_, args)| args["update"].as_object().unwrap().len())
-        .collect();
-    assert_eq!(sets, [4096, 4]);
-    let archived = EmailQuery {
-        filter: json!({"inMailbox": "mb-archive"}),
-        ..inbox(500)
-    };
-    let result = jmap.query(&archived).await.unwrap();
-    assert_eq!(result.emails.len(), 4100);
-}
-
-#[tokio::test]
-async fn set_chunks_beyond_max_calls_in_request_go_in_further_requests() {
-    let server = LocalJmap::start_with_max_calls(long_threads(1, 13_000), TOKEN, 3).await;
-    let jmap = connect(&server, TOKEN).await.unwrap();
-    let mut ids = email_ids(1, 13_000);
-    ids.push("zz-gone".into());
-
-    let result = jmap.set_emails(&archive_all(ids)).await.unwrap();
-
-    assert_eq!(result.not_updated, ["zz-gone"]);
-    let requests = server.api_requests().await;
-    let shapes: Vec<Vec<&str>> = calls(&requests)
-        .into_iter()
-        .map(|calls| calls.into_iter().map(|(name, _)| name).collect())
-        .collect();
-    assert_eq!(
-        shapes,
-        [
-            vec!["Email/set", "Email/set", "Email/set"],
-            vec!["Email/set"],
-        ]
-    );
-}
-
-#[tokio::test]
-async fn a_query_fetches_its_extra_threads_by_id_with_their_emails() {
-    let server = LocalJmap::start(store(), TOKEN).await;
-    let jmap = connect(&server, TOKEN).await.unwrap();
-
-    let result = jmap
-        .query(&EmailQuery {
-            extra_threads: vec!["t3".into(), "t1".into(), "t-gone".into()],
-            ..inbox(1)
-        })
-        .await
-        .unwrap();
-
-    assert_eq!(result.ids, ["e1"]);
-    let extra: Vec<&str> = result.extra_threads.iter().map(|t| t.id.as_str()).collect();
-    assert_eq!(extra, ["t3", "t1"]);
-    let emails: Vec<&str> = result.emails.iter().map(|e| e.id.as_str()).collect();
-    assert_eq!(emails, ["e1", "e3"]);
-}
-
-#[tokio::test]
-async fn create_mailbox_makes_a_top_level_mailbox_with_no_role() {
-    let server = LocalJmap::start(store(), TOKEN).await;
-    let jmap = connect(&server, TOKEN).await.unwrap();
-
-    let created = jmap.create_mailbox("Snoozed (blorp)").await.unwrap();
-
-    assert_eq!(created.name, "Snoozed (blorp)");
-    assert_eq!(created.parent_id, None);
-    assert_eq!(created.role, None);
-    let mailboxes = jmap.get_mailboxes().await.unwrap();
-    assert!(mailboxes.contains(&created), "{mailboxes:?}");
-}
-
-#[tokio::test]
-async fn a_refused_mailbox_is_reported_with_its_set_error() {
-    let server = LocalJmap::start(store(), TOKEN).await;
-    let jmap = connect(&server, TOKEN).await.unwrap();
-    jmap.create_mailbox("Snoozed (blorp)").await.unwrap();
-
-    let refused = jmap.create_mailbox("Snoozed (blorp)").await;
-
-    assert_eq!(
-        refused,
-        Err(Error::Method {
-            method: "Mailbox/set".into(),
-            kind: "invalidProperties".into(),
-        })
-    );
-}
-
-#[tokio::test]
-async fn extra_threads_are_fetched_in_gets_of_at_most_max_objects_in_get() {
-    let server = LocalJmap::start(store(), TOKEN).await;
-    let jmap = connect(&server, TOKEN).await.unwrap();
-    let mut extra: Vec<String> = (0..4096).map(|i| format!("t-gone-{i}")).collect();
-    extra.push("t3".into());
-
-    let result = jmap
-        .query(&EmailQuery {
-            extra_threads: extra,
-            ..inbox(1)
-        })
-        .await
-        .unwrap();
-
-    let found: Vec<&str> = result.extra_threads.iter().map(|t| t.id.as_str()).collect();
-    assert_eq!(found, ["t3"]);
 }
