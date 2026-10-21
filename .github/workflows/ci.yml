@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  platform:
     strategy:
       fail-fast: false
       matrix:
@@ -29,3 +29,13 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --no-fail-fast
+
+  # The ruleset on main requires a check named "check". It passes only when
+  # every platform passes, and it runs whatever their result, including a
+  # cancelled run, since a skipped required check counts as passing.
+  check:
+    needs: platform
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.platform.result }}" = success
