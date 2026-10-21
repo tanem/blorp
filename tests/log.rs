@@ -12,12 +12,10 @@ fn the_log_is_truncated_at_launch_and_filtered_at_warn_by_default() {
     let guard = blorp::log::init(&path, None).unwrap();
     tracing::info!("an info line");
     tracing::warn!("a warn line");
-    tracing::info!(target: "blorp::dry_run", "a dry-run line");
     drop(guard);
 
     let log = fs::read_to_string(&path).unwrap();
     assert!(!log.contains("from the last launch"), "{log}");
     assert!(!log.contains("an info line"), "{log}");
     assert!(log.contains("a warn line"), "{log}");
-    assert!(log.contains("a dry-run line"), "{log}");
 }

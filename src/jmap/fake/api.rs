@@ -6,15 +6,15 @@ use std::collections::HashSet;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use super::{MAX_OBJECTS_IN_SET, Store};
-use crate::jmap::{CORE, EmailQuery, EmailUpdate, Error, MAIL};
+use super::Store;
+use crate::jmap::{CORE, EmailQuery, Error, MAIL};
 
 /// Answers a JMAP request envelope with its response envelope. A
 /// request-level error is returned as its problem details, to be sent with
 /// HTTP 400 (RFC 8620 section 3.6.1). A request of more than
 /// `max_calls_in_request` method calls is refused with the `limit` error.
 pub fn respond(
-    store: &mut Store,
+    store: &Store,
     account_id: &str,
     max_calls_in_request: usize,
     request: &Value,
@@ -120,7 +120,7 @@ fn pointer(value: &Value, tokens: &[String]) -> Option<Value> {
 
 /// Runs one method call, returning its response arguments or an error type.
 fn method(
-    store: &mut Store,
+    store: &Store,
     account_id: &str,
     name: &str,
     args: &Map<String, Value>,
@@ -146,8 +146,6 @@ fn method(
             get_response(account_id, &list, &not_found, args)
         }
         "Email/query" => email_query(store, account_id, args),
-        "Email/set" => email_set(store, account_id, args),
-        "Mailbox/set" => mailbox_set(store, account_id, args),
         _ => Err("unknownMethod".into()),
     }
 }
@@ -199,117 +197,22 @@ fn get_response<T: Serialize>(
     Ok(json!({"accountId": account_id, "state": "0", "list": list, "notFound": not_found}))
 }
 
-/// `Email/set` with `update` only, of at most [`MAX_OBJECTS_IN_SET`]
-/// emails. An id the store does not hold is `notFound`; a patch the store
-/// does not apply is `invalidPatch`.
-fn email_set(
-    store: &mut Store,
-    account_id: &str,
-    args: &Map<String, Value>,
-) -> Result<Value, String> {
-    for unsupported in ["create", "destroy", "ifInState"] {
-        if !args.get(unsupported).is_none_or(Value::is_null) {
-            return Err("invalidArguments".into());
-        }
-    }
-    let update: EmailUpdate = args
-        .get("update")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|_| "invalidArguments")?
-        .unwrap_or_default();
-    if update.len() > MAX_OBJECTS_IN_SET {
-        return Err("requestTooLarge".into());
-    }
-    let result = store.set_emails(&update);
-    let mut updated = Map::new();
-    let mut not_updated = Map::new();
-    for id in update.keys() {
-        if !result.not_updated.contains(id) {
-            updated.insert(id.clone(), Value::Null);
-            continue;
-        }
-        let (_, not_found) = store.get_emails(std::slice::from_ref(id)).map_err(kind)?;
-        let kind = if not_found.is_empty() {
-            "invalidPatch"
-        } else {
-            "notFound"
-        };
-        not_updated.insert(id.clone(), json!({"type": kind}));
-    }
-    Ok(json!({
-        "accountId": account_id,
-        "oldState": "0",
-        "newState": "0",
-        "updated": updated,
-        "notUpdated": not_updated,
-    }))
-}
-
-/// `Mailbox/set` with `create` only, of top-level mailboxes with a name.
-fn mailbox_set(
-    store: &mut Store,
-    account_id: &str,
-    args: &Map<String, Value>,
-) -> Result<Value, String> {
-    for unsupported in ["update", "destroy", "ifInState"] {
-        if !args.get(unsupported).is_none_or(Value::is_null) {
-            return Err("invalidArguments".into());
-        }
-    }
-    let create = match args.get("create") {
-        None | Some(Value::Null) => Map::new(),
-        Some(Value::Object(create)) => create.clone(),
-        Some(_) => return Err("invalidArguments".into()),
-    };
-    let mut created = Map::new();
-    let mut not_created = Map::new();
-    for (creation_id, mailbox) in create {
-        let name = mailbox["name"].as_str();
-        let top_level = mailbox.get("parentId").is_none_or(Value::is_null);
-        match name
-            .filter(|_| top_level)
-            .map(|name| store.create_mailbox(name))
-        {
-            Some(Ok(m)) => {
-                created.insert(creation_id, json!({"id": m.id}));
-            }
-            Some(Err(error)) => {
-                not_created.insert(creation_id, json!({"type": kind(error)}));
-            }
-            None => {
-                not_created.insert(creation_id, json!({"type": "invalidProperties"}));
-            }
-        }
-    }
-    Ok(json!({
-        "accountId": account_id,
-        "oldState": "0",
-        "newState": "0",
-        "created": created,
-        "notCreated": not_created,
-    }))
-}
-
-/// `Email/query`, sorted by `receivedAt` with threads collapsed, which is
-/// the only form the store evaluates.
+/// `Email/query`, sorted by `receivedAt` newest first with threads
+/// collapsed, which is the only form the store evaluates.
 fn email_query(
     store: &Store,
     account_id: &str,
     args: &Map<String, Value>,
 ) -> Result<Value, String> {
-    let ascending = match args
+    match args
         .get("sort")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
     {
-        Some([sort]) if sort["property"] == "receivedAt" => sort
-            .get("isAscending")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
+        Some([sort])
+            if sort["property"] == "receivedAt" && sort["isAscending"] == Value::Bool(false) => {}
         _ => return Err("unsupportedSort".into()),
-    };
+    }
     if args.get("collapseThreads") != Some(&Value::Bool(true)) {
         return Err("invalidArguments".into());
     }
@@ -319,9 +222,7 @@ fn email_query(
     };
     let query = EmailQuery {
         filter: args.get("filter").cloned().unwrap_or(json!({})),
-        ascending,
         limit,
-        extra_threads: Vec::new(),
     };
     let (ids, total) = store.query_ids(&query).map_err(kind)?;
     let mut response = json!({

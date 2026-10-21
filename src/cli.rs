@@ -14,14 +14,10 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::jmap::{self, Fatal, HttpJmap, Session};
 use crate::private_file;
 
-/// A terminal UI for triaging a Fastmail account's mailboxes over JMAP.
+/// A terminal UI for a Fastmail account's Inbox over JMAP.
 #[derive(Debug, Parser)]
-#[command(name = "blorp", version, args_conflicts_with_subcommands = true)]
+#[command(name = "blorp", version)]
 pub struct Cli {
-    /// Log actions instead of sending them to Fastmail.
-    #[arg(long)]
-    pub dry_run: bool,
-
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -318,8 +314,7 @@ impl From<io::Error> for CommandError {
 }
 
 /// `blorp logout`: deletes the stored token, and warns when
-/// `BLORP_API_TOKEN` is set, since blorp uses that token regardless. The
-/// config file and the snooze schedule are left alone.
+/// `BLORP_API_TOKEN` is set, since blorp uses that token regardless.
 pub fn logout(
     store: &dyn TokenStore,
     env_token_set: bool,

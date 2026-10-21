@@ -4,7 +4,6 @@
 //! reqwest adapter [`HttpJmap`] for production and the in-memory
 //! [`fake::FakeJmap`] for tests.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::time::Duration;
@@ -27,26 +26,21 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// `Mailbox/get` for every mailbox in the account.
     fn get_mailboxes(&self) -> impl Future<Output = Result<Vec<Mailbox>, Error>> + Send;
 
-    /// The threads matching `query` and every email of them, in stages
+    /// The threads matching `query` and every email of them, in two stages
     /// that are not atomic. First, one request chains `Email/query` with
     /// `collapseThreads`, `Email/get` for the hits' threads, and `Thread/get`
-    /// by back-reference. Next, when the query names extra threads, they
-    /// are fetched in `Thread/get` calls of at most the session's
-    /// `maxObjectsInGet` ids, in requests of at most its `maxCallsInRequest`
-    /// calls, sent one after another. Last, the threads' emails are fetched
-    /// in `Email/get` calls under the same limits; none is sent for an empty
-    /// queue. An extra thread or an email gone by its stage is left out. A
-    /// method error in any request fails the whole query.
+    /// by back-reference. Then the threads' emails are fetched in
+    /// `Email/get` calls of at most the session's `maxObjectsInGet` ids, in
+    /// requests of at most its `maxCallsInRequest` calls, sent one after
+    /// another; none is sent for an empty queue. An email gone by then is
+    /// left out. A method error in any request fails the whole query.
     fn query(&self, query: &EmailQuery) -> impl Future<Output = Result<QueryResult, Error>> + Send;
 
     /// A reconcile's fetch: [`Jmap::query`] with `Mailbox/get` for every
-    /// mailbox added to its first request, ahead of the query's calls, and
-    /// when `snoozed` is given, that query's first-stage calls after them.
-    /// The later stages of `query`, then of `snoozed`, follow.
+    /// mailbox added to its first request, ahead of the query's calls.
     fn reconcile(
         &self,
         query: &EmailQuery,
-        snoozed: Option<&EmailQuery>,
     ) -> impl Future<Output = Result<Reconciled, Error>> + Send;
 
     /// Opens the push stream for `Email` and `Mailbox` changes, with no
@@ -54,57 +48,16 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// `None` when the session advertises no push stream. The stream ends,
     /// or ends in an error, when the connection drops.
     fn events(&self) -> impl Future<Output = Result<Option<PushStream>, Error>> + Send;
-
-    /// The emails with `ids`, in `Email/get` calls of at most the session's
-    /// `maxObjectsInGet` ids, in requests of at most its
-    /// `maxCallsInRequest` calls, sent one after another. Ids not found are
-    /// left out.
-    fn get_emails(&self, ids: &[String]) -> impl Future<Output = Result<Vec<Email>, Error>> + Send;
-
-    /// A top-level mailbox named `name` with no role, created with
-    /// `Mailbox/set`. A refusal is a [`Error::Method`] with the `SetError`
-    /// type as its kind.
-    fn create_mailbox(&self, name: &str) -> impl Future<Output = Result<Mailbox, Error>> + Send;
-
-    /// `update` applied in `Email/set` calls of at most the session's
-    /// `maxObjectsInSet` emails, in requests of at most its
-    /// `maxCallsInRequest` calls, sent one after another; none is sent for
-    /// an empty update. An email the server did not update is listed in the
-    /// result, not reported as an error. A failed request fails the whole
-    /// update, and the calls answered before it stay applied.
-    fn set_emails(
-        &self,
-        update: &EmailUpdate,
-    ) -> impl Future<Output = Result<SetResult, Error>> + Send;
 }
 
-/// An `Email/set` patch: paths such as `mailboxIds/<id>` or
-/// `keywords/$seen`, each set to `true` or `null`. Applying one twice
-/// leaves the email as applying it once does.
-pub type EmailPatch = BTreeMap<String, Value>;
-
-/// The `update` argument of an `Email/set`: a patch per email id.
-pub type EmailUpdate = BTreeMap<String, EmailPatch>;
-
-/// The result of a [`Jmap::set_emails`].
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct SetResult {
-    /// The ids in `notUpdated`, in id order.
-    pub not_updated: Vec<String>,
-}
-
-/// An `Email/query` sorted by `receivedAt`, with threads collapsed.
+/// An `Email/query` sorted by `receivedAt`, newest first, with threads
+/// collapsed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmailQuery {
     /// The `filter` argument, as `Email/query` JSON.
     pub filter: Value,
-    /// Oldest first when true, newest first when false.
-    pub ascending: bool,
     /// The most threads to return.
     pub limit: usize,
-    /// Threads fetched by id beside the query's, whatever they match, with
-    /// every email of them.
-    pub extra_threads: Vec<String>,
 }
 
 /// The result of a [`Jmap::query`].
@@ -116,8 +69,6 @@ pub struct QueryResult {
     pub total: usize,
     /// The threads of those emails.
     pub threads: Vec<Thread>,
-    /// The threads of [`EmailQuery::extra_threads`] that exist.
-    pub extra_threads: Vec<Thread>,
     /// Every email of those threads.
     pub emails: Vec<Email>,
 }
@@ -129,8 +80,6 @@ pub struct Reconciled {
     pub mailboxes: Vec<Mailbox>,
     /// The query's result.
     pub result: QueryResult,
-    /// The result of the snooze mailbox's query, when one was given.
-    pub snoozed: Option<QueryResult>,
 }
 
 /// An open push stream's events.
@@ -152,8 +101,7 @@ pub enum Error {
     /// Fastmail refused the request as a whole with this JMAP
     /// request-level error type, such as `limit` or `notJSON`.
     Request(String),
-    /// A method call returned a JMAP method error. A `SetError` that
-    /// fails a whole update, such as `rateLimit`, is reported as one too.
+    /// A method call returned a JMAP method error.
     Method { method: String, kind: String },
     /// The response did not parse.
     Parse(String),
@@ -173,8 +121,8 @@ pub enum Class {
     Bug,
 }
 
-/// The JMAP method and `SetError` types that are transient.
-const TRANSIENT_KINDS: [&str; 3] = ["serverUnavailable", "serverFail", "rateLimit"];
+/// The JMAP method error types that are transient.
+const TRANSIENT_KINDS: [&str; 2] = ["serverUnavailable", "serverFail"];
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -221,7 +169,7 @@ impl Error {
 
     /// The class the failure falls into: transient for a request that did
     /// not complete, HTTP 429 and 5xx, the request-level `limit` error, and
-    /// the `serverUnavailable`, `serverFail`, and `rateLimit` errors; fatal
+    /// the `serverUnavailable` and `serverFail` method errors; fatal
     /// as [`Error::fatal`] says; otherwise a bug.
     pub fn class(&self) -> Class {
         if let Some(fatal) = self.fatal() {

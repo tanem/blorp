@@ -1,263 +1,31 @@
 //! The in-memory snapshot of fetched mailboxes, threads, and emails.
 
-use std::collections::{BTreeSet, HashMap};
-use std::fmt;
+use std::collections::HashMap;
 
 use jiff::Timestamp;
 
 use crate::jmap::{self, QueryResult};
 
-/// A system mailbox role, as Fastmail reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    Inbox,
-    Archive,
-    Trash,
-    Junk,
-    Snoozed,
-    Drafts,
-    Sent,
-}
-
-impl Role {
-    fn parse(role: &str) -> Option<Role> {
-        Some(match role {
-            "inbox" => Role::Inbox,
-            "archive" => Role::Archive,
-            "trash" => Role::Trash,
-            "junk" => Role::Junk,
-            "snoozed" => Role::Snoozed,
-            "drafts" => Role::Drafts,
-            "sent" => Role::Sent,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Mailbox {
-    pub id: String,
-    pub name: String,
-    pub parent_id: Option<String>,
-    pub role: Option<Role>,
-}
-
-/// The name of the snooze mailbox, which blorp creates without a role.
-pub const SNOOZE_MAILBOX: &str = "Snoozed (blorp)";
-
-/// The mailbox a queue shows: one mailbox, or for `in:any` every mailbox
-/// but those excluded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueueMailbox {
-    One(String),
-    /// Every mailbox except these ids, in the order the server listed them.
-    Any(Vec<String>),
-    /// The snooze mailbox before blorp creates it, which holds no email.
-    MissingSnooze,
-}
-
-impl QueueMailbox {
-    /// Whether the mailbox with `id` is part of the queue mailbox.
-    pub fn contains(&self, id: &str) -> bool {
-        match self {
-            QueueMailbox::One(one) => one == id,
-            QueueMailbox::Any(excluded) => !excluded.iter().any(|e| e == id),
-            QueueMailbox::MissingSnooze => false,
-        }
-    }
-}
-
-/// Why a mailbox name resolved to no single mailbox.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NameError {
-    /// Holds the name as written.
-    NoMatch(String),
-    /// Holds the name as written and the path of each match.
-    Ambiguous(String, Vec<String>),
-}
-
-impl fmt::Display for NameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            NameError::NoMatch(name) => write!(f, "No mailbox matches \"{name}\""),
-            NameError::Ambiguous(name, paths) => write!(
-                f,
-                "Mailbox name \"{name}\" is ambiguous: {}",
-                paths.join(", ")
-            ),
-        }
-    }
-}
-
-impl std::error::Error for NameError {}
-
-/// Every mailbox in the account.
+/// Every mailbox in the account, in the order the server listed them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Mailboxes(Vec<Mailbox>);
+pub struct Mailboxes(Vec<jmap::Mailbox>);
 
 impl Mailboxes {
-    /// The mailbox carrying `role`, if any.
-    pub fn by_role(&self, role: Role) -> Option<&Mailbox> {
-        self.0.iter().find(|m| m.role == Some(role))
-    }
-
-    /// The mailbox with `id`, if any.
-    pub fn by_id(&self, id: &str) -> Option<&Mailbox> {
-        self.0.iter().find(|m| m.id == id)
-    }
-
-    /// The snooze mailbox: the top-level `Snoozed (blorp)` with no role,
-    /// once blorp has created it.
-    pub fn snooze(&self) -> Option<&Mailbox> {
-        self.0
-            .iter()
-            .find(|m| m.parent_id.is_none() && m.role.is_none() && m.name == SNOOZE_MAILBOX)
-    }
-
-    /// Whether `name` names the snooze mailbox, as [`Mailboxes::resolve`]
-    /// matches names, whether or not it exists.
-    pub fn is_snooze_name(name: &str) -> bool {
-        name.to_lowercase() == SNOOZE_MAILBOX.to_lowercase()
-    }
-
-    /// Whether `name` names the snooze mailbox while it does not exist.
-    pub fn names_missing_snooze(&self, name: &str) -> bool {
-        self.snooze().is_none() && Mailboxes::is_snooze_name(name)
-    }
-
-    /// The queue mailbox of `in:any`: every mailbox except Trash, Junk,
-    /// Drafts, Sent, and the snooze mailbox.
-    pub fn all_mail(&self) -> QueueMailbox {
-        let snooze = self.snooze().map(|m| &m.id);
-        let excluded = self
-            .0
-            .iter()
-            .filter(|m| {
-                matches!(
-                    m.role,
-                    Some(Role::Trash | Role::Junk | Role::Drafts | Role::Sent)
-                ) || Some(&m.id) == snooze
-            })
-            .map(|m| m.id.clone())
-            .collect();
-        QueueMailbox::Any(excluded)
-    }
-
-    /// Adds `mailbox`, as one just created.
-    pub fn add(&mut self, mailbox: jmap::Mailbox) {
-        self.0.extend(Mailboxes::from(vec![mailbox]).0);
-    }
-
-    /// Removes the mailbox with `id`.
-    pub fn remove(&mut self, id: &str) {
-        self.0.retain(|m| m.id != id);
-    }
-
-    /// Every mailbox, in the order the server listed them.
-    pub fn iter(&self) -> impl Iterator<Item = &Mailbox> {
-        self.0.iter()
-    }
-
-    /// The mailbox's name after its parents' names, joined with `/`, as in
-    /// `Work/Receipts`.
-    pub fn path(&self, mailbox: &Mailbox) -> String {
-        let mut names = vec![mailbox.name.as_str()];
-        let mut parent = mailbox.parent_id.as_deref();
-        while let Some(m) = parent.and_then(|id| self.by_id(id)) {
-            if names.len() > self.0.len() {
-                break;
-            }
-            names.push(&m.name);
-            parent = m.parent_id.as_deref();
-        }
-        names.reverse();
-        names.join("/")
-    }
-
-    /// The mailbox `name` refers to, matching case-insensitively and
-    /// exactly: the role names `inbox`, `archive`, `trash`, and `junk` match
-    /// the mailbox carrying that role, then a name matches a mailbox's path,
-    /// as in `Work/Receipts`, and failing that its own name. A name matching
-    /// none, or several at the same step, is an error.
-    pub fn resolve(&self, name: &str) -> Result<&Mailbox, NameError> {
-        let lower = name.to_lowercase();
-        let role = match lower.as_str() {
-            "inbox" => Some(Role::Inbox),
-            "archive" => Some(Role::Archive),
-            "trash" => Some(Role::Trash),
-            "junk" => Some(Role::Junk),
-            _ => None,
-        };
-        if let Some(mailbox) = role.and_then(|role| self.by_role(role)) {
-            return Ok(mailbox);
-        }
-        let by_path: Vec<&Mailbox> = self
-            .0
-            .iter()
-            .filter(|m| self.path(m).to_lowercase() == lower)
-            .collect();
-        let matches = if by_path.is_empty() {
-            self.0
-                .iter()
-                .filter(|m| m.name.to_lowercase() == lower)
-                .collect()
-        } else {
-            by_path
-        };
-        match matches.as_slice() {
-            [] => Err(NameError::NoMatch(name.into())),
-            [one] => Ok(one),
-            several => Err(NameError::Ambiguous(
-                name.into(),
-                several.iter().map(|m| self.path(m)).collect(),
-            )),
-        }
-    }
-
-    /// Whether `mailbox` can be a move's mailbox: any but Drafts, Sent, and
-    /// the snooze mailbox.
-    pub fn is_move_target(&self, mailbox: &Mailbox) -> bool {
-        !matches!(mailbox.role, Some(Role::Drafts | Role::Sent))
-            && self.snooze().is_none_or(|snooze| snooze.id != mailbox.id)
-    }
-
-    /// Whether a move action out of the queue mailbox `from` moves `email`.
-    /// It moves an email in `from` that is in no Drafts or Sent mailbox and
-    /// in no Trash or Junk mailbox outside `from`, so a Trash or Junk queue
-    /// can move its own emails out.
-    pub fn moves(&self, email: &Email, from: &QueueMailbox) -> bool {
-        email.mailbox_ids.iter().any(|id| from.contains(id))
-            && !email
-                .mailbox_ids
-                .iter()
-                .any(|id| match self.by_id(id).and_then(|m| m.role) {
-                    Some(Role::Drafts | Role::Sent) => true,
-                    Some(Role::Trash | Role::Junk) => !from.contains(id),
-                    _ => false,
-                })
+    /// The mailbox carrying the `inbox` role, if any.
+    pub fn inbox(&self) -> Option<&jmap::Mailbox> {
+        self.0.iter().find(|m| m.role.as_deref() == Some("inbox"))
     }
 }
 
 impl From<Vec<jmap::Mailbox>> for Mailboxes {
     fn from(mailboxes: Vec<jmap::Mailbox>) -> Self {
-        Mailboxes(
-            mailboxes
-                .into_iter()
-                .map(|m| Mailbox {
-                    role: m.role.as_deref().and_then(Role::parse),
-                    id: m.id,
-                    name: m.name,
-                    parent_id: m.parent_id,
-                })
-                .collect(),
-        )
+        Mailboxes(mailboxes)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Email {
     pub id: String,
-    pub mailbox_ids: BTreeSet<String>,
     pub seen: bool,
     pub flagged: bool,
     /// The first `From` address's name, or its address when it has none.
@@ -279,7 +47,6 @@ impl From<jmap::Email> for Email {
         Email {
             seen: email.keywords.contains_key("$seen"),
             flagged: email.keywords.contains_key("$flagged"),
-            mailbox_ids: email.mailbox_ids.into_keys().collect(),
             id: email.id,
             sender,
             subject: email.subject,
@@ -337,54 +104,9 @@ impl Thread {
         queue
     }
 
-    /// The threads of a query result, in query order, then its extra
-    /// threads not among them, each standing for itself by its newest
-    /// email.
-    pub fn all_from_query(mut result: QueryResult) -> Vec<Thread> {
-        let extra = std::mem::take(&mut result.extra_threads);
-        let mut emails: HashMap<String, jmap::Email> = result
-            .emails
-            .iter()
-            .filter(|e| extra.iter().any(|t| t.email_ids.contains(&e.id)))
-            .map(|e| (e.id.clone(), e.clone()))
-            .collect();
-        let mut threads = Thread::from_query(result);
-        for thread in extra {
-            if threads.iter().any(|t| t.id == thread.id) {
-                continue;
-            }
-            let members: Vec<Email> = thread
-                .email_ids
-                .iter()
-                .filter_map(|id| emails.remove(id))
-                .map(Email::from)
-                .collect();
-            if let Some(newest) = members.iter().max_by_key(|e| e.received_at) {
-                let hit = newest.id.clone();
-                threads.extend(Thread::new(thread.id, members, &hit));
-            }
-        }
-        threads
-    }
-
-    /// A thread of `emails`, oldest first, standing for itself in its row
-    /// by the one with `hit_id`, or none when no email has that id.
-    pub fn new(id: String, emails: Vec<Email>, hit_id: &str) -> Option<Thread> {
-        let hit = emails.iter().position(|e| e.id == hit_id)?;
-        Some(Thread { id, emails, hit })
-    }
-
     /// The email the query matched.
     pub fn hit(&self) -> &Email {
         &self.emails[self.hit]
-    }
-
-    /// The email received last.
-    pub fn newest(&self) -> &Email {
-        self.emails
-            .iter()
-            .max_by_key(|e| e.received_at)
-            .unwrap_or_else(|| self.hit())
     }
 
     /// True when any email lacks `$seen`.
@@ -400,124 +122,5 @@ impl Thread {
     /// The number of emails in the whole thread, across mailboxes.
     pub fn message_count(&self) -> usize {
         self.emails.len()
-    }
-}
-
-/// The address of `thread` in Fastmail's web UI, under the mailbox named
-/// `mailbox`: the thread's id and its newest email's id, joined by `.`.
-/// The web UI shows the whole thread there with that email expanded, and
-/// opens it under a mailbox that holds none of its emails too. It adds its
-/// own `?u=` parameter, so none is given here.
-pub fn web_url(mailbox: &str, thread: &Thread) -> String {
-    let mut url = url::Url::parse("https://app.fastmail.com/mail").expect("valid URL");
-    url.path_segments_mut()
-        .expect("URL with a path")
-        .push(mailbox)
-        .push(&format!("{}.{}", thread.id, thread.newest().id));
-    url.into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mailboxes() -> Mailboxes {
-        let mailbox = |id: &str, role: Option<Role>| Mailbox {
-            id: id.into(),
-            name: id.into(),
-            parent_id: None,
-            role,
-        };
-        Mailboxes(vec![
-            mailbox("inbox", Some(Role::Inbox)),
-            mailbox("archive", Some(Role::Archive)),
-            mailbox("trash", Some(Role::Trash)),
-            mailbox("junk", Some(Role::Junk)),
-            mailbox("drafts", Some(Role::Drafts)),
-            mailbox("sent", Some(Role::Sent)),
-            mailbox("travel", None),
-        ])
-    }
-
-    fn email(mailbox_ids: &[&str]) -> Email {
-        Email {
-            id: "e1".into(),
-            mailbox_ids: mailbox_ids.iter().map(|id| id.to_string()).collect(),
-            seen: false,
-            flagged: false,
-            sender: None,
-            subject: None,
-            received_at: Timestamp::UNIX_EPOCH,
-        }
-    }
-
-    fn thread_of(emails: &[(&str, &str)]) -> Thread {
-        let emails = emails
-            .iter()
-            .map(|(id, received)| Email {
-                id: id.to_string(),
-                received_at: received.parse().unwrap(),
-                ..email(&["inbox"])
-            })
-            .collect();
-        Thread::new("Tthread".into(), emails, "e-old").unwrap()
-    }
-
-    #[test]
-    fn the_web_url_names_the_mailbox_the_thread_and_its_newest_email() {
-        let thread = thread_of(&[
-            ("e-old", "2026-10-18T09:00:00Z"),
-            ("e-new", "2026-10-18T11:00:00Z"),
-            ("e-mid", "2026-10-18T10:00:00Z"),
-        ]);
-        assert_eq!(
-            web_url("Inbox", &thread),
-            "https://app.fastmail.com/mail/Inbox/Tthread.e-new"
-        );
-    }
-
-    #[test]
-    fn the_web_url_escapes_the_mailbox_name() {
-        let thread = thread_of(&[("e-old", "2026-10-18T09:00:00Z")]);
-        for (mailbox, segment) in [
-            ("Snoozed (blorp)", "Snoozed%20(blorp)"),
-            ("A/B", "A%2FB"),
-            ("Café", "Caf%C3%A9"),
-            ("50%", "50%25"),
-            ("Q?#", "Q%3F%23"),
-        ] {
-            assert_eq!(
-                web_url(mailbox, &thread),
-                format!("https://app.fastmail.com/mail/{segment}/Tthread.e-old")
-            );
-        }
-    }
-
-    #[test]
-    fn a_move_takes_only_emails_in_the_queue_mailbox_and_never_drafts_or_sent() {
-        let m = mailboxes();
-        for (mailbox_ids, from, moved) in [
-            (&["inbox"][..], "inbox", true),
-            (&["travel"], "inbox", false),
-            (&["inbox", "travel"], "inbox", true),
-            (&["inbox", "sent"], "inbox", false),
-            (&["inbox", "drafts"], "inbox", false),
-            (&["inbox", "trash"], "inbox", false),
-            (&["inbox", "junk"], "inbox", false),
-            (&["trash"], "trash", true),
-            (&["trash", "inbox"], "trash", true),
-            (&["trash", "junk"], "trash", false),
-            (&["archive", "inbox"], "archive", true),
-            (&["junk"], "junk", true),
-            (&["trash", "sent"], "trash", false),
-            (&["sent"], "sent", false),
-            (&["drafts"], "drafts", false),
-        ] {
-            assert_eq!(
-                m.moves(&email(mailbox_ids), &QueueMailbox::One(from.into())),
-                moved,
-                "{mailbox_ids:?} from {from}"
-            );
-        }
     }
 }

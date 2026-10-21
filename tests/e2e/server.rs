@@ -1,10 +1,9 @@
 //! A local JMAP server for tests: the session resource and the API, served
 //! from a fake store on a loopback port.
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
-use blorp::jmap::fake::{MAX_OBJECTS_IN_GET, MAX_OBJECTS_IN_SET, Store, api};
+use blorp::jmap::fake::{MAX_OBJECTS_IN_GET, Store, api};
 use blorp::jmap::{CORE, Limits, MAIL};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
@@ -55,7 +54,7 @@ impl LocalJmap {
             })
             .mount(&server)
             .await;
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(store);
         Mock::given(method("POST"))
             .and(path("/jmap/api/"))
             .respond_with(Authorized {
@@ -87,31 +86,6 @@ impl LocalJmap {
             .map(|request| serde_json::from_slice(&request.body).expect("a JSON request"))
             .collect()
     }
-
-    /// Waits until the API requests received hold `n` calls of `method`.
-    /// The screen shows an action before its request is sent, and `q`
-    /// does not yet wait for the outbox, so a test waits here before
-    /// quitting.
-    pub async fn wait_for_calls(&self, method: &str, n: usize) {
-        let deadline = Instant::now() + super::TIMEOUT;
-        loop {
-            let calls = self
-                .api_requests()
-                .await
-                .iter()
-                .flat_map(|request| request["methodCalls"].as_array().unwrap().clone())
-                .filter(|call| call[0] == method)
-                .count();
-            if calls >= n {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for {n} {method} calls; saw {calls}"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
 }
 
 type Answer = Box<dyn Fn(&Request) -> ResponseTemplate + Send + Sync>;
@@ -135,13 +109,10 @@ impl Respond for Authorized {
     }
 }
 
-fn api_response(store: &Mutex<Store>, max_calls: usize, request: &Request) -> ResponseTemplate {
+fn api_response(store: &Store, max_calls: usize, request: &Request) -> ResponseTemplate {
     let result = serde_json::from_slice::<Value>(&request.body)
         .map_err(|_| api::problem("urn:ietf:params:jmap:error:notJSON"))
-        .and_then(|body| {
-            let mut store = store.lock().unwrap();
-            api::respond(&mut store, ACCOUNT_ID, max_calls, &body)
-        });
+        .and_then(|body| api::respond(store, ACCOUNT_ID, max_calls, &body));
     match result {
         Ok(response) => ResponseTemplate::new(200).set_body_json(response),
         Err(problem) => ResponseTemplate::new(400).set_body_json(problem),
@@ -149,12 +120,10 @@ fn api_response(store: &Mutex<Store>, max_calls: usize, request: &Request) -> Re
 }
 
 /// A session resource in Fastmail's shape, advertising Fastmail's
-/// `maxObjectsInGet` and `maxObjectsInSet`, and `max_calls` as
-/// `maxCallsInRequest`.
+/// `maxObjectsInGet`, and `max_calls` as `maxCallsInRequest`.
 fn session(base: &str, mail: bool, max_calls: usize) -> Value {
     let mut capabilities = json!({CORE: {
         "maxObjectsInGet": MAX_OBJECTS_IN_GET,
-        "maxObjectsInSet": MAX_OBJECTS_IN_SET,
         "maxCallsInRequest": max_calls
     }});
     let mut primary = json!({CORE: ACCOUNT_ID});

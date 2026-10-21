@@ -3,14 +3,15 @@
 
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use blorp::jmap::{Class, EmailUpdate, Error, Fatal, HttpJmap, Jmap, Timeouts};
+use blorp::jmap::retry::{MAX_JITTER, retrying};
+use blorp::jmap::{Class, Error, Fatal, HttpJmap, Jmap, Timeouts};
 use secrecy::SecretString;
-use serde_json::{Value, json};
+use serde_json::json;
 use tracing_subscriber::fmt::MakeWriter;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 mod common;
 
@@ -220,42 +221,6 @@ async fn server_unavailable_and_server_fail_are_transient_and_other_method_error
 }
 
 #[tokio::test]
-async fn a_rate_limit_set_error_fails_the_update_as_transient() {
-    let server = MockServer::start().await;
-    let jmap = connect(&server).await;
-    answer(
-        &server,
-        ResponseTemplate::new(200).set_body_json(json!({
-            "methodResponses": [[
-                "Email/set",
-                {
-                    "accountId": "u1a2b3c4",
-                    "newState": "2",
-                    "updated": {"e1": null},
-                    "notUpdated": {"e2": {"type": "rateLimit"}}
-                },
-                "0"
-            ]],
-            "sessionState": "0"
-        })),
-    )
-    .await;
-    let patch = || [("keywords/$seen".to_string(), Value::Bool(true))].into();
-    let update = EmailUpdate::from([("e1".into(), patch()), ("e2".into(), patch())]);
-
-    let error = jmap.set_emails(&update).await.unwrap_err();
-
-    assert_eq!(
-        error,
-        Error::Method {
-            method: "Email/set".into(),
-            kind: "rateLimit".into(),
-        }
-    );
-    assert_eq!(error.class(), Class::Transient);
-}
-
-#[tokio::test]
 async fn other_4xx_statuses_are_bugs_and_401_and_403_fatal() {
     for (status, class) in [
         (400, Class::Bug),
@@ -276,7 +241,7 @@ async fn other_4xx_statuses_are_bugs_and_401_and_403_fatal() {
 #[test]
 fn a_bug_reads_as_fastmail_error_and_its_type() {
     let method = Error::Method {
-        method: "Email/set".into(),
+        method: "Email/query".into(),
         kind: "invalidArguments".into(),
     };
     assert_eq!(method.to_string(), "Fastmail error: invalidArguments");
@@ -361,4 +326,60 @@ async fn a_bug_method_error_logs_the_response() {
     let log = capture.text();
     assert!(log.contains("ERROR"), "{log}");
     assert!(log.contains(r#""type":"invalidArguments""#), "{log}");
+}
+
+/// Answers 503 to the first `failures` requests and `then` to the rest,
+/// noting when each arrived.
+struct FailThen {
+    failures: usize,
+    then: ResponseTemplate,
+    arrivals: Arc<Mutex<Vec<Instant>>>,
+}
+
+impl Respond for FailThen {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        let mut arrivals = self.arrivals.lock().unwrap();
+        arrivals.push(Instant::now());
+        if arrivals.len() <= self.failures {
+            ResponseTemplate::new(503)
+        } else {
+            self.then.clone()
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_5xx_is_retried_after_1_2_and_4_s() {
+    let server = MockServer::start().await;
+    let jmap = connect(&server).await;
+    let arrivals = Arc::new(Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .respond_with(FailThen {
+            failures: 3,
+            then: ResponseTemplate::new(200).set_body_json(json!({
+                "methodResponses": [["Mailbox/get", {"accountId": "u1a2b3c4", "state": "0", "list": [], "notFound": []}, "0"]],
+                "sessionState": "0"
+            })),
+            arrivals: arrivals.clone(),
+        })
+        .mount(&server)
+        .await;
+
+    let result = retrying(|| jmap.get_mailboxes(), |_| {}).await;
+
+    assert_eq!(result, Ok(Vec::new()));
+    let arrivals = arrivals.lock().unwrap();
+    let gaps: Vec<Duration> = arrivals.windows(2).map(|w| w[1] - w[0]).collect();
+    assert_eq!(gaps.len(), 3, "{gaps:?}");
+    // Each gap also holds a 503's round trip on a loopback port, which a
+    // busy CI runner can slow.
+    let round_trip = Duration::from_secs(1);
+    for (gap, delay) in gaps.iter().zip([1, 2, 4]) {
+        let delay = Duration::from_secs(delay);
+        assert!(
+            *gap >= delay && *gap < delay + MAX_JITTER + round_trip,
+            "{gaps:?}"
+        );
+    }
 }

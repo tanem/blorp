@@ -1,10 +1,11 @@
 //! The executor retries transient failures, goes disconnected when the
-//! retries run out, probes on a backoff until a request succeeds, and
-//! waits for the outbox on quit; run against the fake with paused time.
+//! retries run out, and probes on a backoff until a request succeeds; run
+//! against the fake with paused time.
 
 use std::io;
 use std::time::Duration;
 
+use blorp::app::App;
 use blorp::jmap::Error;
 use blorp::jmap::fake::{Call, EmailSpec, FakeJmap, Store};
 use blorp::run::{Exit, TestClock, launch, run};
@@ -22,7 +23,6 @@ fn at(time: &str) -> Timestamp {
 fn inbox() -> Store {
     Store::builder()
         .role_mailbox("mb-inbox", "Inbox", "inbox")
-        .role_mailbox("mb-archive", "Archive", "archive")
         .email(
             EmailSpec::new("e1", "t1", "2026-10-18T09:00:00Z")
                 .in_mailbox("mb-inbox")
@@ -58,6 +58,19 @@ type Ended = (io::Result<Exit>, Vec<String>);
 /// gives how it ended and the screen it left.
 async fn start(jmap: &FakeJmap, keys: &'static [(u64, char)]) -> JoinHandle<Ended> {
     let app = launch(jmap, at("2026-10-18T10:00:00Z")).await.unwrap();
+    spawn(jmap, keys, app)
+}
+
+/// [`start`], with the Inbox query the state task sends first failing
+/// with `error`.
+async fn start_failing_query(jmap: &FakeJmap, error: Error) -> JoinHandle<Ended> {
+    let app = launch(jmap, at("2026-10-18T10:00:00Z")).await.unwrap();
+    jmap.fail_next(1, error);
+    spawn(jmap, &[], app)
+}
+
+/// Runs the state task over `jmap` with `keys` from `app`.
+fn spawn(jmap: &FakeJmap, keys: &'static [(u64, char)], app: App) -> JoinHandle<Ended> {
     let clock = TestClock::new(at("2026-10-18T10:00:00Z"));
     let jmap = jmap.clone();
     tokio::spawn(async move {
@@ -78,17 +91,17 @@ fn screen(terminal: &Terminal<TestBackend>) -> Vec<String> {
         .collect()
 }
 
+fn queries(jmap: &FakeJmap) -> usize {
+    jmap.calls()
+        .iter()
+        .filter(|call| matches!(call, Call::Query(_)))
+        .count()
+}
+
 fn reconciles(jmap: &FakeJmap) -> usize {
     jmap.calls()
         .iter()
         .filter(|call| matches!(call, Call::Reconcile(..)))
-        .count()
-}
-
-fn sets(jmap: &FakeJmap) -> usize {
-    jmap.calls()
-        .iter()
-        .filter(|call| matches!(call, Call::SetEmails(_)))
         .count()
 }
 
@@ -186,120 +199,47 @@ async fn the_first_probe_that_succeeds_reconciles_the_queue_and_reconnects() {
         6,
         "four tries, a failed probe, and one that worked"
     );
-    assert!(screen[1].contains("Flights"), "{screen:#?}");
+    assert!(screen[0].contains("Flights"), "{screen:#?}");
     assert!(!screen[22].contains("DISCONNECTED"), "{screen:#?}");
     assert_eq!(screen[23].trim_end(), "Reconnected");
-}
-
-#[tokio::test(start_paused = true)]
-async fn an_action_is_retried_inside_its_outbox_job() {
-    let jmap = FakeJmap::new(inbox());
-    let state = start(&jmap, &[(1_000, 'e'), (9_000, 'q')]).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    jmap.fail_next(2, Error::Status(503));
-
-    let (exit, screen) = state.await.unwrap();
-
-    assert_eq!(exit.unwrap(), Exit::Quit);
-    assert_eq!(sets(&jmap), 3);
-    assert!(screen[1].contains("Invoice"), "{screen:#?}");
-    assert!(!screen[22].contains("DISCONNECTED"), "{screen:#?}");
 }
 
 #[tokio::test(start_paused = true)]
 async fn retry_after_sets_the_wait() {
     let jmap = FakeJmap::new(inbox());
     let started = tokio::time::Instant::now();
-    let state = start(&jmap, &[(1_000, 'e')]).await;
-    until(started, 500).await;
-    jmap.fail_next(
-        1,
+    let state = start_failing_query(
+        &jmap,
         Error::RetryAfter {
             status: 429,
             wait: Duration::from_secs(10),
         },
-    );
+    )
+    .await;
 
-    until(started, 10_900).await;
-    assert_eq!(sets(&jmap), 1);
-    until(started, 11_100).await;
-    assert_eq!(sets(&jmap), 2);
+    until(started, 9_900).await;
+    assert_eq!(queries(&jmap), 1);
+    until(started, 10_100).await;
+    assert_eq!(queries(&jmap), 2);
     state.abort();
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_action_out_of_retries_drops_the_jobs_behind_it_until_reconnected() {
+async fn a_retry_after_over_a_minute_waits_a_minute() {
     let jmap = FakeJmap::new(inbox());
     let started = tokio::time::Instant::now();
-    // Two archives, then once reconnected a third, which archives the
-    // first thread again, since the first two were rolled back.
-    let state = start(
+    let state = start_failing_query(
         &jmap,
-        &[(1_000, 'e'), (100, 'e'), (28_900, 'e'), (2_000, 'q')],
+        Error::RetryAfter {
+            status: 503,
+            wait: Duration::from_secs(120),
+        },
     )
     .await;
-    until(started, 500).await;
-    jmap.fail_next(4, unreachable());
 
-    let (exit, screen) = state.await.unwrap();
-
-    assert_eq!(exit.unwrap(), Exit::Quit);
-    let calls = jmap.calls();
-    let sets: Vec<&Call> = calls
-        .iter()
-        .filter(|call| matches!(call, Call::SetEmails(_)))
-        .collect();
-    assert_eq!(
-        sets.len(),
-        5,
-        "four tries of the first, none of the second, the third: {calls:?}"
-    );
-    assert!(
-        sets.iter().all(|set| *set == sets[0]),
-        "each archives e1: {sets:?}"
-    );
-    assert!(screen[1].contains("Invoice"), "{screen:#?}");
-}
-
-#[tokio::test(start_paused = true)]
-async fn quit_waits_for_the_outbox() {
-    let jmap = FakeJmap::new(inbox());
-    let started = tokio::time::Instant::now();
-    let state = start(&jmap, &[(1_000, 'e'), (10, 'q')]).await;
-    until(started, 500).await;
-    jmap.delay_next(1, Duration::from_secs(2));
-
-    let (exit, _) = state.await.unwrap();
-
-    assert_eq!(exit.unwrap(), Exit::Quit);
-    assert_eq!(
-        jmap.answered()
-            .iter()
-            .filter(|c| matches!(c, Call::SetEmails(_)))
-            .count(),
-        1
-    );
-    let ended = started.elapsed();
-    assert!(
-        ended >= Duration::from_secs(3) && ended < Duration::from_millis(3100),
-        "{ended:?}"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn quit_gives_up_on_the_outbox_after_3_s() {
-    let jmap = FakeJmap::new(inbox());
-    let started = tokio::time::Instant::now();
-    let state = start(&jmap, &[(1_000, 'e'), (10, 'q')]).await;
-    until(started, 500).await;
-    jmap.delay_next(1, Duration::from_secs(10));
-
-    let (exit, _) = state.await.unwrap();
-
-    assert_eq!(exit.unwrap(), Exit::Unconfirmed(1));
-    let ended = started.elapsed();
-    assert!(
-        ended >= Duration::from_millis(4010) && ended < Duration::from_millis(4100),
-        "{ended:?}"
-    );
+    until(started, 59_900).await;
+    assert_eq!(queries(&jmap), 1);
+    until(started, 60_100).await;
+    assert_eq!(queries(&jmap), 2);
+    state.abort();
 }

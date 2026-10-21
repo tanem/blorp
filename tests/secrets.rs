@@ -7,8 +7,8 @@ use std::time::Duration;
 use blorp::cli::{FirstLine, StoreError, TokenStore, setup};
 use blorp::jmap::{EmailQuery, HttpJmap, Jmap};
 use blorp::run::{Exit, launch, run};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use futures::{StreamExt, stream};
+use crossterm::event::Event;
+use futures::stream;
 use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -71,7 +71,7 @@ impl TokenStore for NoStore {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn the_token_appears_nowhere_after_an_action_a_failed_request_and_a_fatal_401() {
+async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(capture.clone())
@@ -91,8 +91,8 @@ async fn the_token_appears_nowhere_after_an_action_a_failed_request_and_a_fatal_
         .and(path("/api/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "methodResponses": [["Mailbox/get", {"list": [
-                {"id": "mb-inbox", "name": "Inbox", "parentId": null, "role": "inbox"},
-                {"id": "mb-archive", "name": "Archive", "parentId": null, "role": "archive"}
+                {"id": "mb-inbox", "name": "Inbox", "role": "inbox"},
+                {"id": "mb-archive", "name": "Archive", "role": "archive"}
             ]}, "0"]],
             "sessionState": "0"
         })))
@@ -126,23 +126,25 @@ async fn the_token_appears_nowhere_after_an_action_a_failed_request_and_a_fatal_
             "methodResponses": [["Email/get", {"list": [{
                 "id": "Me1",
                 "threadId": "Tt1",
-                "mailboxIds": {"mb-inbox": true},
                 "keywords": {},
                 "from": null,
                 "subject": "Lunch",
-                "receivedAt": "2026-10-18T09:00:00Z",
-                "hasAttachment": false
+                "receivedAt": "2026-10-18T09:00:00Z"
             }]}, "0"]],
             "sessionState": "0"
         })))
         .up_to_n_times(1)
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/api/"))
-        .and(body_string_contains("Email/set"))
-        .respond_with(ResponseTemplate::new(500))
-        .up_to_n_times(1)
+    // The push stream sends one event, whose reconcile waits for the
+    // queue to load and is then refused for the token.
+    Mock::given(method("GET"))
+        .and(path("/event/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("event: state\ndata: {}\n\n"),
+        )
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -168,34 +170,13 @@ async fn the_token_appears_nowhere_after_an_action_a_failed_request_and_a_fatal_
     let failed = jmap
         .query(&EmailQuery {
             filter: json!({"inMailbox": "mb-inbox"}),
-            ascending: false,
             limit: 500,
-            extra_threads: Vec::new(),
         })
         .await
         .unwrap_err();
     errors.push_str(&format!("{failed}\n{failed:?}\n"));
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    // `e` once the queue has loaded, after five requests: the session fetch,
-    // `Mailbox/get`, the failed query above, and the queue query's two
-    // stages. The archive fails with a 500, and the query re-run after it is
-    // refused with a 401.
-    let keys = Box::pin(
-        stream::once({
-            let server = &server;
-            async move {
-                while server.received_requests().await.unwrap().len() < 5 {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                Ok(Event::Key(KeyEvent::new(
-                    KeyCode::Char('e'),
-                    KeyModifiers::NONE,
-                )))
-            }
-        })
-        .chain(stream::pending::<io::Result<Event>>()),
-    );
+    let keys = stream::pending::<io::Result<Event>>();
     let exit = tokio::time::timeout(
         Duration::from_secs(10),
         run(&mut terminal, keys, jmap, blorp::run::SystemClock, app),
@@ -206,6 +187,8 @@ async fn the_token_appears_nowhere_after_an_action_a_failed_request_and_a_fatal_
     let Exit::Fatal(fatal) = exit else {
         panic!("expected a fatal exit, got {exit:?}");
     };
+    let screen = format!("{:?}", terminal.backend().buffer());
+    assert!(screen.contains("Lunch"), "the queue loaded: {screen}");
     let bodies: Vec<String> = server
         .received_requests()
         .await
@@ -214,8 +197,10 @@ async fn the_token_appears_nowhere_after_an_action_a_failed_request_and_a_fatal_
         .map(|request| String::from_utf8_lossy(&request.body).into_owned())
         .collect();
     assert!(
-        bodies.iter().any(|body| body.contains("Email/set")),
-        "the archive was sent: {bodies:#?}"
+        bodies
+            .iter()
+            .any(|body| body.contains("Mailbox/get") && body.contains("Email/query")),
+        "the reconcile was sent: {bodies:#?}"
     );
     errors.push_str(&format!("{fatal}\n{fatal:?}\n"));
     let rejected = HttpJmap::connect(

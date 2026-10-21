@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use blorp::jmap::fake::{Call, EmailSpec, FakeJmap, Store};
 use blorp::jmap::{EmailQuery, Error, Fatal};
-use blorp::run::{Exit, TestClock, launch, run};
+use blorp::run::{Exit, TestClock, connect, launch, run};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use futures::{Stream, StreamExt, stream};
 use jiff::Timestamp;
@@ -85,25 +85,22 @@ async fn launch_loads_the_inbox_and_the_keys_move_through_it() {
             Call::GetMailboxes,
             Call::Query(EmailQuery {
                 filter: json!({"inMailbox": "mb-inbox"}),
-                ascending: false,
                 limit: 500,
-                extra_threads: Vec::new(),
             }),
         ]
     );
     let screen = screen(&terminal);
-    assert!(screen[0].starts_with(" Inbox  Unread "), "{screen:#?}");
-    assert!(screen[1].contains("Lunch on Friday?"), "{screen:#?}");
+    assert!(screen[0].contains("Lunch on Friday?"), "{screen:#?}");
     assert!(
-        screen[1].trim_end().ends_with("1h"),
+        screen[0].trim_end().ends_with("1h"),
         "ages come from the clock: {screen:#?}"
     );
-    assert!(screen[2].contains("Trip to Wellington"), "{screen:#?}");
+    assert!(screen[1].contains("Trip to Wellington"), "{screen:#?}");
     assert!(
         !screen.iter().any(|line| line.contains("Flights")),
         "{screen:#?}"
     );
-    assert!(screen[22].contains(" NORMAL "), "{screen:#?}");
+    assert!(screen[22].starts_with(" Inbox "), "{screen:#?}");
     assert!(screen[22].trim_end().ends_with("2/2"), "{screen:#?}");
 }
 
@@ -229,4 +226,44 @@ async fn q_stops_the_state_task_with_the_quit_exit() {
     .unwrap();
 
     assert_eq!(exit, Exit::Quit);
+}
+
+#[tokio::test(start_paused = true)]
+async fn launch_runs_from_the_session_fetch_to_the_initial_query() {
+    let fake = FakeJmap::new(inbox());
+    fake.fail_next(1, Error::Status(503));
+    let started = tokio::time::Instant::now();
+
+    let jmap = connect(|| fake.connect()).await.unwrap();
+    let waited = started.elapsed();
+    let app = launch(&jmap, at("2026-10-18T00:00:00Z")).await.unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    run(
+        &mut terminal,
+        script("q", Duration::from_secs(1)),
+        jmap,
+        TestClock::new(at("2026-10-18T10:00:00Z")),
+        app,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        waited >= Duration::from_secs(1) && waited <= Duration::from_millis(1500),
+        "the session fetch is retried after 1 s: {waited:?}"
+    );
+    assert_eq!(
+        fake.calls(),
+        [
+            Call::Session,
+            Call::Session,
+            Call::GetMailboxes,
+            Call::Query(EmailQuery {
+                filter: json!({"inMailbox": "mb-inbox"}),
+                limit: 500,
+            }),
+        ]
+    );
+    let screen = screen(&terminal);
+    assert!(screen[0].contains("Lunch on Friday?"), "{screen:#?}");
 }

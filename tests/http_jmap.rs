@@ -1,4 +1,4 @@
-use blorp::jmap::{EmailQuery, EmailUpdate, Error, HttpJmap, Jmap, Mailbox, Push, QueryResult};
+use blorp::jmap::{EmailQuery, Error, HttpJmap, Jmap, Mailbox, Push, QueryResult};
 use futures::StreamExt;
 use secrecy::SecretString;
 use serde_json::{Value, json};
@@ -76,7 +76,7 @@ async fn get_mailboxes_sends_mailbox_get_on_the_primary_mail_account() {
             "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
             "methodCalls": [[
                 "Mailbox/get",
-                {"accountId": "u1a2b3c4", "ids": null, "properties": ["id", "name", "parentId", "role"]},
+                {"accountId": "u1a2b3c4", "ids": null, "properties": ["id", "name", "role"]},
                 "0"
             ]]
         })))
@@ -87,8 +87,8 @@ async fn get_mailboxes_sends_mailbox_get_on_the_primary_mail_account() {
                     "accountId": "u1a2b3c4",
                     "state": "1",
                     "list": [
-                        {"id": "mb1", "name": "Inbox", "parentId": null, "role": "inbox"},
-                        {"id": "mb2", "name": "Travel", "parentId": null, "role": null}
+                        {"id": "mb1", "name": "Inbox", "role": "inbox"},
+                        {"id": "mb2", "name": "Travel", "role": null}
                     ],
                     "notFound": []
                 },
@@ -109,13 +109,11 @@ async fn get_mailboxes_sends_mailbox_get_on_the_primary_mail_account() {
             Mailbox {
                 id: "mb1".into(),
                 name: "Inbox".into(),
-                parent_id: None,
                 role: Some("inbox".into()),
             },
             Mailbox {
                 id: "mb2".into(),
                 name: "Travel".into(),
-                parent_id: None,
                 role: None,
             },
         ]
@@ -168,17 +166,17 @@ fn member_get(ids: &[String], call_id: &str) -> Value {
         "accountId": "u1a2b3c4",
         "ids": ids,
         "properties": [
-            "id", "threadId", "mailboxIds", "keywords",
-            "from", "subject", "receivedAt", "hasAttachment"
+            "id", "threadId", "keywords",
+            "from", "subject", "receivedAt"
         ]
     }, call_id])
 }
 
 fn email(id: &str, received_at: &str) -> Value {
     json!({
-        "id": id, "threadId": "Tt1", "mailboxIds": {"mb1": true},
+        "id": id, "threadId": "Tt1",
         "keywords": {}, "from": [{"name": "Ana Lopez", "email": "ana@example.invalid"}],
-        "subject": "Trip", "receivedAt": received_at, "hasAttachment": false
+        "subject": "Trip", "receivedAt": received_at
     })
 }
 
@@ -199,9 +197,7 @@ impl Match for FirstCall {
 async fn inbox_query(jmap: &HttpJmap) -> Result<QueryResult, Error> {
     jmap.query(&EmailQuery {
         filter: json!({"inMailbox": "mb1"}),
-        ascending: false,
         limit: 500,
-        extra_threads: Vec::new(),
     })
     .await
 }
@@ -227,14 +223,14 @@ async fn query_fetches_the_threads_then_their_emails_in_a_second_request() {
             "methodResponses": [
                 ["Email/get", {"accountId": "u1a2b3c4", "list": [
                     {
-                        "id": "Me1", "threadId": "Tt1", "mailboxIds": {"mb3": true},
+                        "id": "Me1", "threadId": "Tt1",
                         "keywords": {"$seen": true}, "from": [{"name": "Kim", "email": "kim@example.invalid"}],
-                        "subject": "Trip", "receivedAt": "2026-10-16T08:00:00Z", "hasAttachment": false
+                        "subject": "Trip", "receivedAt": "2026-10-16T08:00:00Z"
                     },
                     {
-                        "id": "Me2", "threadId": "Tt1", "mailboxIds": {"mb1": true},
+                        "id": "Me2", "threadId": "Tt1",
                         "keywords": {}, "from": [{"name": "Ana Lopez", "email": "ana@example.invalid"}],
-                        "subject": "Re: Trip", "receivedAt": "2026-10-17T09:30:00Z", "hasAttachment": true
+                        "subject": "Re: Trip", "receivedAt": "2026-10-17T09:30:00Z"
                     }
                 ], "notFound": []}, "0"]
             ],
@@ -358,87 +354,6 @@ async fn a_method_error_in_the_second_request_fails_the_query() {
 }
 
 #[tokio::test]
-async fn set_emails_sends_one_email_set_and_reads_not_updated() {
-    let server = MockServer::start().await;
-    serve_session(&server, mail_capabilities()).await;
-    Mock::given(method("POST"))
-        .and(path("/api/"))
-        .and(header("authorization", "Bearer test-token-123"))
-        .and(body_json(json!({
-            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
-            "methodCalls": [[
-                "Email/set",
-                {"accountId": "u1a2b3c4", "update": {
-                    "Me1": {"mailboxIds/mb1": null, "mailboxIds/mb5": true},
-                    "Me2": {"mailboxIds/mb1": null, "mailboxIds/mb5": true}
-                }},
-                "0"
-            ]]
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "methodResponses": [[
-                "Email/set",
-                {
-                    "accountId": "u1a2b3c4",
-                    "oldState": "1",
-                    "newState": "2",
-                    "updated": {"Me1": null},
-                    "notUpdated": {"Me2": {"type": "notFound"}},
-                    "created": null,
-                    "notCreated": null,
-                    "destroyed": null,
-                    "notDestroyed": null
-                },
-                "0"
-            ]],
-            "sessionState": "0"
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let jmap = connect(&server).await.unwrap();
-    let to_archive = || {
-        [
-            ("mailboxIds/mb1".to_string(), Value::Null),
-            ("mailboxIds/mb5".to_string(), Value::Bool(true)),
-        ]
-        .into()
-    };
-    let update = EmailUpdate::from([("Me1".into(), to_archive()), ("Me2".into(), to_archive())]);
-
-    let result = jmap.set_emails(&update).await.unwrap();
-
-    assert_eq!(result.not_updated, ["Me2"]);
-}
-
-#[tokio::test]
-async fn set_emails_reads_a_null_not_updated_as_none() {
-    let server = MockServer::start().await;
-    serve_session(&server, mail_capabilities()).await;
-    Mock::given(method("POST"))
-        .and(path("/api/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "methodResponses": [[
-                "Email/set",
-                {"accountId": "u1a2b3c4", "newState": "2", "updated": {"Me1": null}, "notUpdated": null},
-                "0"
-            ]],
-            "sessionState": "0"
-        })))
-        .mount(&server)
-        .await;
-    let jmap = connect(&server).await.unwrap();
-    let update = EmailUpdate::from([(
-        "Me1".into(),
-        [("keywords/$seen".to_string(), Value::Bool(true))].into(),
-    )]);
-
-    let result = jmap.set_emails(&update).await.unwrap();
-
-    assert!(result.not_updated.is_empty());
-}
-
-#[tokio::test]
 async fn a_method_error_is_reported_with_its_type() {
     let server = MockServer::start().await;
     serve_session(&server, mail_capabilities()).await;
@@ -514,9 +429,7 @@ async fn the_first_failing_call_in_a_chain_is_reported() {
     let result = jmap
         .query(&EmailQuery {
             filter: json!({"inMailbox": "mb1"}),
-            ascending: false,
             limit: 500,
-            extra_threads: Vec::new(),
         })
         .await;
 
@@ -571,7 +484,7 @@ async fn reconcile_puts_mailbox_get_in_the_query_s_first_request() {
         0,
         json!(["Mailbox/get", {
             "accountId": "u1a2b3c4", "ids": null,
-            "properties": ["id", "name", "parentId", "role"]
+            "properties": ["id", "name", "role"]
         }, "m"]),
     );
     Mock::given(method("POST"))
@@ -580,7 +493,7 @@ async fn reconcile_puts_mailbox_get_in_the_query_s_first_request() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "methodResponses": [
                 ["Mailbox/get", {"accountId": "u1a2b3c4", "state": "1", "list": [
-                    {"id": "mb1", "name": "Inbox", "parentId": null, "role": "inbox"}
+                    {"id": "mb1", "name": "Inbox", "role": "inbox"}
                 ], "notFound": []}, "m"],
                 ["Email/query", {"accountId": "u1a2b3c4", "ids": ["Me2"], "position": 0, "total": 1}, "0"],
                 ["Email/get", {"accountId": "u1a2b3c4", "list": [{"id": "Me2", "threadId": "Tt1"}], "notFound": []}, "1"],
@@ -609,15 +522,10 @@ async fn reconcile_puts_mailbox_get_in_the_query_s_first_request() {
     let jmap = connect(&server).await.unwrap();
 
     let reconciled = jmap
-        .reconcile(
-            &EmailQuery {
-                filter: json!({"inMailbox": "mb1"}),
-                ascending: false,
-                limit: 500,
-                extra_threads: Vec::new(),
-            },
-            None,
-        )
+        .reconcile(&EmailQuery {
+            filter: json!({"inMailbox": "mb1"}),
+            limit: 500,
+        })
         .await
         .unwrap();
 
@@ -625,130 +533,6 @@ async fn reconcile_puts_mailbox_get_in_the_query_s_first_request() {
     assert_eq!(reconciled.mailboxes[0].role.as_deref(), Some("inbox"));
     assert_eq!(reconciled.result.ids, ["Me2"]);
     assert_eq!(reconciled.result.emails.len(), 1);
-}
-
-#[tokio::test]
-async fn reconcile_puts_the_snooze_mailbox_chain_in_the_first_request_after_the_queue_s() {
-    let server = MockServer::start().await;
-    serve_session(&server, mail_capabilities()).await;
-    let mut first = first_stage(json!({"inMailbox": "mb1"}));
-    let calls = first["methodCalls"].as_array_mut().unwrap();
-    calls.insert(
-        0,
-        json!(["Mailbox/get", {
-            "accountId": "u1a2b3c4", "ids": null,
-            "properties": ["id", "name", "parentId", "role"]
-        }, "m"]),
-    );
-    calls.extend([
-        json!(["Email/query", {
-            "accountId": "u1a2b3c4",
-            "filter": {"inMailbox": "mbS"},
-            "sort": [{"property": "receivedAt", "isAscending": false}],
-            "collapseThreads": true,
-            "limit": 500,
-            "calculateTotal": true
-        }, "s0"]),
-        json!(["Email/get", {
-            "accountId": "u1a2b3c4",
-            "#ids": {"resultOf": "s0", "name": "Email/query", "path": "/ids"},
-            "properties": ["threadId"]
-        }, "s1"]),
-        json!(["Thread/get", {
-            "accountId": "u1a2b3c4",
-            "#ids": {"resultOf": "s1", "name": "Email/get", "path": "/list/*/threadId"}
-        }, "s2"]),
-    ]);
-    Mock::given(method("POST"))
-        .and(path("/api/"))
-        .and(body_json(first))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "methodResponses": [
-                ["Mailbox/get", {"accountId": "u1a2b3c4", "state": "1", "list": [
-                    {"id": "mb1", "name": "Inbox", "parentId": null, "role": "inbox"},
-                    {"id": "mbS", "name": "Snoozed (blorp)", "parentId": null, "role": null}
-                ], "notFound": []}, "m"],
-                ["Email/query", {"accountId": "u1a2b3c4", "ids": ["Me2"], "position": 0, "total": 1}, "0"],
-                ["Email/get", {"accountId": "u1a2b3c4", "list": [{"id": "Me2", "threadId": "Tt1"}], "notFound": []}, "1"],
-                ["Thread/get", {"accountId": "u1a2b3c4", "list": [{"id": "Tt1", "emailIds": ["Me2"]}], "notFound": []}, "2"],
-                ["Email/query", {"accountId": "u1a2b3c4", "ids": ["Ms5"], "position": 0, "total": 1}, "s0"],
-                ["Email/get", {"accountId": "u1a2b3c4", "list": [{"id": "Ms5", "threadId": "Ts5"}], "notFound": []}, "s1"],
-                ["Thread/get", {"accountId": "u1a2b3c4", "list": [{"id": "Ts5", "emailIds": ["Ms5"]}], "notFound": []}, "s2"]
-            ],
-            "sessionState": "0"
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/"))
-        .and(body_json(json!({
-            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
-            "methodCalls": [member_get(&ids(&["Me2"]), "0")]
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "methodResponses": [
-                ["Email/get", {"accountId": "u1a2b3c4", "list": [email("Me2", "2026-10-17T09:30:00Z")], "notFound": []}, "0"]
-            ],
-            "sessionState": "0"
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/"))
-        .and(body_json(json!({
-            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
-            "methodCalls": [["Thread/get", {"accountId": "u1a2b3c4", "ids": ["Ts9"]}, "0"]]
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "methodResponses": [
-                ["Thread/get", {"accountId": "u1a2b3c4", "list": [{"id": "Ts9", "emailIds": ["Ms9"]}], "notFound": []}, "0"]
-            ],
-            "sessionState": "0"
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/"))
-        .and(body_json(json!({
-            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
-            "methodCalls": [member_get(&ids(&["Ms5", "Ms9"]), "0")]
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "methodResponses": [
-                ["Email/get", {"accountId": "u1a2b3c4", "list": [
-                    email("Ms5", "2026-10-01T09:00:00Z"),
-                    email("Ms9", "2026-09-01T09:00:00Z")
-                ], "notFound": []}, "0"]
-            ],
-            "sessionState": "0"
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let jmap = connect(&server).await.unwrap();
-    let query = |mailbox: &str, extra_threads: &[&str]| EmailQuery {
-        filter: json!({"inMailbox": mailbox}),
-        ascending: false,
-        limit: 500,
-        extra_threads: ids(extra_threads),
-    };
-
-    let reconciled = jmap
-        .reconcile(&query("mb1", &[]), Some(&query("mbS", &["Ts9"])))
-        .await
-        .unwrap();
-
-    assert_eq!(reconciled.mailboxes.len(), 2);
-    assert_eq!(reconciled.result.ids, ["Me2"]);
-    assert_eq!(reconciled.result.emails.len(), 1);
-    let snoozed = reconciled.snoozed.expect("the snooze mailbox's result");
-    assert_eq!(snoozed.ids, ["Ms5"]);
-    assert_eq!(snoozed.extra_threads.len(), 1);
-    let emails: Vec<&str> = snoozed.emails.iter().map(|e| e.id.as_str()).collect();
-    assert_eq!(emails, ["Ms5", "Ms9"]);
 }
 
 #[tokio::test]
