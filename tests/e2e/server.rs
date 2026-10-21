@@ -106,9 +106,8 @@ impl LocalJmap {
     }
 
     /// Waits until the API requests received hold `n` calls of `method`.
-    /// The screen shows an action before its request is sent, and `q`
-    /// does not yet wait for the outbox, so a test waits here before
-    /// quitting.
+    /// The screen shows an action before its request is sent, so a test
+    /// that reads the requests waits here first.
     pub async fn wait_for_calls(&self, method: &str, n: usize) {
         let deadline = Instant::now() + super::TIMEOUT;
         loop {

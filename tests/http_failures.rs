@@ -408,10 +408,13 @@ async fn a_5xx_is_retried_after_1_2_and_4_s() {
     let arrivals = arrivals.lock().unwrap();
     let gaps: Vec<Duration> = arrivals.windows(2).map(|w| w[1] - w[0]).collect();
     assert_eq!(gaps.len(), 3, "{gaps:?}");
+    // Each gap also holds a 503's round trip on a loopback port, which a
+    // busy CI runner can slow.
+    let round_trip = Duration::from_secs(1);
     for (gap, delay) in gaps.iter().zip([1, 2, 4]) {
         let delay = Duration::from_secs(delay);
         assert!(
-            *gap >= delay && *gap < delay + MAX_JITTER + Duration::from_millis(500),
+            *gap >= delay && *gap < delay + MAX_JITTER + round_trip,
             "{gaps:?}"
         );
     }

@@ -76,12 +76,12 @@ pub enum Exit {
 
 /// The session fetch that starts every launch with a stored token, retried
 /// on the usual schedule.
-pub async fn connect<T, F, Fut>(connect: F) -> Result<T, Error>
+pub async fn connect<T, F, Fut>(fetch: F) -> Result<T, Error>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, Error>>,
 {
-    retrying(connect, |retry| {
+    retrying(fetch, |retry| {
         tracing::info!("retrying the session fetch ({retry}/{RETRIES})")
     })
     .await

@@ -53,6 +53,17 @@ fn script(keys: &'static str, gap: Duration) -> impl Stream<Item = io::Result<Ev
     }))
 }
 
+/// The queue query for `mailbox`, newest first, also fetching
+/// `extra_threads` by id.
+fn query(mailbox: &str, extra_threads: &[&str]) -> Call {
+    Call::Query(EmailQuery {
+        filter: json!({"inMailbox": mailbox}),
+        ascending: false,
+        limit: 500,
+        extra_threads: extra_threads.iter().map(|t| t.to_string()).collect(),
+    })
+}
+
 fn screen(terminal: &Terminal<TestBackend>) -> Vec<String> {
     let buffer = terminal.backend().buffer();
     (0..buffer.area.height)
@@ -81,18 +92,7 @@ async fn launch_loads_the_inbox_and_the_keys_move_through_it() {
     .await
     .unwrap();
 
-    assert_eq!(
-        jmap.calls(),
-        [
-            Call::GetMailboxes,
-            Call::Query(EmailQuery {
-                filter: json!({"inMailbox": "mb-inbox"}),
-                ascending: false,
-                limit: 500,
-                extra_threads: Vec::new(),
-            }),
-        ]
-    );
+    assert_eq!(jmap.calls(), [Call::GetMailboxes, query("mb-inbox", &[]),]);
     let screen = screen(&terminal);
     assert!(screen[0].starts_with(" Inbox  Unread "), "{screen:#?}");
     assert!(screen[1].contains("Lunch on Friday?"), "{screen:#?}");
@@ -269,6 +269,7 @@ async fn launch_runs_from_the_session_fetch_to_the_initial_query_and_the_due_sno
     let started = tokio::time::Instant::now();
 
     let jmap = connect(|| fake.connect()).await.unwrap();
+    let waited = started.elapsed();
     let app = launch(&jmap, at("2026-10-18T12:00:00Z"))
         .await
         .unwrap()
@@ -286,18 +287,9 @@ async fn launch_runs_from_the_session_fetch_to_the_initial_query_and_the_due_sno
     .unwrap();
 
     assert!(
-        started.elapsed() >= Duration::from_secs(1),
-        "the session fetch is retried after 1 s: {:?}",
-        started.elapsed()
+        waited >= Duration::from_secs(1) && waited <= Duration::from_millis(1500),
+        "the session fetch is retried after 1 s: {waited:?}"
     );
-    let query = |mailbox: &str, extra_threads: &[&str]| {
-        Call::Query(EmailQuery {
-            filter: json!({"inMailbox": mailbox}),
-            ascending: false,
-            limit: 500,
-            extra_threads: extra_threads.iter().map(|t| t.to_string()).collect(),
-        })
-    };
     let returned = EmailUpdate::from([(
         "e3".to_string(),
         [

@@ -68,7 +68,7 @@ _Avoid_: Revert, rollback
 Reapplying the most recently undone action.
 
 **Outbox**:
-The queue of actions waiting to reach Fastmail, sent one at a time in the order the user acted. Each entry is a job.
+The queue of jobs waiting to reach Fastmail, sent one at a time in the order they were made: actions, undos, redos, snooze returns, and the snooze mailbox's creation alike. Each entry is a job.
 _Avoid_: Send queue, pending actions
 
 **Agenda**:

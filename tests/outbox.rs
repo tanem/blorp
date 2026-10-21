@@ -180,7 +180,8 @@ async fn an_action_and_its_undo_wait_for_a_snooze_return_sent_before_them() {
         .unwrap()
         .with_schedule(file, schedule);
     // The Inbox and snooze mailbox queries answer at once, and the return
-    // after the archive and the undo are typed.
+    // after the archive and the undo are typed. The returned thread is on
+    // the first row, so `j` moves to t1 before `e`.
     jmap.delay_next(2, Duration::ZERO);
     jmap.delay_next(1, Duration::from_secs(10));
     let clock = TestClock::new(at("2026-10-18T10:00:00Z"));
