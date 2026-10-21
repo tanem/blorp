@@ -368,7 +368,8 @@ fn require_secure(url: &str) -> Result<(), Error> {
     }
 }
 
-/// The only place the token is exposed.
+/// Where the token is exposed to build the `Authorization` header. The
+/// token stores also expose it, to write it.
 fn authorize(request: reqwest::RequestBuilder, token: &SecretString) -> reqwest::RequestBuilder {
     request.bearer_auth(token.expose_secret())
 }
