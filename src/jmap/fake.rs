@@ -94,6 +94,11 @@ impl FakeJmap {
             .extend((0..n).map(|_| Injected::Delay(delay)));
     }
 
+    /// Changes the store behind blorp's back, as the web client would.
+    pub fn change(&self, f: impl FnOnce(&mut Store)) {
+        f(&mut self.inner.lock().unwrap().store);
+    }
+
     /// Sends `event` on every open push stream.
     pub fn push(&self, event: Push) {
         let mut inner = self.inner.lock().unwrap();

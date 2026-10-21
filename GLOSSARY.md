@@ -91,5 +91,9 @@ _Avoid_: Sync (for the act), refresh (for the automatic case), poll
 The state blorp is in after a request to Fastmail has failed despite retries, until any request succeeds again. Actions are refused while disconnected; nothing is queued for later.
 _Avoid_: Offline, down, degraded
 
+**Probe**:
+A reconcile made while disconnected, tried once and spaced out by a growing wait, to find out whether Fastmail can be reached again.
+_Avoid_: Ping, health check, heartbeat
+
 **Dry run**:
 A mode in which actions are logged instead of sent to Fastmail.

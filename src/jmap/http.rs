@@ -11,15 +11,35 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::{CORE, Email, EmailQuery, EmailUpdate, Error, Invocation, Jmap, Limits, MAIL};
+use super::{CORE, Class, Email, EmailQuery, EmailUpdate, Error, Invocation, Jmap, Limits, MAIL};
 use super::{Mailbox, PushStream, QueryResult, Reconciled, Request, Response, Session};
 use super::{SetResult, Thread, push};
 
 /// Fastmail's session resource.
 pub const FASTMAIL_SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The prefix of a JMAP request-level error's problem type.
+const PROBLEM_PREFIX: &str = "urn:ietf:params:jmap:error:";
+
+/// How long a request may take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeouts {
+    /// To open the connection.
+    pub connect: Duration,
+    /// For the whole request, from sending it to reading the last byte of
+    /// the response. The push stream has none.
+    pub request: Duration,
+}
+
+impl Default for Timeouts {
+    /// 10 s to connect and 30 s for each request.
+    fn default() -> Self {
+        Timeouts {
+            connect: Duration::from_secs(10),
+            request: Duration::from_secs(30),
+        }
+    }
+}
 
 const MAILBOX_PROPERTIES: [&str; 4] = ["id", "name", "parentId", "role"];
 const EMAIL_PROPERTIES: [&str; 8] = [
@@ -53,18 +73,27 @@ impl HttpJmap {
     /// mail capability, and binds a client to its primary mail account. The
     /// session URL and the API and push stream URLs it names must be HTTPS,
     /// or plain HTTP to a loopback address, since the token is sent to
-    /// each.
+    /// each. Requests have the default [`Timeouts`].
     pub async fn connect(
         session_url: &str,
         token: impl Into<Arc<SecretString>>,
     ) -> Result<(HttpJmap, Session), Error> {
+        HttpJmap::connect_with(session_url, token, Timeouts::default()).await
+    }
+
+    /// [`HttpJmap::connect`] with `timeouts` for every request.
+    pub async fn connect_with(
+        session_url: &str,
+        token: impl Into<Arc<SecretString>>,
+        timeouts: Timeouts,
+    ) -> Result<(HttpJmap, Session), Error> {
         let http = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(timeouts.connect)
+            .timeout(timeouts.request)
             .build()
             .map_err(transport)?;
         let events_http = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
+            .connect_timeout(timeouts.connect)
             .build()
             .map_err(transport)?;
         let token = token.into();
@@ -73,7 +102,7 @@ impl HttpJmap {
             .send()
             .await
             .map_err(transport)?;
-        let session: Session = read_json(response).await?;
+        let session: Session = parse(&read_body(response).await?)?;
         require_secure(&session.api_url)?;
         if let Some(url) = &session.event_source_url {
             require_secure(url)?;
@@ -118,7 +147,7 @@ impl HttpJmap {
 
     /// Sends one request. A method error is reported for the first call
     /// that failed, since later calls that refer back to it fail only as a
-    /// consequence.
+    /// consequence, and logged with the response when it is a bug.
     async fn send(&self, method_calls: Vec<Invocation>) -> Result<Vec<Invocation>, Error> {
         let methods: Vec<(String, String)> = method_calls
             .iter()
@@ -133,16 +162,21 @@ impl HttpJmap {
             .send()
             .await
             .map_err(transport)?;
-        let response: Response = read_json(response).await?;
+        let body = read_body(response).await?;
+        let response: Response = parse(&body)?;
         if let Some(error) = response.method_responses.iter().find(|r| r.name == "error") {
             let method = methods
                 .iter()
                 .find(|(call_id, _)| *call_id == error.call_id)
                 .map_or("unknown method", |(_, name)| name.as_str());
-            return Err(Error::Method {
+            let error = Error::Method {
                 method: method.into(),
                 kind: error.args["type"].as_str().unwrap_or("unknown").into(),
-            });
+            };
+            if error.class() == Class::Bug {
+                log_bug(&format!("{method} failed"), &body);
+            }
+            return Err(error);
         }
         Ok(response.method_responses)
     }
@@ -379,11 +413,19 @@ impl Jmap for HttpJmap {
                 |chunk| json!({"accountId": self.account_id, "update": chunk}),
             )
             .await?;
-        let not_updated = responses
+        let not_updated: BTreeMap<String, Value> = responses
             .into_iter()
-            .flat_map(|set| set.not_updated.unwrap_or_default().into_keys())
+            .flat_map(|set| set.not_updated.unwrap_or_default())
             .collect();
-        Ok(SetResult { not_updated })
+        if not_updated.values().any(|e| e["type"] == "rateLimit") {
+            return Err(Error::Method {
+                method: "Email/set".into(),
+                kind: "rateLimit".into(),
+            });
+        }
+        Ok(SetResult {
+            not_updated: not_updated.into_keys().collect(),
+        })
     }
 }
 
@@ -486,13 +528,63 @@ fn response_of<T: DeserializeOwned>(
     serde_json::from_value(response.args.clone()).map_err(|e| Error::Parse(e.to_string()))
 }
 
-async fn read_json<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, Error> {
-    let status = response.status();
-    if !status.is_success() {
-        return Err(Error::Status(status.as_u16()));
+/// A response's body, or the failure a non-success status reports: the
+/// wait a `Retry-After` header asks for on HTTP 429, 5xx, or the
+/// request-level `limit` error, else a request-level error when the body
+/// is JMAP problem details. A bug is logged with the body.
+async fn read_body(response: reqwest::Response) -> Result<Vec<u8>, Error> {
+    let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| retry_wait(value, jiff::Timestamp::now()));
+    let body = response.bytes().await.map_err(transport)?.to_vec();
+    if (200..300).contains(&status) {
+        return Ok(body);
     }
-    let body = response.bytes().await.map_err(transport)?;
-    serde_json::from_slice(&body).map_err(|e| Error::Parse(e.to_string()))
+    let problem = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|problem| {
+            let kind = problem["type"].as_str()?.strip_prefix(PROBLEM_PREFIX)?;
+            Some(kind.to_string())
+        });
+    let busy = status == 429 || (500..600).contains(&status) || problem.as_deref() == Some("limit");
+    let error = match (problem, retry_after) {
+        _ if matches!(status, 401 | 403) => Error::Status(status),
+        (_, Some(wait)) if busy => Error::RetryAfter { status, wait },
+        (Some(kind), _) => Error::Request(kind),
+        (None, _) => Error::Status(status),
+    };
+    if error.class() == Class::Bug {
+        log_bug(&format!("HTTP {status}"), &body);
+    }
+    Err(error)
+}
+
+/// The wait a `Retry-After` value asks for at `now`: a number of seconds,
+/// or an HTTP date, zero when that has passed.
+fn retry_wait(value: &str, now: jiff::Timestamp) -> Option<Duration> {
+    if let Ok(secs) = value.trim().parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    let at = jiff::fmt::rfc2822::parse(value.trim()).ok()?.timestamp();
+    Some(Duration::try_from(at.duration_since(now)).unwrap_or(Duration::ZERO))
+}
+
+/// Parses a successful response's body, logging it when it does not
+/// parse.
+fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T, Error> {
+    serde_json::from_slice(body).map_err(|e| {
+        log_bug("unreadable response", body);
+        Error::Parse(e.to_string())
+    })
+}
+
+/// Logs a response that is a bug at error level: its body, with no
+/// headers.
+fn log_bug(what: &str, body: &[u8]) {
+    tracing::error!("Fastmail error, {what}: {}", String::from_utf8_lossy(body));
 }
 
 fn transport(error: reqwest::Error) -> Error {

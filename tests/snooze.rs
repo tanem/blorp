@@ -340,7 +340,7 @@ fn a_failed_snooze_is_rolled_back_with_its_entry() {
 
     let effects = h.send(Msg::Sent {
         job: 1,
-        result: Err(Error::Transport("connection reset".into())),
+        result: Err(Error::Status(400)),
     });
 
     assert!(
@@ -349,7 +349,10 @@ fn a_failed_snooze_is_rolled_back_with_its_entry() {
     );
     assert_eq!(h.app.schedule(), &Schedule::default());
     assert_eq!(h.subjects(), ["Re: Trip", "Lunch", "Invoice"]);
-    assert_eq!(h.status(), "Could not snooze 1 thread: connection reset");
+    assert_eq!(
+        h.status(),
+        "Could not snooze 1 thread: Fastmail error: HTTP 400"
+    );
     assert_eq!(h.app.undo_depth(), 0);
 }
 
@@ -599,7 +602,7 @@ fn a_failed_creation_snoozes_nothing() {
 
     let effects = h.send(Msg::MailboxCreated {
         job: 1,
-        result: Err(Error::Transport("connection reset".into())),
+        result: Err(Error::Status(400)),
     });
 
     assert!(
@@ -608,7 +611,7 @@ fn a_failed_creation_snoozes_nothing() {
     );
     assert_eq!(
         h.status(),
-        "Could not create Snoozed (blorp): connection reset"
+        "Could not create Snoozed (blorp): Fastmail error: HTTP 400"
     );
     assert_eq!(h.subjects(), ["Re: Trip", "Lunch", "Invoice"]);
     assert_eq!(h.app.undo_depth(), 0);
@@ -724,7 +727,7 @@ fn the_return_is_one_email_set_per_thread_moving_the_snoozed_emails_back() {
     let effects = h.start();
     let effects = h.resolve(effects);
 
-    let Effect::QuerySnoozed { query } = &effects[0] else {
+    let Effect::QuerySnoozed { query, .. } = &effects[0] else {
         panic!("{effects:?}");
     };
     assert_eq!(query.filter, json!({"inMailbox": "mb-snooze"}));
@@ -791,7 +794,7 @@ fn a_failed_return_puts_the_entry_back() {
     let mut h = Harness::with_schedule(store(), due_schedule());
     let effects = h.start();
     let effects = h.resolve(effects);
-    let Effect::QuerySnoozed { query } = &effects[0] else {
+    let Effect::QuerySnoozed { query, .. } = &effects[0] else {
         panic!("{effects:?}");
     };
     let result = h.reconcile(query).map(|r| r.result);
@@ -802,7 +805,7 @@ fn a_failed_return_puts_the_entry_back() {
 
     let effects = h.send(Msg::Sent {
         job: *job,
-        result: Err(Error::Transport("connection reset".into())),
+        result: Err(Error::Status(400)),
     });
 
     assert!(
@@ -811,7 +814,10 @@ fn a_failed_return_puts_the_entry_back() {
     );
     assert_eq!(h.app.schedule(), &due_schedule());
     assert_eq!(h.subjects(), ["Re: Trip", "Lunch", "Invoice"]);
-    assert_eq!(h.status(), "Could not return 1 thread: connection reset");
+    assert_eq!(
+        h.status(),
+        "Could not return 1 thread: Fastmail error: HTTP 400"
+    );
 }
 
 #[test]

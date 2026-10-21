@@ -240,6 +240,7 @@ fn a_push_event_during_a_reconcile_runs_another_when_it_lands() {
             generation: 3,
             query: inbox_query(),
             snoozed: None,
+            retry: true,
         }]
     );
 }
@@ -374,9 +375,9 @@ fn a_failed_refresh_is_reported_and_a_failed_tick_is_not() {
     let generation = reconcile_generation(&sent);
     h.send(Msg::Reconciled {
         generation,
-        result: Err(Error::Status(503)),
+        result: Err(Error::Status(400)),
     });
-    assert_eq!(h.status(), "Fastmail returned HTTP 503");
+    assert_eq!(h.status(), "Fastmail error: HTTP 400");
     assert!(!h.app.loading());
     assert_eq!(h.subjects().len(), 5);
 
@@ -386,7 +387,7 @@ fn a_failed_refresh_is_reported_and_a_failed_tick_is_not() {
     let generation = reconcile_generation(&sent);
     h.send(Msg::Reconciled {
         generation,
-        result: Err(Error::Status(503)),
+        result: Err(Error::Status(400)),
     });
     assert_eq!(h.status(), "");
 }

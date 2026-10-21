@@ -485,7 +485,7 @@ fn the_launch_check_answered_after_a_reconcile_returned_the_thread_sends_nothing
     let mut h = Harness::with_schedule(store(), schedule);
     let effects = h.start();
     let effects = h.resolve(effects);
-    let [Effect::QuerySnoozed { query }] = &effects[..] else {
+    let [Effect::QuerySnoozed { query, .. }] = &effects[..] else {
         panic!("{effects:?}");
     };
     let stale = h.query(query);

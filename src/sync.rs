@@ -2,7 +2,6 @@
 //! each of its events. The reconcile tick is not here but in
 //! `update` (ADR 0002).
 
-use std::hash::{BuildHasher, RandomState};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -10,6 +9,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 
 use crate::app::Msg;
+use crate::jmap::retry::jitter;
 use crate::jmap::{Jmap, Push, push};
 
 /// How long the stream may stay silent before it counts as dead: the ping
@@ -21,9 +21,6 @@ pub const BACKOFF_START: Duration = Duration::from_secs(1);
 
 /// The longest wait before reconnecting, apart from jitter.
 pub const BACKOFF_CAP: Duration = Duration::from_secs(60);
-
-/// The most jitter added to a wait.
-pub const MAX_JITTER: Duration = Duration::from_millis(500);
 
 /// How long a connection must stay open for the next wait to start again
 /// from [`BACKOFF_START`].
@@ -58,12 +55,6 @@ impl Backoff {
         self.base = (self.base * 2).min(BACKOFF_CAP);
         wait
     }
-}
-
-/// A random wait of up to [`MAX_JITTER`].
-fn jitter() -> Duration {
-    let random = RandomState::new().hash_one(Instant::now());
-    MAX_JITTER.mul_f64(random as f64 / u64::MAX as f64)
 }
 
 /// Runs the push stream until `tx` closes or the session turns out to
@@ -160,12 +151,5 @@ mod tests {
         assert_eq!(backoff.next(secs(59), Duration::ZERO), secs(32));
         assert_eq!(backoff.next(secs(60), Duration::ZERO), secs(1));
         assert_eq!(backoff.next(secs(0), Duration::ZERO), secs(2));
-    }
-
-    #[test]
-    fn jitter_is_at_most_half_a_second() {
-        for _ in 0..100 {
-            assert!(jitter() <= MAX_JITTER);
-        }
     }
 }

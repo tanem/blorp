@@ -12,12 +12,14 @@ use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::app::{App, Effect, Msg, update};
-use crate::jmap::{EmailUpdate, Error, Fatal, Jmap};
+use crate::app::{App, Effect, Msg, Source, update};
+use crate::jmap::retry::{RETRIES, retrying};
+use crate::jmap::{Class, EmailUpdate, Error, Fatal, Jmap};
 use crate::mail::Mailboxes;
 use crate::undo::{Replay, Replayed};
 use crate::{snooze, sync, ui};
@@ -63,23 +65,42 @@ impl Clock for TestClock {
 pub enum Exit {
     /// The user quit, or the key stream ended.
     Quit,
+    /// The user quit with this many actions Fastmail had not confirmed
+    /// after the wait for the outbox; the caller restores the terminal and
+    /// says so.
+    Unconfirmed(usize),
     /// Fastmail refused the token; the caller restores the terminal and
     /// prints the message.
     Fatal(Fatal),
 }
 
 /// The launch steps that need Fastmail before the TUI starts: `Mailbox/get`,
-/// giving the app the state task starts from.
+/// retried on the usual schedule, giving the app the state task starts
+/// from.
 pub async fn launch<J: Jmap>(jmap: &J, now: Timestamp) -> Result<App, Error> {
-    let mailboxes = jmap.get_mailboxes().await?;
+    let mailboxes = retrying(
+        || jmap.get_mailboxes(),
+        |retry| tracing::info!("retrying Mailbox/get ({retry}/{RETRIES})"),
+    )
+    .await?;
     Ok(App::new(Mailboxes::from(mailboxes), now))
+}
+
+/// The unconfirmed line printed after quitting with `n` actions Fastmail
+/// had not confirmed.
+pub fn unconfirmed(n: usize) -> String {
+    match n {
+        1 => "1 action was not confirmed by Fastmail; check the Inbox.".into(),
+        n => format!("{n} actions were not confirmed by Fastmail; check the Inbox."),
+    }
 }
 
 /// Runs the state task until a quit or fatal effect or the end of `keys`,
 /// and says which: starts the `sync` task, sends the launch message, then
 /// turns key events, request results, push events, spinner ticks, and the
 /// reconcile tick at `App`'s `next_reconcile_at` into messages, redrawing
-/// once after everything ready is handled.
+/// once after everything ready is handled. While `q` waits for the
+/// outbox, keys are not read, and the wait ends at `App`'s `quit_at`.
 pub async fn run<B, K, J, C>(
     terminal: &mut Terminal<B>,
     mut keys: K,
@@ -95,12 +116,14 @@ where
     C: Clock,
 {
     let (tx, mut rx) = unbounded_channel();
-    let outbox = outbox(jmap.clone(), tx.clone());
+    let (dropped, dropped_rx) = watch::channel(0);
+    let outbox = outbox(jmap.clone(), tx.clone(), dropped_rx);
     let _sync = AbortOnDropHandle::new(tokio::spawn(sync::run(jmap.clone(), tx.clone())));
     let mut executor = Executor {
         jmap,
         tx,
         outbox,
+        dropped,
         query: CancellationToken::new(),
     };
     let mut spinner = tokio::time::interval(SPINNER_TICK);
@@ -108,6 +131,9 @@ where
     let reconcile = tokio::time::sleep(Duration::ZERO);
     tokio::pin!(reconcile);
     let mut reconcile_at = None;
+    let quit = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(quit);
+    let mut quit_at = None;
     let mut next = Some(Msg::Start);
     loop {
         if let Some(msg) = next.take()
@@ -120,21 +146,28 @@ where
                 return Ok(exit);
             }
         }
-        if app.loading() && !spinning {
+        if app.spinning() && !spinning {
             spinner.reset();
         }
-        spinning = app.loading();
+        spinning = app.spinning();
         if reconcile_at != Some(app.next_reconcile_at()) {
             reconcile_at = Some(app.next_reconcile_at());
             let wait = app.next_reconcile_at().duration_since(clock.now());
             let wait = Duration::try_from(wait).unwrap_or(Duration::ZERO);
             reconcile.as_mut().reset(Instant::now() + wait);
         }
+        if quit_at != app.quit_at() {
+            quit_at = app.quit_at();
+            if let Some(at) = quit_at {
+                let wait = Duration::try_from(at.duration_since(clock.now())).unwrap_or_default();
+                quit.as_mut().reset(Instant::now() + wait);
+            }
+        }
         terminal
             .draw(|frame| ui::view(&app, frame))
             .map_err(io::Error::other)?;
         next = tokio::select! {
-            key = keys.next() => match key {
+            key = keys.next(), if quit_at.is_none() => match key {
                 Some(Ok(Event::Key(key))) => ui::key_msg(&app, key),
                 Some(Ok(_)) => None,
                 Some(Err(error)) => return Err(error),
@@ -146,6 +179,7 @@ where
                 reconcile_at = None;
                 Some(Msg::ReconcileTick)
             }
+            () = &mut quit, if quit_at.is_some() => Some(Msg::QuitTimeout),
         };
     }
 }
@@ -161,27 +195,51 @@ enum Job {
 }
 
 /// Starts the outbox task: it runs each job once the job before it has
-/// been answered, reports it back as [`Msg::Sent`], [`Msg::Replayed`], or
-/// [`Msg::MailboxCreated`], and stops when the sender is dropped.
-fn outbox<J: Jmap>(jmap: J, tx: UnboundedSender<Msg>) -> UnboundedSender<(u64, Job)> {
+/// been answered, retrying a transient failure, reports it back as
+/// [`Msg::Sent`], [`Msg::Replayed`], or [`Msg::MailboxCreated`], and stops
+/// when the sender is dropped. After a job fails transiently despite its
+/// retries it sends nothing more until `dropped` reaches that job's
+/// number, and skips every job numbered up to `dropped`.
+fn outbox<J: Jmap>(
+    jmap: J,
+    tx: UnboundedSender<Msg>,
+    mut dropped: watch::Receiver<u64>,
+) -> UnboundedSender<(u64, Job)> {
     let (outbox, mut jobs) = unbounded_channel::<(u64, Job)>();
     tokio::spawn(async move {
         while let Some((job, work)) = jobs.recv().await {
+            if job <= *dropped.borrow() {
+                continue;
+            }
+            let retry = Retry {
+                tx: tx.clone(),
+                from: Source::Job(job),
+                retry: true,
+            };
             let msg = match work {
                 Job::Set(update) => Msg::Sent {
                     job,
-                    result: jmap.set_emails(&update).await,
+                    result: retry.run(|| jmap.set_emails(&update)).await,
                 },
                 Job::Replay(replay) => Msg::Replayed {
                     job,
-                    result: replay_emails(&jmap, &replay).await,
+                    result: replay_emails(&jmap, &replay, &retry).await,
                 },
                 Job::CreateMailbox(name) => Msg::MailboxCreated {
                     job,
-                    result: jmap.create_mailbox(&name).await,
+                    result: retry.run(|| jmap.create_mailbox(&name)).await,
                 },
             };
+            let lost = match &msg {
+                Msg::Sent { result, .. } => transient(result),
+                Msg::Replayed { result, .. } => transient(result),
+                Msg::MailboxCreated { result, .. } => transient(result),
+                _ => false,
+            };
             if tx.send(msg).is_err() {
+                break;
+            }
+            if lost && dropped.wait_for(|&through| through >= job).await.is_err() {
                 break;
             }
         }
@@ -189,15 +247,25 @@ fn outbox<J: Jmap>(jmap: J, tx: UnboundedSender<Msg>) -> UnboundedSender<(u64, J
     outbox
 }
 
+/// Whether `result` is a transient failure.
+fn transient<T>(result: &Result<T, Error>) -> bool {
+    matches!(result, Err(error) if error.class() == Class::Transient)
+}
+
 /// `Email/get` on the replay's emails, then one `Email/set` for those still
-/// as expected, or none when no email is.
-async fn replay_emails<J: Jmap>(jmap: &J, replay: &Replay) -> Result<Replayed, Error> {
-    let got = jmap.get_emails(&replay.ids()).await?;
+/// as expected, or none when no email is, each retried on its own.
+async fn replay_emails<J: Jmap>(
+    jmap: &J,
+    replay: &Replay,
+    retry: &Retry,
+) -> Result<Replayed, Error> {
+    let ids = replay.ids();
+    let got = retry.run(|| jmap.get_emails(&ids)).await?;
     let (update, skipped) = replay.split(&got);
     let not_updated = if update.is_empty() {
         Vec::new()
     } else {
-        jmap.set_emails(&update).await?.not_updated
+        retry.run(|| jmap.set_emails(&update)).await?.not_updated
     };
     Ok(Replayed {
         skipped,
@@ -205,10 +273,41 @@ async fn replay_emails<J: Jmap>(jmap: &J, replay: &Replay) -> Result<Replayed, E
     })
 }
 
+/// How a request is retried: on the usual schedule, reporting each retry
+/// as [`Msg::Retrying`], or for a probe while disconnected not at all,
+/// since the probe backoff spaces probes.
+struct Retry {
+    tx: UnboundedSender<Msg>,
+    from: Source,
+    /// False for a probe.
+    retry: bool,
+}
+
+impl Retry {
+    async fn run<T, F, Fut>(&self, mut call: F) -> Result<T, Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
+    {
+        if !self.retry {
+            return call().await;
+        }
+        retrying(call, |retry| {
+            let _ = self.tx.send(Msg::Retrying {
+                from: self.from,
+                retry,
+            });
+        })
+        .await
+    }
+}
+
 struct Executor<J> {
     jmap: J,
     tx: UnboundedSender<Msg>,
     outbox: UnboundedSender<(u64, Job)>,
+    /// The number of the last outbox job dropped.
+    dropped: watch::Sender<u64>,
     /// Cancels the latest queue query, which the next one supersedes.
     query: CancellationToken,
 }
@@ -222,13 +321,23 @@ impl<J: Jmap> Executor<J> {
         app.now = clock.now();
         let mut cancelled = None;
         for effect in update(app, msg) {
+            let policy = |from, retry| Retry {
+                tx: self.tx.clone(),
+                from,
+                retry,
+            };
             match effect {
                 Effect::SetEmails { job, .. } | Effect::Replay { job, .. }
                     if cancelled == Some(job) => {}
-                Effect::Query { generation, query } => {
+                Effect::Query {
+                    generation,
+                    query,
+                    retry,
+                } => {
                     let jmap = self.jmap.clone();
+                    let retry = policy(Source::Query(generation), retry);
                     self.supersede(async move {
-                        let result = jmap.query(&query).await;
+                        let result = retry.run(|| jmap.query(&query)).await;
                         Msg::Loaded { generation, result }
                     });
                 }
@@ -236,10 +345,12 @@ impl<J: Jmap> Executor<J> {
                     generation,
                     query,
                     snoozed,
+                    retry,
                 } => {
                     let jmap = self.jmap.clone();
+                    let retry = policy(Source::Query(generation), retry);
                     self.supersede(async move {
-                        let result = jmap.reconcile(&query, snoozed.as_ref()).await;
+                        let result = retry.run(|| jmap.reconcile(&query, snoozed.as_ref())).await;
                         Msg::Reconciled { generation, result }
                     });
                 }
@@ -252,11 +363,12 @@ impl<J: Jmap> Executor<J> {
                 Effect::CreateMailbox { job, name } => {
                     let _ = self.outbox.send((job, Job::CreateMailbox(name)));
                 }
-                Effect::QuerySnoozed { query } => {
+                Effect::QuerySnoozed { query, retry } => {
                     let jmap = self.jmap.clone();
                     let tx = self.tx.clone();
+                    let retry = policy(Source::SnoozeCheck, retry);
                     tokio::spawn(async move {
-                        let result = jmap.query(&query).await;
+                        let result = retry.run(|| jmap.query(&query)).await;
                         let _ = tx.send(Msg::SnoozedLoaded { result });
                     });
                 }
@@ -285,7 +397,11 @@ impl<J: Jmap> Executor<J> {
                         thread_ids.join(" ")
                     );
                 }
+                Effect::DropJobs { through } => {
+                    self.dropped.send_replace(through);
+                }
                 Effect::Quit => return ControlFlow::Break(Exit::Quit),
+                Effect::QuitUnconfirmed(n) => return ControlFlow::Break(Exit::Unconfirmed(n)),
                 Effect::Fatal(fatal) => return ControlFlow::Break(Exit::Fatal(fatal)),
             }
         }

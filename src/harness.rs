@@ -117,7 +117,9 @@ impl Harness {
         let mut rest = Vec::new();
         for effect in effects {
             match effect {
-                Effect::Query { generation, query } => {
+                Effect::Query {
+                    generation, query, ..
+                } => {
                     let result = self.store.query(&query);
                     rest.extend(self.send(Msg::Loaded { generation, result }));
                 }
@@ -125,6 +127,7 @@ impl Harness {
                     generation,
                     query,
                     snoozed,
+                    ..
                 } => {
                     let result = self.store.reconcile(&query, snoozed.as_ref());
                     rest.extend(self.send(Msg::Reconciled { generation, result }));
@@ -137,7 +140,7 @@ impl Harness {
                     let result = self.store.create_mailbox(&name);
                     rest.extend(self.send(Msg::MailboxCreated { job, result }));
                 }
-                Effect::QuerySnoozed { query } => {
+                Effect::QuerySnoozed { query, .. } => {
                     let result = self.store.query(&query);
                     rest.extend(self.send(Msg::SnoozedLoaded { result }));
                 }

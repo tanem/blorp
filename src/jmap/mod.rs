@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
+use std::time::Duration;
 
 use futures::stream::BoxStream;
 use serde_json::Value;
@@ -14,9 +15,10 @@ use serde_json::Value;
 pub mod fake;
 pub mod http;
 pub mod push;
+pub mod retry;
 pub mod wire;
 
-pub use http::HttpJmap;
+pub use http::{HttpJmap, Timeouts};
 pub use push::Push;
 pub use wire::*;
 
@@ -141,10 +143,17 @@ pub enum Error {
     Transport(String),
     /// Fastmail answered with a non-success HTTP status.
     Status(u16),
+    /// Fastmail answered HTTP 429, 5xx, or the request-level `limit`
+    /// error with a `Retry-After` header asking for this wait.
+    RetryAfter { status: u16, wait: Duration },
     /// The session does not advertise the mail capability, or names no
     /// primary mail account.
     NoMailCapability,
-    /// A method call returned a JMAP method error.
+    /// Fastmail refused the request as a whole with this JMAP
+    /// request-level error type, such as `limit` or `notJSON`.
+    Request(String),
+    /// A method call returned a JMAP method error. A `SetError` that
+    /// fails a whole update, such as `rateLimit`, is reported as one too.
     Method { method: String, kind: String },
     /// The response did not parse.
     Parse(String),
@@ -152,17 +161,41 @@ pub enum Error {
     InsecureUrl(String),
 }
 
+/// How a failed request is handled: retried, ending blorp, or reported as
+/// a fault on one side or the other that a retry would not fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    /// A network failure, an overloaded or rate-limiting server: retried.
+    Transient,
+    /// Fastmail refuses the token: blorp prints the message and exits 1.
+    Fatal(Fatal),
+    /// Anything else, never retried.
+    Bug,
+}
+
+/// The JMAP method and `SetError` types that are transient.
+const TRANSIENT_KINDS: [&str; 3] = ["serverUnavailable", "serverFail", "rateLimit"];
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Transport(message) => write!(f, "{message}"),
-            Error::Status(status) => write!(f, "Fastmail returned HTTP {status}"),
+            Error::Status(status) | Error::RetryAfter { status, .. }
+                if self.class() == Class::Transient =>
+            {
+                write!(f, "Fastmail returned HTTP {status}")
+            }
+            Error::Status(status) | Error::RetryAfter { status, .. } => {
+                write!(f, "Fastmail error: HTTP {status}")
+            }
             Error::NoMailCapability => write!(
                 f,
                 "the Fastmail session has no mail access; the API token needs the Email scope"
             ),
-            Error::Method { method, kind } => write!(f, "Fastmail error: {kind} from {method}"),
-            Error::Parse(message) => write!(f, "could not read Fastmail's response: {message}"),
+            Error::Request(kind) | Error::Method { kind, .. } => {
+                write!(f, "Fastmail error: {kind}")
+            }
+            Error::Parse(message) => write!(f, "Fastmail error: unreadable response: {message}"),
             Error::InsecureUrl(url) => {
                 write!(
                     f,
@@ -182,6 +215,36 @@ impl Error {
         match self {
             Error::Status(401) => Some(Fatal::TokenRejected),
             Error::Status(403) | Error::NoMailCapability => Some(Fatal::NoEmailScope),
+            _ => None,
+        }
+    }
+
+    /// The class the failure falls into: transient for a request that did
+    /// not complete, HTTP 429 and 5xx, the request-level `limit` error, and
+    /// the `serverUnavailable`, `serverFail`, and `rateLimit` errors; fatal
+    /// as [`Error::fatal`] says; otherwise a bug.
+    pub fn class(&self) -> Class {
+        if let Some(fatal) = self.fatal() {
+            return Class::Fatal(fatal);
+        }
+        let transient = match self {
+            Error::Transport(_) | Error::RetryAfter { .. } => true,
+            Error::Status(status) => *status == 429 || (500..600).contains(status),
+            Error::Request(kind) => kind == "limit",
+            Error::Method { kind, .. } => TRANSIENT_KINDS.contains(&kind.as_str()),
+            _ => false,
+        };
+        if transient {
+            Class::Transient
+        } else {
+            Class::Bug
+        }
+    }
+
+    /// The wait Fastmail asked for before trying again, if it named one.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Error::RetryAfter { wait, .. } => Some(*wait),
             _ => None,
         }
     }
