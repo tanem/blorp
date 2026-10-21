@@ -221,6 +221,9 @@ async fn a_push_stream_refused_for_the_token_ends_the_session_in_dry_run() {
     let jmap = FakeJmap::new(inbox());
     let state = start(&jmap, &[(100, 'D')]).await;
     sleep_ms(500).await;
+    jmap.push(Push::State);
+    sleep_ms(10).await;
+    assert_eq!(reconciles(&jmap), 0, "dry run ignores the push stream");
 
     jmap.refuse_stream_with(Error::Status(401));
     jmap.close_streams();
