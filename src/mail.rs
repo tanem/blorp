@@ -114,6 +114,12 @@ impl Mailboxes {
             .find(|m| m.parent_id.is_none() && m.role.is_none() && m.name == SNOOZE_MAILBOX)
     }
 
+    /// Whether `name` names the snooze mailbox, as [`Mailboxes::resolve`]
+    /// matches names, while it does not exist.
+    pub fn names_missing_snooze(&self, name: &str) -> bool {
+        self.snooze().is_none() && name.to_lowercase() == SNOOZE_MAILBOX.to_lowercase()
+    }
+
     /// The queue mailbox of `in:any`: every mailbox except Trash, Junk,
     /// Drafts, Sent, and the snooze mailbox.
     pub fn all_mail(&self) -> QueueMailbox {

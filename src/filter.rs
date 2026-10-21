@@ -117,9 +117,9 @@ impl Filter {
     /// except Trash, Junk, Drafts, Sent, and the snooze mailbox. Drafts and
     /// Sent cannot be a queue. Before the snooze mailbox exists, `in:` naming
     /// it selects a queue mailbox that holds no email, through a condition
-    /// no email matches, and `-in:` naming it matches every email. The `Email/query` filter is the queue
-    /// mailbox's condition, then one per term in order, joined with `AND`
-    /// when there are several.
+    /// no email matches, and `-in:` naming it matches every email. The
+    /// `Email/query` filter is the queue mailbox's condition, then one per
+    /// term in order, joined with `AND` when there are several.
     pub fn resolve(&self, mailboxes: &Mailboxes) -> Result<Resolved, Error> {
         let mut queue = None;
         let mut conditions = Vec::new();
@@ -128,10 +128,7 @@ impl Filter {
                 Condition::In(name) => {
                     let mailbox = match mailboxes.resolve(name) {
                         Ok(mailbox) => mailbox,
-                        Err(NameError::NoMatch(_))
-                            if mailboxes.snooze().is_none()
-                                && name.to_lowercase() == SNOOZE_MAILBOX.to_lowercase() =>
-                        {
+                        Err(NameError::NoMatch(_)) if mailboxes.names_missing_snooze(name) => {
                             if !term.negated {
                                 queue = Some((QueueMailbox::MissingSnooze, SNOOZE_MAILBOX.into()));
                             }

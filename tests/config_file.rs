@@ -184,3 +184,14 @@ fn save_through_a_symlink_writes_the_file_it_points_to_and_keeps_the_symlink() {
     assert!(fs::symlink_metadata(&path).unwrap().is_symlink());
     assert_eq!(config::load(&target).unwrap(), views);
 }
+
+#[test]
+fn a_view_named_save_or_delete_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(config::FILE_NAME);
+    fs::write(&path, "[[views]]\nname = \"delete\"\nfilter = \"\"\n").unwrap();
+
+    let error = config::load(&path).unwrap_err().to_string();
+
+    assert_eq!(error, "view name \"delete\" is reserved");
+}

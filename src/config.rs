@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 use crate::app::Sort;
 use crate::mail::SNOOZE_MAILBOX;
 
+/// The words after `:view` that stand for its subcommands, and so cannot
+/// be view names.
+pub const RESERVED_VIEW_NAMES: [&str; 2] = ["save", "delete"];
+
 /// The config file's name in [`config_dir`].
 pub const FILE_NAME: &str = "config.toml";
 
@@ -37,9 +41,10 @@ pub fn state_dir(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     Some(base.join("blorp"))
 }
 
-/// A named filter and sort, shown as a tab in the tabline.
+/// A named filter and sort, shown in the tabline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct View {
+    /// The name the tabline shows and `:view` switches by.
     pub name: String,
     /// The filter text, trimmed.
     pub filter: String,
@@ -47,6 +52,7 @@ pub struct View {
     pub sort: Sort,
 }
 
+/// Whether `sort` is the default, which the file leaves out.
 fn is_newest(sort: &Sort) -> bool {
     *sort == Sort::Newest
 }
@@ -82,6 +88,8 @@ pub enum LoadError {
     /// The file is not TOML, or not the shape of a config file. The
     /// message names the line.
     Parse(toml::de::Error),
+    /// A view is named `save` or `delete`; holds the name.
+    Reserved(String),
 }
 
 impl fmt::Display for LoadError {
@@ -89,6 +97,7 @@ impl fmt::Display for LoadError {
         match self {
             LoadError::Io(error) => write!(f, "{error}"),
             LoadError::Parse(error) => write!(f, "{}", error.to_string().trim_end()),
+            LoadError::Reserved(name) => write!(f, "view name \"{name}\" is reserved"),
         }
     }
 }
@@ -96,7 +105,8 @@ impl fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 /// The views in the config file at `path`, or the defaults when there is
-/// no file or it has no `views` key.
+/// no file or it has no `views` key. A view named `save` or `delete` is an
+/// error.
 pub fn load(path: &Path) -> Result<Vec<View>, LoadError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -104,7 +114,14 @@ pub fn load(path: &Path) -> Result<Vec<View>, LoadError> {
         Err(error) => return Err(LoadError::Io(error)),
     };
     let config: Config = toml::from_str(&text).map_err(LoadError::Parse)?;
-    Ok(config.views.unwrap_or_else(default_views))
+    let views = config.views.unwrap_or_else(default_views);
+    if let Some(view) = views
+        .iter()
+        .find(|v| RESERVED_VIEW_NAMES.contains(&v.name.as_str()))
+    {
+        return Err(LoadError::Reserved(view.name.clone()));
+    }
+    Ok(views)
 }
 
 /// The config file holding `views`, every one of them, so that from then

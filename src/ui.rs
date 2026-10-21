@@ -165,10 +165,10 @@ fn snooze_picker(frame: &mut Frame, choices: &SnoozeChoices) {
 }
 
 /// The views, each name between spaces, with the active one reversed and
-/// bold and the others dim. When no view is active, a trailing tab shows
-/// the filter, or the queue's name for the empty filter, reversed and in
-/// italics. The line starts late enough that the active tab fits in
-/// `width`.
+/// bold and the others dim. When no view is active, the filter follows
+/// them, or the queue's name for the empty filter, reversed and in
+/// italics. The line starts late enough that the active view, or that
+/// filter, fits in `width`.
 fn tabline(app: &App, width: u16) -> Line<'static> {
     let active = Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD);
     let current = app.active_view();
@@ -1080,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn the_transient_tab_shows_a_filter_no_view_has_80x24() {
+    fn a_filter_no_view_has_follows_the_views_80x24() {
         let mut h = Harness::loaded(busy_inbox());
         let effects = h.send(Msg::SetFilter("from:ana is:unread".into()));
         h.resolve(effects);
@@ -1095,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn the_transient_tab_120x40() {
+    fn a_filter_no_view_has_follows_the_views_120x40() {
         let mut h = Harness::loaded(busy_inbox());
         let effects = h.send(Msg::SetFilter("in:archive".into()));
         h.resolve(effects);

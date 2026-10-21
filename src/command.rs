@@ -5,7 +5,7 @@ use std::fmt;
 use std::ops::Range;
 
 use crate::app::Sort;
-use crate::config::View;
+use crate::config::{RESERVED_VIEW_NAMES, View};
 use crate::filter::{HAS_VALUES, IS_VALUES, KEYS};
 use crate::mail::{Mailbox, Mailboxes, Role};
 use crate::snooze::{self, When};
@@ -17,9 +17,6 @@ const NAMES: [&str; 27] = [
     "f", "read", "r", "unread", "undo", "u", "redo", "view", "v", "filter", "sort", "refresh",
     "dry", "quit", "q",
 ];
-
-/// The words after `:view` that are not view names.
-const VIEW_WORDS: [&str; 2] = ["save", "delete"];
 
 /// A command typed at the `:` prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +158,7 @@ fn view(rest: &str) -> Result<Command, Error> {
     match word {
         "" => Err(USAGE),
         "save" | "delete" if name.is_empty() => Err(USAGE),
-        "save" if VIEW_WORDS.contains(&name) => Err(Error::ReservedView(name.into())),
+        "save" if RESERVED_VIEW_NAMES.contains(&name) => Err(Error::ReservedView(name.into())),
         "save" => Ok(Command::SaveView(name.into())),
         "delete" => Ok(Command::DeleteView(name.into())),
         _ => Ok(Command::View(rest.into())),
@@ -187,19 +184,21 @@ pub fn complete(
 ) -> (Range<usize>, Vec<String>) {
     let chars: Vec<char> = text.chars().collect();
     let cursor = cursor.min(chars.len());
-    if let Some(start) = argument_start(&chars, cursor)
-        && matches!(text.split_whitespace().next(), Some("view" | "v"))
-    {
-        return view_argument(&chars[start..cursor], start, chars.len(), views);
-    }
-    if let Some(start) = argument_start(&chars, cursor)
-        && matches!(text.split_whitespace().next(), Some("move" | "m"))
-    {
-        let typed: String = chars[start..cursor].iter().collect();
-        let candidates = paths(&typed.to_lowercase(), mailboxes, |m| {
-            mailboxes.is_move_target(m)
-        });
-        return (start..chars.len(), candidates);
+    let name = text.split_whitespace().next().unwrap_or("");
+    if let Some(start) = argument_start(&chars, cursor) {
+        match name {
+            "view" | "v" => {
+                return view_argument(&chars[start..cursor], start, chars.len(), views);
+            }
+            "move" | "m" => {
+                let typed: String = chars[start..cursor].iter().collect();
+                let candidates = paths(&typed.to_lowercase(), mailboxes, |m| {
+                    mailboxes.is_move_target(m)
+                });
+                return (start..chars.len(), candidates);
+            }
+            _ => {}
+        }
     }
     let mut quoted = false;
     let mut start = 0;
@@ -222,7 +221,6 @@ pub fn complete(
         end += 1;
     }
     let typed: String = chars[start..cursor].iter().collect();
-    let name = text.split_whitespace().next().unwrap_or("");
     let candidates = match (words, name) {
         (0, _) => matching(NAMES, "", "", &typed),
         (1, "sort") => matching(["newest", "oldest"], "", "", &typed),
@@ -255,7 +253,7 @@ fn view_argument(
     let word = typed.iter().position(|c| c.is_whitespace());
     if let Some(end) = word {
         let first: String = typed[..end].iter().collect();
-        if VIEW_WORDS.contains(&first.as_str()) {
+        if RESERVED_VIEW_NAMES.contains(&first.as_str()) {
             let name = typed[end..]
                 .iter()
                 .position(|c| !c.is_whitespace())
@@ -264,7 +262,7 @@ fn view_argument(
         }
     }
     let first: String = typed.iter().collect();
-    let mut candidates = matching(VIEW_WORDS, "", "", &first);
+    let mut candidates = matching(RESERVED_VIEW_NAMES, "", "", &first);
     candidates.extend(names(typed));
     (start..len, candidates)
 }

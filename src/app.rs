@@ -1366,11 +1366,19 @@ impl App {
         self.write_views(format!("Saved view \"{name}\""))
     }
 
+    /// The index of the view `name`, or none, saying so.
+    fn view_index(&mut self, name: &str) -> Option<usize> {
+        let index = self.views.iter().position(|v| v.name == name);
+        if index.is_none() {
+            self.status = format!("No view named \"{name}\"");
+        }
+        index
+    }
+
     /// Deletes the view `name`, or says there is none. The queue stays as
     /// it is.
     fn delete_view(&mut self, name: &str) -> Vec<Effect> {
-        let Some(index) = self.views.iter().position(|v| v.name == name) else {
-            self.status = format!("No view named \"{name}\"");
+        let Some(index) = self.view_index(name) else {
             return Vec::new();
         };
         self.views.remove(index);
@@ -3137,12 +3145,9 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::SetSort(sort) => app.set_sort(sort),
         Msg::NextView => app.step_view(true),
         Msg::PreviousView => app.step_view(false),
-        Msg::ShowView(name) => match app.views.iter().position(|v| v.name == name) {
+        Msg::ShowView(name) => match app.view_index(&name) {
             Some(index) => app.switch_view(index),
-            None => {
-                app.status = format!("No view named \"{name}\"");
-                Vec::new()
-            }
+            None => Vec::new(),
         },
         Msg::SaveView(name) => app.save_view(name),
         Msg::DeleteView(name) => app.delete_view(&name),
