@@ -379,6 +379,14 @@ impl Thread {
         &self.emails[self.hit]
     }
 
+    /// The email received last.
+    pub fn newest(&self) -> &Email {
+        self.emails
+            .iter()
+            .max_by_key(|e| e.received_at)
+            .unwrap_or_else(|| self.hit())
+    }
+
     /// True when any email lacks `$seen`.
     pub fn unread(&self) -> bool {
         self.emails.iter().any(|e| !e.seen)
@@ -401,16 +409,11 @@ impl Thread {
 /// opens it under a mailbox that holds none of its emails too. It adds its
 /// own `?u=` parameter, so none is given here.
 pub fn web_url(mailbox: &str, thread: &Thread) -> String {
-    let newest = thread
-        .emails
-        .iter()
-        .max_by_key(|e| e.received_at)
-        .unwrap_or_else(|| thread.hit());
     let mut url = url::Url::parse("https://app.fastmail.com/mail").expect("valid URL");
     url.path_segments_mut()
         .expect("URL with a path")
         .push(mailbox)
-        .push(&format!("{}.{}", thread.id, newest.id));
+        .push(&format!("{}.{}", thread.id, thread.newest().id));
     url.into()
 }
 
