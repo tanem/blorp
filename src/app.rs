@@ -79,6 +79,8 @@ pub struct App {
     schedule_file: Option<PathBuf>,
     /// The `z` picker, while it is open.
     snooze_picker: Option<SnoozePicker>,
+    /// The `m` picker, while it is open.
+    move_picker: Option<MovePicker>,
     /// The snooze mailbox being created, and the snooze waiting for it.
     creating: Option<Creating>,
     /// Whether the due-snooze check waits for the first queue to load.
@@ -117,6 +119,28 @@ pub struct SnoozeChoices {
     pub threads: usize,
 }
 
+/// The open `m` picker: the text typed to filter the mailboxes, the match
+/// Enter chooses, and the count typed before `m`.
+#[derive(Debug, Clone)]
+struct MovePicker {
+    typed: String,
+    index: usize,
+    count: Option<usize>,
+}
+
+/// What the open move picker shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveChoices {
+    /// The text typed to filter the mailboxes.
+    pub typed: String,
+    /// The path of each mailbox the typed text matches, sorted.
+    pub paths: Vec<String>,
+    /// The path Enter chooses, when any matches.
+    pub index: usize,
+    /// How many threads the move applies to.
+    pub threads: usize,
+}
+
 /// The outbox job creating the snooze mailbox, and the threads to snooze
 /// once it exists.
 #[derive(Debug)]
@@ -126,7 +150,7 @@ struct Creating {
     repeat: Repeat,
 }
 
-/// A key at the `z` picker.
+/// A key at the `z` or `m` picker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerKey {
     Down,
@@ -134,6 +158,7 @@ pub enum PickerKey {
     Choose,
     Cancel,
     Char(char),
+    Backspace,
 }
 
 /// What asked for a reconcile. `Refresh` orders after `Auto`, so the
@@ -331,9 +356,15 @@ impl Step {
 }
 
 /// An action on a thread, or the automatic return of a snoozed one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Archive,
+    /// `d` or `:delete`: move to Trash.
+    Delete,
+    /// `!` or `:spam`: move to Junk.
+    Spam,
+    /// `m` or `:move`: move to the mailbox with this id.
+    Move(String),
     /// Snooze until the time given, or in the snooze mailbox, reschedule.
     Snooze(Timestamp),
     /// `:unsnooze`: return snoozed threads now.
@@ -359,9 +390,12 @@ pub enum Action {
 
 impl Action {
     /// The action's name, as in the dry-run log.
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Action::Archive => "archive",
+            Action::Delete => "delete",
+            Action::Spam => "mark spam",
+            Action::Move(_) => "move",
             Action::Snooze(_) => "snooze",
             Action::Unsnooze => "unsnooze",
             Action::ToggleFlag => "toggle flag",
@@ -374,9 +408,12 @@ impl Action {
         }
     }
 
-    fn done(self) -> &'static str {
+    fn done(&self) -> &'static str {
         match self {
             Action::Archive => "Archived",
+            Action::Delete => "Deleted",
+            Action::Spam => "Marked",
+            Action::Move(_) => "Moved",
             Action::Snooze(_) => "Snoozed",
             Action::Unsnooze => "Unsnoozed",
             Action::ToggleFlag | Action::ToggleRead => {
@@ -391,7 +428,7 @@ impl Action {
 }
 
 /// An action and the count it was given: what `.` repeats.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Repeat {
     action: Action,
     count: Option<usize>,
@@ -426,9 +463,18 @@ pub enum Msg {
     Quit,
     /// `e`: archive the selection.
     Archive,
+    /// `d`: delete the selection.
+    Delete,
+    /// `!`: mark the selection spam.
+    Spam,
+    /// `:move` or a move picker choice: move the selection to the mailbox
+    /// with this id.
+    Move(String),
     /// `z`: open the snooze picker for the selection.
     OpenSnooze,
-    /// A key at the open snooze picker.
+    /// `m`: open the move picker for the selection.
+    OpenMove,
+    /// A key at the open snooze or move picker.
     Picker(PickerKey),
     /// `:snooze <time>` or a picker choice: snooze the selection.
     Snooze(When),
@@ -598,6 +644,7 @@ impl App {
             dry_schedule: None,
             schedule_file: None,
             snooze_picker: None,
+            move_picker: None,
             creating: None,
             due_at_launch: false,
             checking: None,
@@ -656,6 +703,36 @@ impl App {
             index: picker.index,
             threads: self.queue.selection(picker.count.unwrap_or(1)).len(),
         })
+    }
+
+    /// The move picker, while it is open.
+    pub fn move_picker(&self) -> Option<MoveChoices> {
+        let picker = self.move_picker.as_ref()?;
+        Some(MoveChoices {
+            typed: picker.typed.clone(),
+            paths: self
+                .move_matches(&picker.typed)
+                .into_iter()
+                .map(|(_, path)| path)
+                .collect(),
+            index: picker.index,
+            threads: self.queue.selection(picker.count.unwrap_or(1)).len(),
+        })
+    }
+
+    /// The id and path of each mailbox a move can go to whose path holds
+    /// `typed`, matched case-insensitively, sorted by path.
+    fn move_matches(&self, typed: &str) -> Vec<(String, String)> {
+        let typed = typed.to_lowercase();
+        let mut matches: Vec<(String, String)> = self
+            .mailboxes
+            .iter()
+            .filter(|m| self.mailboxes.is_move_target(m))
+            .map(|m| (m.id.clone(), self.mailboxes.path(m)))
+            .filter(|(_, path)| path.to_lowercase().contains(&typed))
+            .collect();
+        matches.sort_by(|a, b| a.1.cmp(&b.1));
+        matches
     }
 
     /// How snooze time `at` reads from now.
@@ -883,11 +960,8 @@ impl App {
         (threads, effects)
     }
 
-    /// `thread` as a queue row, standing for itself by its newest email a
-    /// move would take out of the queue mailbox, or its oldest in an
-    /// oldest-first queue, or none when it has no such email.
+    /// `thread` as a queue row, as [`App::row`] picks its email.
     fn extra_thread(&self, thread: &jmap::Thread, emails: &[jmap::Email]) -> Option<Thread> {
-        let from = &self.shown.as_ref()?.mailbox;
         let emails: Vec<Email> = thread
             .email_ids
             .iter()
@@ -895,6 +969,14 @@ impl App {
             .cloned()
             .map(Email::from)
             .collect();
+        self.row(thread.id.clone(), emails)
+    }
+
+    /// The thread `id` of `emails` as a queue row, standing for itself by
+    /// its newest email a move would take out of the queue mailbox, or its
+    /// oldest in an oldest-first queue, or none when it has no such email.
+    fn row(&self, id: String, emails: Vec<Email>) -> Option<Thread> {
+        let from = &self.shown.as_ref()?.mailbox;
         let moved = emails.iter().filter(|e| self.mailboxes.moves(e, from));
         let hit = if self.sort.ascending() {
             moved.min_by_key(|e| e.received_at)
@@ -903,7 +985,7 @@ impl App {
         }?
         .id
         .clone();
-        Thread::new(thread.id.clone(), emails, &hit)
+        Thread::new(id, emails, &hit)
     }
 
     /// Shows an action's message, marked `[dry]` in dry run.
@@ -1186,6 +1268,26 @@ impl App {
     fn run(&mut self, command: Command, count: Option<usize>) -> Vec<Effect> {
         let msg = match command {
             Command::Archive => return self.run_on_selection(Msg::Archive, count),
+            Command::Delete => return self.run_on_selection(Msg::Delete, count),
+            Command::Spam => return self.run_on_selection(Msg::Spam, count),
+            Command::Move(name) => {
+                if self.queue.selection(count.unwrap_or(1)).is_empty() {
+                    self.status = "Nothing selected".into();
+                    return Vec::new();
+                }
+                let to = match self.mailboxes.resolve(&name) {
+                    Ok(mailbox) => mailbox.id.clone(),
+                    Err(_) if name.to_lowercase() == SNOOZE_MAILBOX.to_lowercase() => {
+                        self.status = "Use z to snooze".into();
+                        return Vec::new();
+                    }
+                    Err(error) => {
+                        self.status = error.to_string();
+                        return Vec::new();
+                    }
+                };
+                return self.run_on_selection(Msg::Move(to), count);
+            }
             Command::Snooze(when) => return self.run_on_selection(Msg::Snooze(when), count),
             Command::Unsnooze => return self.run_on_selection(Msg::Unsnooze, count),
             Command::Flag => return self.run_on_selection(Msg::ToggleFlag, count),
@@ -1222,7 +1324,9 @@ impl App {
 
     fn perform(&mut self, repeat: Repeat) -> Vec<Effect> {
         match repeat.action {
-            Action::Archive => self.archive(repeat),
+            Action::Archive | Action::Delete | Action::Spam | Action::Move(_) => {
+                self.move_selection(repeat)
+            }
             Action::Snooze(until) => self.snooze(repeat, until),
             Action::Unsnooze => self.unsnooze(repeat),
             Action::ToggleFlag | Action::ToggleRead | Action::Flag(_) | Action::Read(_) => {
@@ -1241,6 +1345,63 @@ impl App {
         }
         self.status.clear();
         self.snooze_picker = Some(SnoozePicker { index: 0, count });
+    }
+
+    /// Opens the move picker with every mailbox a move can go to, keeping
+    /// the count and the visual range for the move, when there is a
+    /// selection.
+    fn open_move(&mut self) {
+        let count = self.take_count();
+        if self.queue.selection(count.unwrap_or(1)).is_empty() {
+            return;
+        }
+        self.status.clear();
+        self.move_picker = Some(MovePicker {
+            typed: String::new(),
+            index: 0,
+            count,
+        });
+    }
+
+    /// Handles a key at the move picker: a character or Backspace changes
+    /// the text the mailboxes are filtered by, putting Enter on the first
+    /// match, Down and Up move, Enter moves to the mailbox under the
+    /// cursor, and Esc closes the picker and the visual range.
+    fn move_picker_key(&mut self, key: PickerKey) -> Vec<Effect> {
+        let Some(typed) = self.move_picker.as_ref().map(|p| p.typed.clone()) else {
+            return Vec::new();
+        };
+        let matches = self.move_matches(&typed);
+        let Some(picker) = &mut self.move_picker else {
+            return Vec::new();
+        };
+        let n = matches.len();
+        match key {
+            PickerKey::Char(c) => {
+                picker.typed.push(c);
+                picker.index = 0;
+            }
+            PickerKey::Backspace => {
+                picker.typed.pop();
+                picker.index = 0;
+            }
+            PickerKey::Down if n > 0 => picker.index = (picker.index + 1) % n,
+            PickerKey::Up if n > 0 => picker.index = (picker.index + n - 1) % n,
+            PickerKey::Down | PickerKey::Up => {}
+            PickerKey::Cancel => {
+                self.move_picker = None;
+                self.queue.close_visual();
+            }
+            PickerKey::Choose => {
+                let Some((to, _)) = matches.into_iter().nth(picker.index) else {
+                    return Vec::new();
+                };
+                self.pending_count = picker.count;
+                self.move_picker = None;
+                return update(self, Msg::Move(to));
+            }
+        }
+        Vec::new()
     }
 
     /// Handles a key at the snooze picker: `j` and `k` move, Enter snoozes
@@ -1270,6 +1431,7 @@ impl App {
                 Some(preset) => preset,
                 None => return Vec::new(),
             },
+            PickerKey::Backspace => return Vec::new(),
         };
         self.pending_count = picker.count;
         self.snooze_picker = None;
@@ -1387,7 +1549,7 @@ impl App {
             self.report("Nothing to snooze");
             return Vec::new();
         }
-        self.act(repeat, repeat.action, threads, update, entries)
+        self.act(repeat.clone(), repeat.action, threads, update, entries)
     }
 
     /// Sets the return time of the threads at `rows`, in the snooze mailbox
@@ -1426,7 +1588,13 @@ impl App {
             threads.push(thread.clone());
             entries.insert(thread.id.clone(), entry);
         }
-        self.act(repeat, repeat.action, threads, EmailUpdate::new(), entries)
+        self.act(
+            repeat.clone(),
+            repeat.action,
+            threads,
+            EmailUpdate::new(),
+            entries,
+        )
     }
 
     /// Returns the selection from the snooze mailbox now, as a due return
@@ -1456,7 +1624,7 @@ impl App {
             self.report("Nothing to unsnooze");
             return Vec::new();
         }
-        self.act(repeat, repeat.action, threads, update, entries)
+        self.act(repeat.clone(), repeat.action, threads, update, entries)
     }
 
     /// The return of `thread` from the snooze mailbox, whose schedule entry
@@ -1563,10 +1731,11 @@ impl App {
         effects
     }
 
-    /// Archives the selection, with the count's rows from the cursor when
-    /// there is neither a visual range nor a mark: each thread's emails a
-    /// move takes out of the queue mailbox. Closes the visual range.
-    fn archive(&mut self, repeat: Repeat) -> Vec<Effect> {
+    /// Moves the selection, with the count's rows from the cursor when
+    /// there is neither a visual range nor a mark, to the action's mailbox:
+    /// each thread's emails a move takes out of the queue mailbox. Closes
+    /// the visual range.
+    fn move_selection(&mut self, repeat: Repeat) -> Vec<Effect> {
         let rows = self.queue.selection(repeat.count.unwrap_or(1));
         self.queue.close_visual();
         let Some(from) = self.shown.as_ref().map(|s| s.mailbox.clone()) else {
@@ -1575,14 +1744,13 @@ impl App {
         if rows.is_empty() {
             return Vec::new();
         }
-        let Some(archive) = self.mailboxes.by_role(Role::Archive) else {
-            self.report("No Archive mailbox");
-            return Vec::new();
+        let to = match self.move_target(&repeat.action, &from) {
+            Ok(to) => to,
+            Err(message) => {
+                self.report(message);
+                return Vec::new();
+            }
         };
-        if from == QueueMailbox::One(archive.id.clone()) {
-            self.report("Already in Archive");
-            return Vec::new();
-        }
         let mut threads = Vec::new();
         let mut update = EmailUpdate::new();
         for row in rows {
@@ -1594,7 +1762,7 @@ impl App {
                     .iter()
                     .filter(|email| self.mailboxes.moves(email, &from))
                     .filter_map(|email| {
-                        let patch = move_patch(email, &from, &archive.id)?;
+                        let patch = move_patch(email, &from, &to)?;
                         Some((email.id.clone(), patch))
                     }),
             );
@@ -1603,10 +1771,72 @@ impl App {
             }
         }
         if update.is_empty() {
-            self.report("Nothing to archive");
+            self.report(format!("Nothing to {}", repeat.action.name()));
             return Vec::new();
         }
-        self.act(repeat, repeat.action, threads, update, BTreeMap::new())
+        self.act(
+            repeat.clone(),
+            repeat.action,
+            threads,
+            update,
+            BTreeMap::new(),
+        )
+    }
+
+    /// The id of the mailbox move `action` moves to out of the queue
+    /// mailbox `from`, or why it moves nothing. Delete and spam are
+    /// disabled in Trash and Junk.
+    fn move_target(&self, action: &Action, from: &QueueMailbox) -> Result<String, String> {
+        let (role, name) = match action {
+            Action::Archive => (Role::Archive, "Archive"),
+            Action::Delete => (Role::Trash, "Trash"),
+            Action::Spam => (Role::Junk, "Junk"),
+            Action::Move(to) => return self.move_to(to, from),
+            _ => unreachable!("only a move reaches move_target"),
+        };
+        let in_role = |role| {
+            self.mailboxes
+                .by_role(role)
+                .is_some_and(|m| *from == QueueMailbox::One(m.id.clone()))
+        };
+        if matches!(action, Action::Delete | Action::Spam)
+            && (in_role(Role::Trash) || in_role(Role::Junk))
+        {
+            let verb = if *action == Action::Delete {
+                "Delete"
+            } else {
+                "Spam"
+            };
+            return Err(format!("{verb} is disabled in {}", self.queue_name()));
+        }
+        let Some(to) = self.mailboxes.by_role(role) else {
+            return Err(format!("No {name} mailbox"));
+        };
+        if *from == QueueMailbox::One(to.id.clone()) {
+            return Err(format!("Already in {name}"));
+        }
+        Ok(to.id.clone())
+    }
+
+    /// The id `to` as the mailbox a move moves to out of the queue mailbox
+    /// `from`, or why it cannot be. The snooze mailbox is not one, since
+    /// a thread moved there would have no schedule entry, and neither are
+    /// Drafts and Sent, whose emails no action moves out again.
+    fn move_to(&self, to: &str, from: &QueueMailbox) -> Result<String, String> {
+        let Some(mailbox) = self.mailboxes.by_id(to) else {
+            return Err("No mailbox to move to".into());
+        };
+        let path = self.mailboxes.path(mailbox);
+        if !self.mailboxes.is_move_target(mailbox) {
+            return Err(match mailbox.role {
+                Some(Role::Drafts | Role::Sent) => format!("Cannot move to {path}"),
+                _ => "Use z to snooze".into(),
+            });
+        }
+        if *from == QueueMailbox::One(to.into()) {
+            return Err(format!("Already in {path}"));
+        }
+        Ok(to.into())
     }
 
     /// Flags or unflags, or marks read or unread, every email of the
@@ -1620,10 +1850,10 @@ impl App {
             return Vec::new();
         }
         let selected = || rows.iter().map(|&row| &self.queue.threads()[row]);
-        let action = match repeat.action {
+        let action = match &repeat.action {
             Action::ToggleFlag => Action::Flag(!selected().any(Thread::flagged)),
             Action::ToggleRead => Action::Read(selected().any(Thread::unread)),
-            action => action,
+            action => action.clone(),
         };
         let (keyword, on, has): (&str, bool, fn(&Email) -> bool) = match action {
             Action::Flag(on) => ("$flagged", on, |email| email.flagged),
@@ -1693,12 +1923,17 @@ impl App {
         let changes = changes(&touched, &update);
         let entry = self
             .history
-            .record(action, touched, changes, schedule)
+            .record(action.clone(), touched, changes, schedule)
             .clone();
-        let suffix = match action {
-            Action::Snooze(until) => format!(" until {}", self.describe(until)),
+        let suffix = match &action {
+            Action::Snooze(until) => format!(" until {}", self.describe(*until)),
             Action::Read(true) => " read".into(),
             Action::Read(false) => " unread".into(),
+            Action::Spam => " as spam".into(),
+            Action::Move(to) => match self.mailboxes.by_id(to) {
+                Some(mailbox) => format!(" to {}", self.mailboxes.path(mailbox)),
+                None => String::new(),
+            },
             _ => String::new(),
         };
         self.report(format!(
@@ -1786,7 +2021,7 @@ impl App {
             let name = entry.action.name();
             match done.iter_mut().find(|(action, _)| action.name() == name) {
                 Some((_, n)) => *n += entry.threads.len(),
-                None => done.push((entry.action, entry.threads.len())),
+                None => done.push((entry.action.clone(), entry.threads.len())),
             }
             if self.dry_run {
                 effects.push(log_dry_run(step, &entry));
@@ -1866,6 +2101,11 @@ impl App {
                 }
                 Some(i) => self.queue.set(i, thread),
                 None if is && !was => {
+                    // The email that matched where the action ran may not
+                    // be in this queue's mailbox.
+                    let thread = self
+                        .row(thread.id.clone(), thread.emails.clone())
+                        .unwrap_or(thread);
                     // `self.schedule()` would borrow the queue too.
                     let schedule = self.dry_schedule.as_ref().unwrap_or(&self.schedule);
                     self.queue
@@ -2295,7 +2535,7 @@ fn changes(threads: &[Thread], update: &EmailUpdate) -> Vec<Change> {
 fn log_dry_run(step: Step, entry: &Entry) -> Effect {
     Effect::LogDryRun {
         step,
-        action: entry.action,
+        action: entry.action.clone(),
         thread_ids: entry.threads.iter().map(|t| t.id.clone()).collect(),
     }
 }
@@ -2399,10 +2639,36 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
                 count,
             })
         }
+        Msg::Delete => {
+            let count = app.take_count();
+            app.perform(Repeat {
+                action: Action::Delete,
+                count,
+            })
+        }
+        Msg::Spam => {
+            let count = app.take_count();
+            app.perform(Repeat {
+                action: Action::Spam,
+                count,
+            })
+        }
+        Msg::Move(to) => {
+            let count = app.take_count();
+            app.perform(Repeat {
+                action: Action::Move(to),
+                count,
+            })
+        }
         Msg::OpenSnooze => {
             app.open_snooze();
             Vec::new()
         }
+        Msg::OpenMove => {
+            app.open_move();
+            Vec::new()
+        }
+        Msg::Picker(key) if app.move_picker.is_some() => app.move_picker_key(key),
         Msg::Picker(key) => app.picker_key(key),
         Msg::Snooze(when) => {
             let count = app.take_count();
@@ -2450,7 +2716,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::ScheduleFailed { job, error } => app.schedule_failed(job, &error),
         Msg::Repeat => {
             let count = app.take_count();
-            match app.last_action {
+            match app.last_action.clone() {
                 Some(last) => app.perform(Repeat {
                     count: count.or(last.count),
                     ..last

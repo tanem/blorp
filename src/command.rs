@@ -6,14 +6,15 @@ use std::ops::Range;
 
 use crate::app::Sort;
 use crate::filter::{HAS_VALUES, IS_VALUES, KEYS};
-use crate::mail::{Mailboxes, Role};
+use crate::mail::{Mailbox, Mailboxes, Role};
 use crate::snooze::{self, When};
 
 /// Each command name followed by its aliases, in the order Tab offers
 /// them.
-const NAMES: [&str; 20] = [
-    "archive", "e", "snooze", "z", "unsnooze", "uz", "flag", "f", "read", "r", "unread", "undo",
-    "u", "redo", "filter", "sort", "refresh", "dry", "quit", "q",
+const NAMES: [&str; 25] = [
+    "archive", "e", "delete", "d", "spam", "move", "m", "snooze", "z", "unsnooze", "uz", "flag",
+    "f", "read", "r", "unread", "undo", "u", "redo", "filter", "sort", "refresh", "dry", "quit",
+    "q",
 ];
 
 /// A command typed at the `:` prompt.
@@ -21,6 +22,13 @@ const NAMES: [&str; 20] = [
 pub enum Command {
     /// `:archive`, `:e`.
     Archive,
+    /// `:delete`, `:d`.
+    Delete,
+    /// `:spam`.
+    Spam,
+    /// `:move <mailbox>`, `:m <mailbox>`: the mailbox name as written, the
+    /// rest of the line.
+    Move(String),
     /// `:snooze <time>`, `:z <time>`.
     Snooze(When),
     /// `:unsnooze`, `:uz`: return the selection from the snooze mailbox now.
@@ -87,6 +95,12 @@ pub fn parse(text: &str) -> Result<Option<Command>, Error> {
     let command = match name {
         "" => return Ok(None),
         "archive" | "e" => bare(Command::Archive, ":archive")?,
+        "delete" | "d" => bare(Command::Delete, ":delete")?,
+        "spam" => bare(Command::Spam, ":spam")?,
+        "move" | "m" => match rest {
+            "" => return Err(Error::Usage(":move <mailbox>")),
+            name => Command::Move(name.into()),
+        },
         "snooze" | "z" => match rest {
             "" => return Err(Error::Usage(":snooze <time>")),
             time => {
@@ -135,6 +149,15 @@ pub fn parse(text: &str) -> Result<Option<Command>, Error> {
 pub fn complete(text: &str, cursor: usize, mailboxes: &Mailboxes) -> (Range<usize>, Vec<String>) {
     let chars: Vec<char> = text.chars().collect();
     let cursor = cursor.min(chars.len());
+    if let Some(start) = argument_start(&chars, cursor)
+        && matches!(text.split_whitespace().next(), Some("move" | "m"))
+    {
+        let typed: String = chars[start..cursor].iter().collect();
+        let candidates = paths(&typed.to_lowercase(), mailboxes, |m| {
+            mailboxes.is_move_target(m)
+        });
+        return (start..chars.len(), candidates);
+    }
     let mut quoted = false;
     let mut start = 0;
     let mut words = 0;
@@ -221,11 +244,28 @@ fn mailbox_paths(typed: &str, negated: bool, mailboxes: &Mailboxes) -> Vec<Strin
         Some(rest) => (true, rest.trim_end_matches('"')),
         None => (false, typed),
     };
-    let typed = typed.to_lowercase();
-    let (parent, segment) = split_path(&typed);
+    paths(&typed.to_lowercase(), mailboxes, |m| {
+        negated || !matches!(m.role, Some(Role::Drafts | Role::Sent))
+    })
+    .into_iter()
+    .map(|path| {
+        if quote || path.contains(char::is_whitespace) {
+            format!("\"{path}\"")
+        } else {
+            path
+        }
+    })
+    .collect()
+}
+
+/// The paths of the mailboxes that `keep` keeps under the parent path
+/// `typed` names whose last segment starts with its last segment, sorted.
+/// `typed` is lowercase, and paths match it case-insensitively.
+fn paths(typed: &str, mailboxes: &Mailboxes, keep: impl Fn(&Mailbox) -> bool) -> Vec<String> {
+    let (parent, segment) = split_path(typed);
     let mut paths: Vec<String> = mailboxes
         .iter()
-        .filter(|m| negated || !matches!(m.role, Some(Role::Drafts | Role::Sent)))
+        .filter(|m| keep(m))
         .map(|m| mailboxes.path(m))
         .filter(|path| {
             let lower = path.to_lowercase();
@@ -235,15 +275,25 @@ fn mailbox_paths(typed: &str, negated: bool, mailboxes: &Mailboxes) -> Vec<Strin
         .collect();
     paths.sort();
     paths
-        .into_iter()
-        .map(|path| {
-            if quote || path.contains(char::is_whitespace) {
-                format!("\"{path}\"")
-            } else {
-                path
-            }
-        })
-        .collect()
+}
+
+/// Where the argument starts in `chars`, a command line, when `cursor` is
+/// past the command name: at its first character after the name, or at
+/// `cursor` when only spaces come between them.
+fn argument_start(chars: &[char], cursor: usize) -> Option<usize> {
+    let name_start = chars.iter().position(|c| !c.is_whitespace())?;
+    let name_end = chars[name_start..]
+        .iter()
+        .position(|c| c.is_whitespace())
+        .map(|i| name_start + i)?;
+    if cursor <= name_end {
+        return None;
+    }
+    let start = chars[name_end..]
+        .iter()
+        .position(|c| !c.is_whitespace())
+        .map_or(chars.len(), |i| name_end + i);
+    Some(start.min(cursor))
 }
 
 /// A mailbox path's parent path, if it has one, and its last segment.

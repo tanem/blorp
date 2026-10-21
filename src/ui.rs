@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Mode, Msg, PickerKey, SnoozeChoices};
+use crate::app::{App, Mode, MoveChoices, Msg, PickerKey, SnoozeChoices};
 use crate::mail::Thread;
 use crate::prompt::Key;
 
@@ -56,9 +56,68 @@ pub fn view(app: &App, frame: &mut Frame) {
     if let Some(choices) = app.snooze_picker() {
         snooze_picker(frame, &choices);
     }
+    if let Some(choices) = app.move_picker() {
+        move_picker(frame, &choices);
+    }
 }
 
 const PICKER_WIDTH: u16 = 42;
+
+/// The most mailboxes the move picker lists at once.
+const MOVE_PICKER_ROWS: usize = 10;
+
+/// The move picker, centred over the queue: the text typed, then the
+/// mailboxes it matches, scrolled to keep the one Enter chooses in view and
+/// reversed.
+fn move_picker(frame: &mut Frame, choices: &MoveChoices) {
+    let first = (choices.index + 1).saturating_sub(MOVE_PICKER_ROWS);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            " > ",
+            Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(choices.typed.clone()),
+    ])];
+    if choices.paths.is_empty() {
+        lines.push(Line::styled(
+            "   No mailbox matches",
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    let width = usize::from(PICKER_WIDTH) - 2;
+    lines.extend(
+        choices
+            .paths
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(MOVE_PICKER_ROWS)
+            .map(|(i, path)| {
+                let line = Line::raw(fit(&format!("   {path}"), width));
+                if i == choices.index {
+                    line.style(Style::new().add_modifier(Modifier::REVERSED))
+                } else {
+                    line
+                }
+            }),
+    );
+    let title = match choices.threads {
+        1 => " Move to ".to_string(),
+        n => format!(" Move {n} threads to "),
+    };
+    let height = u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2;
+    let [area] = Layout::horizontal([Constraint::Length(PICKER_WIDTH)])
+        .flex(Flex::Center)
+        .areas(frame.area());
+    let [area] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(title)),
+        area,
+    );
+}
 
 /// The snooze picker, centred over the queue: each preset's letter, label,
 /// and time, with the one Enter chooses reversed.
@@ -385,6 +444,9 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
     if app.snooze_picker().is_some() {
         return picker_key(key);
     }
+    if app.move_picker().is_some() {
+        return move_picker_key(key);
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') => Some(Msg::Quit),
@@ -399,7 +461,10 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('G') => Some(Msg::Bottom),
         KeyCode::Char('q') => Some(Msg::Quit),
         KeyCode::Char('e') => Some(Msg::Archive),
+        KeyCode::Char('d') => Some(Msg::Delete),
+        KeyCode::Char('!') => Some(Msg::Spam),
         KeyCode::Char('z') => Some(Msg::OpenSnooze),
+        KeyCode::Char('m') => Some(Msg::OpenMove),
         KeyCode::Char('f') => Some(Msg::ToggleFlag),
         KeyCode::Char('r') => Some(Msg::ToggleRead),
         KeyCode::Char('u') => Some(Msg::Undo),
@@ -432,6 +497,32 @@ fn picker_key(key: KeyEvent) -> Option<Msg> {
         KeyCode::Esc => PickerKey::Cancel,
         KeyCode::Char(c) => PickerKey::Char(c),
         _ => return None,
+    };
+    Some(Msg::Picker(key))
+}
+
+/// The message a key press at the move picker stands for: Ctrl-n, Ctrl-p,
+/// and the arrows move, Enter chooses, Esc cancels, and characters and
+/// Backspace edit the text the mailboxes are filtered by, with Ctrl-c
+/// still quitting.
+fn move_picker_key(key: KeyEvent) -> Option<Msg> {
+    let key = if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => return Some(Msg::Quit),
+            KeyCode::Char('n') => PickerKey::Down,
+            KeyCode::Char('p') => PickerKey::Up,
+            _ => return None,
+        }
+    } else {
+        match key.code {
+            KeyCode::Down => PickerKey::Down,
+            KeyCode::Up => PickerKey::Up,
+            KeyCode::Enter => PickerKey::Choose,
+            KeyCode::Esc => PickerKey::Cancel,
+            KeyCode::Backspace => PickerKey::Backspace,
+            KeyCode::Char(c) => PickerKey::Char(c),
+            _ => return None,
+        }
     };
     Some(Msg::Picker(key))
 }
@@ -491,6 +582,11 @@ mod tests {
 
     /// Ages against the harness's 2026-10-18T12:00:00Z.
     fn busy_inbox() -> Store {
+        busy_inbox_builder().build()
+    }
+
+    /// The store [`busy_inbox`] builds, to add to.
+    fn busy_inbox_builder() -> crate::jmap::fake::StoreBuilder {
         Store::builder()
             .role_mailbox("mb-inbox", "Inbox", "inbox")
             .role_mailbox("mb-archive", "Archive", "archive")
@@ -544,7 +640,6 @@ mod tests {
                     .from("Old Friend", "old@example.invalid")
                     .subject("Catching up"),
             )
-            .build()
     }
 
     #[test]
@@ -792,6 +887,72 @@ mod tests {
         let screen = render(&h, 120, 40);
         assert!(screen.contains(" Snooze 3 threads "), "{screen}");
         insta::assert_snapshot!(screen);
+    }
+
+    /// [`busy_inbox`] with more mailboxes to move to than the move picker
+    /// lists at once, Drafts and Sent among them.
+    fn many_mailboxes() -> Store {
+        let mut store = busy_inbox_builder()
+            .role_mailbox("mb-drafts", "Drafts", "drafts")
+            .role_mailbox("mb-sent", "Sent", "sent")
+            .role_mailbox("mb-trash", "Trash", "trash");
+        for name in [
+            "Travel",
+            "Work",
+            "Receipts",
+            "Family",
+            "Newsletters",
+            "Old Stuff",
+        ] {
+            store = store.mailbox(&format!("mb-{name}"), name);
+        }
+        store
+            .child_mailbox("mb-work-reports", "Reports", "mb-Work")
+            .child_mailbox("mb-work-plans", "Plans", "mb-Work")
+            .build()
+    }
+
+    #[test]
+    fn move_picker_80x24() {
+        let mut h = Harness::loaded(many_mailboxes());
+        h.keys("jm");
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains(" Move to "), "{screen}");
+        assert!(!screen.contains("Drafts"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn move_picker_filtered_on_a_selection_120x40() {
+        let mut h = Harness::loaded(many_mailboxes());
+        h.keys("Vjmor");
+        h.ctrl('n');
+
+        let screen = render(&h, 120, 40);
+        assert!(screen.contains(" Move 2 threads to "), "{screen}");
+        assert!(screen.contains(" > or"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn move_picker_scrolls_to_the_chosen_mailbox() {
+        let mut h = Harness::loaded(many_mailboxes());
+        h.keys("m");
+        h.ctrl('p');
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains("Work/Reports"), "{screen}");
+        assert!(!screen.contains("   Archive"), "{screen}");
+    }
+
+    #[test]
+    fn move_picker_with_no_match() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("mzz");
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains("No mailbox matches"), "{screen}");
     }
 
     #[test]
