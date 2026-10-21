@@ -115,9 +115,14 @@ impl Mailboxes {
     }
 
     /// Whether `name` names the snooze mailbox, as [`Mailboxes::resolve`]
-    /// matches names, while it does not exist.
+    /// matches names, whether or not it exists.
+    pub fn is_snooze_name(name: &str) -> bool {
+        name.to_lowercase() == SNOOZE_MAILBOX.to_lowercase()
+    }
+
+    /// Whether `name` names the snooze mailbox while it does not exist.
     pub fn names_missing_snooze(&self, name: &str) -> bool {
-        self.snooze().is_none() && name.to_lowercase() == SNOOZE_MAILBOX.to_lowercase()
+        self.snooze().is_none() && Mailboxes::is_snooze_name(name)
     }
 
     /// The queue mailbox of `in:any`: every mailbox except Trash, Junk,

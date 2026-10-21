@@ -187,11 +187,16 @@ fn save_through_a_symlink_writes_the_file_it_points_to_and_keeps_the_symlink() {
 
 #[test]
 fn a_view_named_save_or_delete_is_an_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(config::FILE_NAME);
-    fs::write(&path, "[[views]]\nname = \"delete\"\nfilter = \"\"\n").unwrap();
+    for name in ["save", "delete"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(config::FILE_NAME);
+        let text = format!(
+            "[[views]]\nname = \"Inbox\"\nfilter = \"\"\n\n[[views]]\nname = \"{name}\"\nfilter = \"\"\n"
+        );
+        fs::write(&path, text).unwrap();
 
-    let error = config::load(&path).unwrap_err().to_string();
+        let error = config::load(&path).unwrap_err().to_string();
 
-    assert_eq!(error, "view name \"delete\" is reserved");
+        assert_eq!(error, format!("view name \"{name}\" is reserved"));
+    }
 }

@@ -132,8 +132,9 @@ fn logout() -> Result<(), Failure> {
 
 /// Everything up to `Mailbox/get` runs on the plain terminal, the config
 /// file first and then setup when no token is found; only then does the
-/// TUI take over. A config file that does not parse stops the launch. The
-/// session fetch and `Mailbox/get` are retried on the usual schedule.
+/// TUI take over. A config file that does not parse, or that names a view
+/// `save` or `delete`, stops the launch. The session fetch and
+/// `Mailbox/get` are retried on the usual schedule.
 fn tui(dry_run: bool) -> Result<(), Failure> {
     let config_file =
         config::config_dir(|name| env::var_os(name)).map(|dir| dir.join(config::FILE_NAME));

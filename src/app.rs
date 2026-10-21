@@ -1629,7 +1629,7 @@ impl App {
                 }
                 let to = match self.mailboxes.resolve(&name) {
                     Ok(mailbox) => mailbox.id.clone(),
-                    Err(_) if name.to_lowercase() == SNOOZE_MAILBOX.to_lowercase() => {
+                    Err(_) if Mailboxes::is_snooze_name(&name) => {
                         self.status = "Use z to snooze".into();
                         return Vec::new();
                     }
