@@ -1115,8 +1115,6 @@ impl App {
                 self.status = "Reconnected".into();
             }
             Err(error) if error.class() == Class::Transient => {
-                // The probes take over from a reconcile waiting to run.
-                self.pending_reconcile = None;
                 if self.connected {
                     self.connected = false;
                     self.probe_wait = PROBE_START;
@@ -2382,11 +2380,11 @@ impl App {
     }
 
     /// Handles outbox job `job` failing despite its retries, which has
-    /// disconnected blorp and the outbox holds back
-    /// the jobs behind it, which are dropped: every job in the outbox is
-    /// rolled back, newest first, and its entry dropped, and a snooze
-    /// waiting for the snooze mailbox is abandoned. No reconcile is issued;
-    /// the probe that reconnects is one.
+    /// disconnected blorp. The outbox holds back the jobs behind it, and
+    /// they are dropped: every job in the outbox is rolled back, newest
+    /// first, and its entry dropped, and a snooze waiting for the snooze
+    /// mailbox is abandoned. No reconcile is issued; the next probe is
+    /// one.
     fn lost(&mut self, job: u64) -> Vec<Effect> {
         let mut effects = vec![Effect::DropJobs { through: self.job }];
         self.retrying
@@ -2731,7 +2729,8 @@ impl App {
     /// mailbox's query for the due-snooze check, to bring the queue, the
     /// mailbox list, and the snoozed threads back in line with Fastmail.
     /// While a query is in flight or the outbox is busy it waits, and runs
-    /// once both are done. In dry run only `R` runs one, and a probe while
+    /// once both are done, and a reconcile that runs takes the place of
+    /// one waiting. In dry run only `R` runs one, and a probe while
     /// disconnected.
     fn reconcile(&mut self, trigger: Trigger) -> Vec<Effect> {
         if self.dry_run && trigger == Trigger::Auto && self.connected {
@@ -2744,6 +2743,10 @@ impl App {
             self.pending_reconcile = self.pending_reconcile.max(Some(trigger));
             return Vec::new();
         }
+        let trigger = self
+            .pending_reconcile
+            .take()
+            .map_or(trigger, |t| t.max(trigger));
         self.next_generation();
         self.loading = trigger == Trigger::Refresh;
         self.reconciling = Some(Reconciling {
@@ -2769,8 +2772,10 @@ impl App {
     }
 
     /// Runs the reconcile that was waiting, once nothing holds it back.
+    /// While disconnected it waits for the next probe instead, which runs
+    /// as it.
     fn run_pending_reconcile(&mut self) -> Vec<Effect> {
-        if self.busy() {
+        if self.busy() || !self.connected {
             return Vec::new();
         }
         match self.pending_reconcile.take() {
@@ -3180,7 +3185,7 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
                     app.query_failed(&error);
                 }
             }
-            // While disconnected, the probe that reconnects runs the check.
+            // While disconnected, the check is left to the next reconcile.
             if std::mem::take(&mut app.due_at_launch) && app.connected {
                 effects.extend(app.check_due());
             }

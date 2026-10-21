@@ -495,7 +495,9 @@ fn a_retry_reported_after_its_query_was_superseded_is_ignored() {
 
 #[test]
 fn a_launch_query_that_fails_for_good_leaves_the_snooze_check_to_the_probe() {
-    let mut h = Harness::new(store());
+    let mut store = store();
+    store.add_mailbox("mb-snoozed", "Snoozed (blorp)");
+    let mut h = Harness::new(store);
     h.start();
 
     let effects = h.send(Msg::Loaded {
@@ -539,4 +541,49 @@ fn a_failure_of_a_superseded_query_is_ignored() {
     });
 
     assert!(h.app.connected());
+}
+
+#[test]
+fn a_reconcile_waiting_for_the_outbox_runs_once_an_action_reconnects() {
+    let mut h = Harness::loaded(store());
+    let archive = h.keys("e");
+    assert_eq!(h.send(Msg::Wake), [], "the push event waits for the outbox");
+    let generation = match h.send(Msg::SetFilter("in:archive".into()))[..] {
+        [Effect::Query { generation, .. }] => generation,
+        ref other => panic!("{other:?}"),
+    };
+    h.send(Msg::Loaded {
+        generation,
+        result: Err(unreachable()),
+    });
+    assert!(!h.app.connected());
+
+    let effects = h.resolve(archive);
+
+    assert!(
+        matches!(effects[..], [Effect::Reconcile { .. }]),
+        "{effects:?}"
+    );
+    assert!(h.app.connected());
+}
+
+#[test]
+fn a_reconcile_waiting_while_disconnected_runs_as_the_next_probe() {
+    let mut h = disconnected();
+    h.app.now = h.app.next_reconcile_at();
+    let generation = reconcile_generation(&h.send(Msg::ReconcileTick));
+    h.keys("R");
+    h.send(Msg::Reconciled {
+        generation,
+        result: Err(unreachable()),
+    });
+    h.app.now = h.app.next_reconcile_at();
+
+    let effects = h.send(Msg::ReconcileTick);
+    assert!(
+        matches!(effects[..], [Effect::Reconcile { .. }]),
+        "{effects:?}"
+    );
+    assert!(h.app.loading(), "it runs as the R that waited");
+    assert_eq!(h.resolve(effects), [], "and nothing waits behind it");
 }
