@@ -295,35 +295,19 @@ impl Drop for IgnoreSigint {
 
 /// Runs `read` with a console control handler that takes Ctrl-C. rpassword
 /// leaves Ctrl-C to the console, whose default handler ends the process
-/// before rpassword restores echo. Handled here, Ctrl-C cancels the
-/// console read on this thread, which fails with ERROR_OPERATION_ABORTED;
-/// rpassword then restores the console mode, and the read fails as
-/// [`io::ErrorKind::Interrupted`]. The console mode is also restored here,
-/// in case the cancel lands on rpassword's own restore.
+/// before rpassword restores echo. Handled here, Ctrl-C adds an Enter key
+/// to the console input, which ends the read whether or not it has
+/// started; rpassword restores the console mode as it returns, and the
+/// flag the handler set turns the result into
+/// [`io::ErrorKind::Interrupted`].
 #[cfg(windows)]
 fn catching_ctrl_c(read: impl FnOnce() -> io::Result<String>) -> io::Result<String> {
     use std::sync::atomic::Ordering;
 
-    use std::os::windows::io::AsRawHandle;
-
-    use windows_sys::Win32::Foundation::{ERROR_OPERATION_ABORTED, HANDLE};
-    use windows_sys::Win32::System::Console::{GetConsoleMode, SetConsoleMode};
-
-    let input = io::stdin().as_raw_handle() as HANDLE;
-    let mut mode = 0;
-    // SAFETY: `input` is the console input handle, since stdin is a
-    // terminal, and `mode` is a valid pointer.
-    let saved = unsafe { GetConsoleMode(input, &mut mode) } != 0;
     let handler = CtrlCHandler::new()?;
     let result = read();
-    let aborted = matches!(&result, Err(error)
-        if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32));
     drop(handler);
-    if saved {
-        // SAFETY: puts back the mode read above.
-        unsafe { SetConsoleMode(input, mode) };
-    }
-    if aborted || CTRL_C.load(Ordering::SeqCst) {
+    if CTRL_C.load(Ordering::SeqCst) {
         return Err(io::ErrorKind::Interrupted.into());
     }
     result
@@ -333,32 +317,64 @@ fn catching_ctrl_c(read: impl FnOnce() -> io::Result<String>) -> io::Result<Stri
 #[cfg(windows)]
 static CTRL_C: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The thread that reads the prompt, whose read [`on_ctrl_c`] cancels.
-#[cfg(windows)]
-static READER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Runs on a thread the console starts for the event.
+/// Runs on a thread the console starts for the event. If the read has
+/// already ended, the Enter stays in the console input, and the shell reads
+/// it as an empty line once blorp exits.
 #[cfg(windows)]
 unsafe extern "system" fn on_ctrl_c(event: u32) -> windows_sys::core::BOOL {
     use std::sync::atomic::Ordering;
 
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Console::CTRL_C_EVENT;
-    use windows_sys::Win32::System::IO::CancelSynchronousIo;
-    use windows_sys::Win32::System::Threading::{OpenThread, THREAD_TERMINATE};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        CTRL_C_EVENT, INPUT_RECORD, INPUT_RECORD_0, KEY_EVENT, KEY_EVENT_RECORD,
+        KEY_EVENT_RECORD_0, WriteConsoleInputW,
+    };
+
+    /// The virtual-key code of Enter.
+    const VK_RETURN: u16 = 0x0D;
 
     if event != CTRL_C_EVENT {
         return 0;
     }
     CTRL_C.store(true, Ordering::SeqCst);
-    // SAFETY: the thread handle is checked and closed. The cancel applies
-    // to whatever synchronous I/O the thread has in progress, which is the
-    // prompt's read unless the read has just ended.
+    let enter = |down| INPUT_RECORD {
+        EventType: KEY_EVENT as u16,
+        Event: INPUT_RECORD_0 {
+            KeyEvent: KEY_EVENT_RECORD {
+                bKeyDown: down,
+                wRepeatCount: 1,
+                wVirtualKeyCode: VK_RETURN,
+                wVirtualScanCode: 0,
+                uChar: KEY_EVENT_RECORD_0 {
+                    UnicodeChar: u16::from(b'\r'),
+                },
+                dwControlKeyState: 0,
+            },
+        },
+    };
+    let keys = [enter(1), enter(0)];
+    let name: Vec<u16> = "CONIN$".encode_utf16().chain([0]).collect();
+    // SAFETY: `name` is NUL-terminated, the handle is checked and closed,
+    // and `keys` holds two initialised records.
     unsafe {
-        let thread = OpenThread(THREAD_TERMINATE, 0, READER.load(Ordering::SeqCst));
-        if !thread.is_null() {
-            CancelSynchronousIo(thread);
-            CloseHandle(thread);
+        let input = CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if input != INVALID_HANDLE_VALUE {
+            let mut written = 0;
+            WriteConsoleInputW(input, keys.as_ptr(), keys.len() as u32, &mut written);
+            CloseHandle(input);
         }
     }
     1
@@ -371,15 +387,10 @@ struct CtrlCHandler;
 #[cfg(windows)]
 impl CtrlCHandler {
     fn new() -> io::Result<CtrlCHandler> {
-        use std::sync::atomic::Ordering;
-
         use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
-        use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
-        CTRL_C.store(false, Ordering::SeqCst);
-        // SAFETY: GetCurrentThreadId has no preconditions.
-        READER.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
-        // SAFETY: `on_ctrl_c` touches only atomics and a thread handle it
+        CTRL_C.store(false, std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: `on_ctrl_c` touches only an atomic and a console handle it
         // opens and closes.
         if unsafe { SetConsoleCtrlHandler(Some(on_ctrl_c), 1) } == 0 {
             return Err(io::Error::last_os_error());
