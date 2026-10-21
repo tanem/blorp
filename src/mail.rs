@@ -52,6 +52,8 @@ pub enum QueueMailbox {
     One(String),
     /// Every mailbox except these ids, in the order the server listed them.
     Any(Vec<String>),
+    /// The snooze mailbox before blorp creates it, which holds no email.
+    MissingSnooze,
 }
 
 impl QueueMailbox {
@@ -60,6 +62,7 @@ impl QueueMailbox {
         match self {
             QueueMailbox::One(one) => one == id,
             QueueMailbox::Any(excluded) => !excluded.iter().any(|e| e == id),
+            QueueMailbox::MissingSnooze => false,
         }
     }
 }
@@ -109,6 +112,17 @@ impl Mailboxes {
         self.0
             .iter()
             .find(|m| m.parent_id.is_none() && m.role.is_none() && m.name == SNOOZE_MAILBOX)
+    }
+
+    /// Whether `name` names the snooze mailbox, as [`Mailboxes::resolve`]
+    /// matches names, whether or not it exists.
+    pub fn is_snooze_name(name: &str) -> bool {
+        name.to_lowercase() == SNOOZE_MAILBOX.to_lowercase()
+    }
+
+    /// Whether `name` names the snooze mailbox while it does not exist.
+    pub fn names_missing_snooze(&self, name: &str) -> bool {
+        self.snooze().is_none() && Mailboxes::is_snooze_name(name)
     }
 
     /// The queue mailbox of `in:any`: every mailbox except Trash, Junk,

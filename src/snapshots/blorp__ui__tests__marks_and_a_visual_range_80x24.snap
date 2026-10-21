@@ -2,12 +2,12 @@
 source: src/ui.rs
 expression: "render(&h, 80, 24)"
 ---
+" Inbox  Unread  Flagged  Snoozed                                                "
 "  3▌●  Ana Lopez            Lunch on Friday?                                  2m"
 "  2    Ravi Shah            Re: Trip to Wellington                        3   5h"
 "  1▌ ⚑ billing@shop.exampl… Your order 48213 has shipped and will arri…       3d"
 "  4▌●⚑ Maximiliana Feather… (no subject)                                      4w"
 "  1    Old Friend           Catching up                                       1y"
-"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "

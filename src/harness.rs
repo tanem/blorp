@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jiff::Timestamp;
 
 use crate::app::{App, Effect, Msg, update};
+use crate::config::{self, View};
 use crate::jmap::fake::Store;
 use crate::jmap::{EmailQuery, Error, Reconciled};
 use crate::mail::Mailboxes;
@@ -33,6 +34,10 @@ pub const NOW: &str = "2026-10-18T12:00:00Z";
 /// there: the harness leaves writes as effects.
 pub const SCHEDULE_FILE: &str = "/harness/state/blorp/snooze.json";
 
+/// Where the harness's app writes the config file. Nothing is written
+/// there: the harness leaves writes as effects.
+pub const CONFIG_FILE: &str = "/harness/config/blorp/config.toml";
+
 pub struct Harness {
     pub app: App,
     store: Store,
@@ -48,6 +53,7 @@ impl Harness {
         let now: Timestamp = NOW.parse().expect("valid timestamp");
         let app = App::new(Mailboxes::from(store.mailboxes()), now)
             .with_schedule(SCHEDULE_FILE.into(), schedule)
+            .with_views(CONFIG_FILE.into(), config::default_views())
             .with_dry_run(dry_run);
         Harness { app, store }
     }
@@ -61,6 +67,16 @@ impl Harness {
     /// An app over `store` with its initial queue loaded.
     pub fn loaded(store: Store) -> Self {
         let mut harness = Harness::new(store);
+        let effects = harness.start();
+        harness.resolve(effects);
+        harness
+    }
+
+    /// An app over `store` with `views` read from the config file, its
+    /// queue loaded.
+    pub fn loaded_with_views(store: Store, views: Vec<View>) -> Self {
+        let mut harness = Harness::new(store);
+        harness.app = harness.app.with_views(CONFIG_FILE.into(), views);
         let effects = harness.start();
         harness.resolve(effects);
         harness

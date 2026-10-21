@@ -2,8 +2,8 @@
 source: src/ui.rs
 expression: "render(&h, 80, 24)"
 ---
+" Inbox  Unread  Flagged  Snoozed                                                "
 "No threads                                                                      "
-"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "

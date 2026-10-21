@@ -157,7 +157,7 @@ async fn a_snooze_writes_the_schedule_file_and_sends_the_move() {
         )])]
     );
     let screen = screen(&terminal);
-    assert!(screen[0].contains("Trip to Wellington"), "{screen:#?}");
+    assert!(screen[1].contains("Trip to Wellington"), "{screen:#?}");
     assert_eq!(screen[23].trim_end(), "Snoozed 1 thread until Mon 08:00");
 }
 
@@ -184,7 +184,7 @@ async fn a_schedule_write_that_fails_sends_nothing() {
     assert_eq!(sets(&jmap), Vec::<EmailUpdate>::new());
     assert!(!file.exists());
     let screen = screen(&terminal);
-    assert!(screen[0].contains("Lunch on Friday?"), "{screen:#?}");
+    assert!(screen[1].contains("Lunch on Friday?"), "{screen:#?}");
     assert!(
         screen[23].starts_with("Could not snooze 1 thread: could not write the snooze schedule: "),
         "{screen:#?}"
@@ -284,8 +284,8 @@ async fn a_due_thread_returns_at_launch_after_the_inbox_loads() {
         "2026-10-18T12:00:00+00:00"
     );
     let screen = screen(&terminal);
-    assert!(screen[0].contains("Renewal"), "{screen:#?}");
-    assert!(screen[0].contains('●'), "returned unread: {screen:#?}");
+    assert!(screen[1].contains("Renewal"), "{screen:#?}");
+    assert!(screen[1].contains('●'), "returned unread: {screen:#?}");
     assert_eq!(screen[23].trim_end(), "Returned 1 thread from snooze");
 }
 
@@ -347,6 +347,6 @@ async fn a_thread_that_falls_due_while_blorp_runs_returns_on_the_reconcile_tick(
         "2026-10-18T12:00:45+00:00"
     );
     let screen = screen(&terminal);
-    assert!(screen[0].contains("Renewal"), "{screen:#?}");
+    assert!(screen[1].contains("Renewal"), "{screen:#?}");
     assert_eq!(screen[23].trim_end(), "Returned 1 thread from snooze");
 }

@@ -22,7 +22,7 @@ use crate::jmap::retry::{RETRIES, retrying};
 use crate::jmap::{Class, EmailUpdate, Error, Fatal, Jmap};
 use crate::mail::Mailboxes;
 use crate::undo::{Replay, Replayed};
-use crate::{snooze, sync, ui};
+use crate::{config, snooze, sync, ui};
 
 const SPINNER_TICK: Duration = Duration::from_millis(250);
 
@@ -382,6 +382,13 @@ impl<J: Jmap> Executor<J> {
                         cancelled = job;
                         let error = error.to_string();
                         let _ = self.tx.send(Msg::ScheduleFailed { job, error });
+                    }
+                }
+                Effect::WriteConfig { path, contents } => {
+                    if let Err(error) = config::save(&path, &contents) {
+                        tracing::error!("could not write {}: {error}", path.display());
+                        let error = error.to_string();
+                        let _ = self.tx.send(Msg::ConfigFailed { error });
                     }
                 }
                 Effect::LogDryRun {

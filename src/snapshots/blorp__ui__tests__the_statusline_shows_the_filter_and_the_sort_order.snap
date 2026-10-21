@@ -2,8 +2,8 @@
 source: src/ui.rs
 expression: screen
 ---
+" Inbox  Unread  Flagged  Snoozed  in:archive                                    "
 "  1    Kim Park             Trip to Wellington                            3   4d"
-"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "

@@ -26,17 +26,20 @@ const AGE_WIDTH: usize = 4;
 const FIXED_WIDTH: usize =
     NUMBER_WIDTH + 1 + 3 + SENDER_WIDTH + 1 + 1 + COUNT_WIDTH + 1 + AGE_WIDTH;
 
-/// Draws the whole screen: the queue, the statusline, the completion
-/// candidates while Tab is cycling through them, and the bottom line.
+/// Draws the whole screen: the tabline, the queue, the statusline, the
+/// completion candidates while Tab is cycling through them, and the bottom
+/// line.
 pub fn view(app: &App, frame: &mut Frame) {
     let completion = app.completion();
-    let [queue, statusline, candidates, bottom] = Layout::vertical([
+    let [tabs, queue, statusline, candidates, bottom] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(1),
         Constraint::Length(u16::from(completion.is_some())),
         Constraint::Length(1),
     ])
     .areas(frame.area());
+    frame.render_widget(Paragraph::new(tabline(app, tabs.width)), tabs);
     rows(app, frame, queue);
     frame.render_widget(
         Paragraph::new(status_bar(app, statusline.width)),
@@ -159,6 +162,46 @@ fn snooze_picker(frame: &mut Frame, choices: &SnoozeChoices) {
         Paragraph::new(lines).block(Block::bordered().title(title)),
         area,
     );
+}
+
+/// The views, each name between spaces, with the active one reversed and
+/// bold and the others dim. When no view is active, the filter follows
+/// them, or the queue's name for the empty filter, reversed and in
+/// italics. The line starts late enough that the active view, or that
+/// filter, fits in `width`.
+fn tabline(app: &App, width: u16) -> Line<'static> {
+    let active = Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let current = app.active_view();
+    let mut tabs: Vec<Span> = app
+        .views()
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let style = if current == Some(i) {
+                active
+            } else {
+                Style::new().fg(Color::DarkGray)
+            };
+            Span::styled(format!(" {} ", v.name), style)
+        })
+        .collect();
+    if current.is_none() {
+        let label = match app.filter() {
+            "" => app.queue_name(),
+            filter => filter,
+        };
+        tabs.push(Span::styled(
+            format!(" {label} "),
+            active.add_modifier(Modifier::ITALIC),
+        ));
+    }
+    let current = current.unwrap_or(tabs.len() - 1);
+    let width = usize::from(width);
+    let mut first = 0;
+    while first < current && tabs[first..=current].iter().map(Span::width).sum::<usize>() > width {
+        first += 1;
+    }
+    Line::from(tabs.split_off(first))
 }
 
 /// The character before the prompt in `mode`, when it is a prompt.
@@ -491,6 +534,8 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('/') => Some(Msg::OpenFilter),
         KeyCode::Char(':') => Some(Msg::OpenCommand),
         KeyCode::Char('t') => Some(Msg::ToggleSort),
+        KeyCode::Tab => Some(Msg::NextView),
+        KeyCode::BackTab => Some(Msg::PreviousView),
         KeyCode::Esc | KeyCode::Enter => Some(Msg::Cancel),
         KeyCode::Char(c) => c.to_digit(10).map(|d| Msg::Digit(d as u8)),
         _ => None,
@@ -1011,6 +1056,63 @@ mod tests {
 
         let screen = render(&h, 80, 24);
         assert!(screen.contains("No mailbox matches"), "{screen}");
+    }
+
+    #[test]
+    fn the_tabline_shows_the_views_with_the_active_one_marked() {
+        let mut h = Harness::loaded(busy_inbox());
+        let effects = h.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        h.resolve(effects);
+
+        let screen = render(&h, 80, 24);
+        let tabline = screen.lines().next().unwrap();
+        assert!(
+            tabline.contains(" Inbox  Unread  Flagged  Snoozed "),
+            "{tabline}"
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| view(&h.app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let unread = buffer[(8, 0)].style().add_modifier;
+        assert!(unread.contains(Modifier::REVERSED), "{unread:?}");
+        let inbox = buffer[(1, 0)].style().add_modifier;
+        assert!(!inbox.contains(Modifier::REVERSED), "{inbox:?}");
+    }
+
+    #[test]
+    fn a_filter_no_view_has_follows_the_views_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        let effects = h.send(Msg::SetFilter("from:ana is:unread".into()));
+        h.resolve(effects);
+
+        let screen = render(&h, 80, 24);
+        let tabline = screen.lines().next().unwrap();
+        assert!(
+            tabline.contains(" Inbox  Unread  Flagged  Snoozed  from:ana is:unread "),
+            "{tabline}"
+        );
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn a_filter_no_view_has_follows_the_views_120x40() {
+        let mut h = Harness::loaded(busy_inbox());
+        let effects = h.send(Msg::SetFilter("in:archive".into()));
+        h.resolve(effects);
+
+        insta::assert_snapshot!(render(&h, 120, 40));
+    }
+
+    #[test]
+    fn the_tabline_scrolls_to_keep_the_active_tab_on_screen() {
+        let mut h = Harness::loaded(busy_inbox());
+        let effects = h.send(Msg::SetFilter("from:ana".into()));
+        h.resolve(effects);
+
+        let screen = render(&h, 24, 6);
+        let tabline = screen.lines().next().unwrap();
+        assert!(tabline.contains(" from:ana "), "{tabline}");
+        assert!(!tabline.contains("Inbox"), "{tabline}");
     }
 
     #[test]

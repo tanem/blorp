@@ -64,7 +64,7 @@ async fn z_creates_the_snooze_mailbox_writes_the_schedule_and_moves_the_thread()
     let mut relaunched = sandbox.spawn(&[], 80, 24);
     relaunched.wait_statusline(" 1/1");
     assert!(
-        relaunched.rows()[0].contains("Trip to Wellington"),
+        relaunched.rows()[1].contains("Trip to Wellington"),
         "{:#?}",
         relaunched.rows()
     );
@@ -113,7 +113,7 @@ async fn a_due_thread_returns_to_the_top_of_the_inbox_at_launch() {
 
     blorp.wait_text("Returned 1 thread from snooze");
     blorp.wait_statusline(" 1/2");
-    assert!(blorp.rows()[0].contains("Renewal"), "{:#?}", blorp.rows());
+    assert!(blorp.rows()[1].contains("Renewal"), "{:#?}", blorp.rows());
     blorp.keys("q");
     assert_eq!(blorp.wait_exit().exit_code(), 0);
 

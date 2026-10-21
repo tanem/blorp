@@ -81,6 +81,11 @@ impl Sandbox {
         self.dir.path().join("home/state/blorp")
     }
 
+    /// The config file, under `XDG_CONFIG_HOME`.
+    pub fn config_path(&self) -> PathBuf {
+        self.dir.path().join("home/config/blorp/config.toml")
+    }
+
     /// The log file blorp writes under its state directory.
     pub fn log_path(&self) -> PathBuf {
         self.state_dir().join("blorp.log")

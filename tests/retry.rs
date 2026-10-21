@@ -186,7 +186,7 @@ async fn the_first_probe_that_succeeds_reconciles_the_queue_and_reconnects() {
         6,
         "four tries, a failed probe, and one that worked"
     );
-    assert!(screen[0].contains("Flights"), "{screen:#?}");
+    assert!(screen[1].contains("Flights"), "{screen:#?}");
     assert!(!screen[22].contains("DISCONNECTED"), "{screen:#?}");
     assert_eq!(screen[23].trim_end(), "Reconnected");
 }
@@ -202,7 +202,7 @@ async fn an_action_is_retried_inside_its_outbox_job() {
 
     assert_eq!(exit.unwrap(), Exit::Quit);
     assert_eq!(sets(&jmap), 3);
-    assert!(screen[0].contains("Invoice"), "{screen:#?}");
+    assert!(screen[1].contains("Invoice"), "{screen:#?}");
     assert!(!screen[22].contains("DISCONNECTED"), "{screen:#?}");
 }
 
@@ -258,7 +258,7 @@ async fn an_action_out_of_retries_drops_the_jobs_behind_it_until_reconnected() {
         sets.iter().all(|set| *set == sets[0]),
         "each archives e1: {sets:?}"
     );
-    assert!(screen[0].contains("Invoice"), "{screen:#?}");
+    assert!(screen[1].contains("Invoice"), "{screen:#?}");
 }
 
 #[tokio::test(start_paused = true)]

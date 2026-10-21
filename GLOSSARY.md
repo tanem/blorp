@@ -17,7 +17,7 @@ The mailbox the filter's `in:` names, Inbox when it names none, or every mailbox
 _Avoid_: Current folder, scope
 
 **View**:
-A named, pinned filter and sort order shown in the tabline and switched with Tab.
+A named, pinned filter and sort order shown in the tabline and switched with Tab or `:view`.
 _Avoid_: Tab, folder, saved search
 
 **Selection**:

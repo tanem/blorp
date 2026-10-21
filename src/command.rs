@@ -5,16 +5,17 @@ use std::fmt;
 use std::ops::Range;
 
 use crate::app::Sort;
+use crate::config::{RESERVED_VIEW_NAMES, View};
 use crate::filter::{HAS_VALUES, IS_VALUES, KEYS};
 use crate::mail::{Mailbox, Mailboxes, Role};
 use crate::snooze::{self, When};
 
 /// Each command name followed by its aliases, in the order Tab offers
 /// them.
-const NAMES: [&str; 25] = [
+const NAMES: [&str; 27] = [
     "archive", "e", "delete", "d", "spam", "move", "m", "snooze", "z", "unsnooze", "uz", "flag",
-    "f", "read", "r", "unread", "undo", "u", "redo", "filter", "sort", "refresh", "dry", "quit",
-    "q",
+    "f", "read", "r", "unread", "undo", "u", "redo", "view", "v", "filter", "sort", "refresh",
+    "dry", "quit", "q",
 ];
 
 /// A command typed at the `:` prompt.
@@ -44,6 +45,12 @@ pub enum Command {
     Undo(Option<usize>),
     /// `:redo`.
     Redo,
+    /// `:view <name>`, `:v <name>`: switch to the view with this name.
+    View(String),
+    /// `:view save <name>`: save the current filter and sort as this view.
+    SaveView(String),
+    /// `:view delete <name>`: delete the view with this name.
+    DeleteView(String),
     /// `:filter [text]`: the filter text, empty for the Inbox.
     Filter(String),
     /// `:sort [newest|oldest]`: toggles with no argument.
@@ -65,6 +72,8 @@ pub enum Error {
     Usage(&'static str),
     /// Holds the snooze time as written.
     SnoozeTime(String),
+    /// `save` or `delete` given as a view name to save.
+    ReservedView(String),
 }
 
 impl fmt::Display for Error {
@@ -73,6 +82,7 @@ impl fmt::Display for Error {
             Error::Unknown(name) => write!(f, "Unknown command: {name}"),
             Error::Usage(usage) => write!(f, "Usage: {usage}"),
             Error::SnoozeTime(text) => write!(f, "Snooze time not understood: \"{text}\""),
+            Error::ReservedView(name) => write!(f, "View name \"{name}\" is reserved"),
         }
     }
 }
@@ -119,6 +129,7 @@ pub fn parse(text: &str) -> Result<Option<Command>, Error> {
             },
         },
         "redo" => bare(Command::Redo, ":redo")?,
+        "view" | "v" => view(rest)?,
         "filter" => Command::Filter(rest.into()),
         "sort" => Command::Sort(match rest {
             "" => None,
@@ -138,6 +149,22 @@ pub fn parse(text: &str) -> Result<Option<Command>, Error> {
     Ok(Some(command))
 }
 
+/// The arguments of `:view`, the rest of the line: a view name, or `save`
+/// or `delete` and a view name, which cannot itself be `save` or `delete`.
+fn view(rest: &str) -> Result<Command, Error> {
+    const USAGE: Error = Error::Usage(":view [save|delete] <name>");
+    let (word, name) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let name = name.trim();
+    match word {
+        "" => Err(USAGE),
+        "save" | "delete" if name.is_empty() => Err(USAGE),
+        "save" if RESERVED_VIEW_NAMES.contains(&name) => Err(Error::ReservedView(name.into())),
+        "save" => Ok(Command::SaveView(name.into())),
+        "delete" => Ok(Command::DeleteView(name.into())),
+        _ => Ok(Command::View(rest.into())),
+    }
+}
+
 /// What Tab can put in place of the word under the cursor at character
 /// `cursor` of `text`: the characters the word covers, and each candidate
 /// for it, matching the part of the word before the cursor. A word runs
@@ -145,18 +172,33 @@ pub fn parse(text: &str) -> Result<Option<Command>, Error> {
 /// names and aliases; the words after `filter` complete token keys, `is:`
 /// and `has:` values, and `in:` mailbox paths by segment; the word after
 /// `sort` completes `newest` and `oldest`; the word after `snooze` or `z`
-/// completes the preset names and weekdays.
-pub fn complete(text: &str, cursor: usize, mailboxes: &Mailboxes) -> (Range<usize>, Vec<String>) {
+/// completes the preset names and weekdays. The rest of the line after
+/// `move` or `m` completes a mailbox path, and after `view` or `v`,
+/// `save`, `delete`, or the name of one of `views`, which after `save` or
+/// `delete` completes a view name.
+pub fn complete(
+    text: &str,
+    cursor: usize,
+    mailboxes: &Mailboxes,
+    views: &[View],
+) -> (Range<usize>, Vec<String>) {
     let chars: Vec<char> = text.chars().collect();
     let cursor = cursor.min(chars.len());
-    if let Some(start) = argument_start(&chars, cursor)
-        && matches!(text.split_whitespace().next(), Some("move" | "m"))
-    {
-        let typed: String = chars[start..cursor].iter().collect();
-        let candidates = paths(&typed.to_lowercase(), mailboxes, |m| {
-            mailboxes.is_move_target(m)
-        });
-        return (start..chars.len(), candidates);
+    let name = text.split_whitespace().next().unwrap_or("");
+    if let Some(start) = argument_start(&chars, cursor) {
+        match name {
+            "view" | "v" => {
+                return view_argument(&chars[start..cursor], start, chars.len(), views);
+            }
+            "move" | "m" => {
+                let typed: String = chars[start..cursor].iter().collect();
+                let candidates = paths(&typed.to_lowercase(), mailboxes, |m| {
+                    mailboxes.is_move_target(m)
+                });
+                return (start..chars.len(), candidates);
+            }
+            _ => {}
+        }
     }
     let mut quoted = false;
     let mut start = 0;
@@ -179,7 +221,6 @@ pub fn complete(text: &str, cursor: usize, mailboxes: &Mailboxes) -> (Range<usiz
         end += 1;
     }
     let typed: String = chars[start..cursor].iter().collect();
-    let name = text.split_whitespace().next().unwrap_or("");
     let candidates = match (words, name) {
         (0, _) => matching(NAMES, "", "", &typed),
         (1, "sort") => matching(["newest", "oldest"], "", "", &typed),
@@ -188,6 +229,42 @@ pub fn complete(text: &str, cursor: usize, mailboxes: &Mailboxes) -> (Range<usiz
         _ => Vec::new(),
     };
     (start..end, candidates)
+}
+
+/// The completions of `typed`, the argument of `:view` up to the cursor,
+/// starting at character `start` of a line `len` characters long: `save`,
+/// `delete`, and the view names, or after `save` or `delete` the view
+/// names, each covering the rest of the line. View names match
+/// case-insensitively.
+fn view_argument(
+    typed: &[char],
+    start: usize,
+    len: usize,
+    views: &[View],
+) -> (Range<usize>, Vec<String>) {
+    let names = |typed: &[char]| -> Vec<String> {
+        let typed: String = typed.iter().collect::<String>().to_lowercase();
+        views
+            .iter()
+            .filter(|v| v.name.to_lowercase().starts_with(&typed))
+            .map(|v| v.name.clone())
+            .collect()
+    };
+    let word = typed.iter().position(|c| c.is_whitespace());
+    if let Some(end) = word {
+        let first: String = typed[..end].iter().collect();
+        if RESERVED_VIEW_NAMES.contains(&first.as_str()) {
+            let name = typed[end..]
+                .iter()
+                .position(|c| !c.is_whitespace())
+                .map_or(typed.len(), |i| end + i);
+            return (start + name..len, names(&typed[name..]));
+        }
+    }
+    let first: String = typed.iter().collect();
+    let mut candidates = matching(RESERVED_VIEW_NAMES, "", "", &first);
+    candidates.extend(names(typed));
+    (start..len, candidates)
 }
 
 /// Each of `words` that starts with `typed`, between `before` and `after`.

@@ -2,10 +2,10 @@
 source: src/ui.rs
 expression: screen
 ---
+" Inbox  Unread  Flagged  Snoozed                                                "
 "  1    Hotel                Booking                                          now"
 "  1    Airline              Flights                                           3h"
 "  2    Insurer              Renewal                                           6d"
-"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "

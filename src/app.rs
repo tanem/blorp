@@ -8,9 +8,11 @@ use std::path::PathBuf;
 
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::command::{self, Command};
+use crate::config::{self, View};
 use crate::filter;
 use crate::jmap::{self, Class, SetResult};
 use crate::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, QueryResult, Reconciled};
@@ -116,6 +118,12 @@ pub struct App {
     previous: Option<Previous>,
     /// While `q` waits for the outbox to drain.
     quitting: Option<Quitting>,
+    /// The views, in tabline order.
+    views: Vec<View>,
+    /// The view last switched to or saved, by name.
+    view: Option<String>,
+    /// Where the views are written. Without one, they last the session.
+    config_file: Option<PathBuf>,
 }
 
 /// A request the executor may retry, as [`Msg::Retrying`] names it.
@@ -254,8 +262,10 @@ struct Shown {
 }
 
 /// The order a queue sorts in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Sort {
+    #[default]
     Newest,
     Oldest,
 }
@@ -505,6 +515,23 @@ pub enum Msg {
     ToggleSort,
     /// `:sort newest` or `:sort oldest`.
     SetSort(Sort),
+    /// `Tab`: switch to the next view, or from a filter no view has, the
+    /// first.
+    NextView,
+    /// `Shift-Tab`: switch to the previous view, or from a filter no view
+    /// has, the last.
+    PreviousView,
+    /// `:view <name>`: switch to the view with this name.
+    ShowView(String),
+    /// `:view save <name>`: save the current filter and sort as the view
+    /// with this name, in place of any view of that name.
+    SaveView(String),
+    /// `:view delete <name>`: delete the view with this name.
+    DeleteView(String),
+    /// Writing the config file failed.
+    ConfigFailed {
+        error: String,
+    },
     Down,
     Up,
     Top,
@@ -669,6 +696,12 @@ pub enum Effect {
         path: PathBuf,
         contents: String,
     },
+    /// Replace the config file with `contents` at once. On failure, report
+    /// back with [`Msg::ConfigFailed`].
+    WriteConfig {
+        path: PathBuf,
+        contents: String,
+    },
     /// Log a dry-run action, undo, or redo to the `blorp::dry_run` target at
     /// info.
     LogDryRun {
@@ -731,7 +764,38 @@ impl App {
             retrying: BTreeMap::new(),
             previous: None,
             quitting: None,
+            views: config::default_views(),
+            view: None,
+            config_file: None,
         }
+    }
+
+    /// The app with `views` read from the config `file`, where changes to
+    /// them are written.
+    pub fn with_views(mut self, file: PathBuf, views: Vec<View>) -> Self {
+        self.config_file = Some(file);
+        self.views = views;
+        self
+    }
+
+    /// The views, in tabline order.
+    pub fn views(&self) -> &[View] {
+        &self.views
+    }
+
+    /// The view the tabline marks active, by index: the one last switched
+    /// to or saved while its filter is still the current filter, else the
+    /// first whose filter is, or none.
+    pub fn active_view(&self) -> Option<usize> {
+        let filter = self.filter();
+        self.view
+            .as_ref()
+            .and_then(|name| {
+                self.views
+                    .iter()
+                    .position(|v| v.name == *name && v.filter == filter)
+            })
+            .or_else(|| self.views.iter().position(|v| v.filter == filter))
     }
 
     /// The app with dry run on or off, as `--dry-run` sets it at launch.
@@ -859,9 +923,10 @@ impl App {
     }
 
     /// Whether the queue shown is the snooze mailbox's, whose rows show
-    /// and sort by when each thread returns.
+    /// and sort by when each thread returns, or would before it exists.
     pub fn in_snooze_mailbox(&self) -> bool {
         match (&self.shown, self.mailboxes.snooze()) {
+            (Some(shown), _) if shown.mailbox == QueueMailbox::MissingSnooze => true,
             (Some(shown), Some(snooze)) => shown.mailbox == QueueMailbox::One(snooze.id.clone()),
             _ => false,
         }
@@ -1164,9 +1229,8 @@ impl App {
         };
     }
 
-    /// What filter `text` selects in the current sort, or why it selects
-    /// nothing.
-    fn select(&self, text: &str) -> Result<Shown, filter::Error> {
+    /// What filter `text` selects in `sort`, or why it selects nothing.
+    fn select(&self, text: &str, sort: Sort) -> Result<Shown, filter::Error> {
         let resolved = filter::parse(text)?.resolve(&self.mailboxes)?;
         Ok(Shown {
             filter: text.trim().into(),
@@ -1175,7 +1239,7 @@ impl App {
             plain: resolved.plain,
             query: EmailQuery {
                 filter: resolved.condition,
-                ascending: self.sort.ascending(),
+                ascending: sort.ascending(),
                 limit: QUEUE_LIMIT,
                 extra_threads: Vec::new(),
             },
@@ -1185,8 +1249,8 @@ impl App {
     /// Shows the queue filter `text` selects, or reports why it selects
     /// nothing and leaves the queue as it is.
     fn set_filter(&mut self, text: &str) -> Vec<Effect> {
-        match self.select(text) {
-            Ok(shown) => self.show(shown),
+        match self.select(text, self.sort) {
+            Ok(shown) => self.show(shown, self.sort),
             Err(error) => {
                 self.status = error.to_string();
                 Vec::new()
@@ -1194,13 +1258,19 @@ impl App {
         }
     }
 
-    /// Shows `shown`. When its query is not the one the queue was loaded
-    /// with, the query is run; once it loads, the selection is cleared and
-    /// the cursor goes to the first row.
-    fn show(&mut self, shown: Shown) -> Vec<Effect> {
+    /// Shows `shown` in `sort`, which its query sorts in. When its query is
+    /// not the one the queue was loaded with, the query is run; once it
+    /// loads, the selection is cleared and the cursor goes to the first row.
+    /// Outside the `/` prompt, the snooze mailbox before it exists says it
+    /// holds no threads.
+    fn show(&mut self, shown: Shown, sort: Sort) -> Vec<Effect> {
         let same = self.shown.as_ref().is_some_and(|s| s.query == shown.query);
         if !same {
             self.remember();
+        }
+        self.sort = sort;
+        if shown.mailbox == QueueMailbox::MissingSnooze && self.filter_prompt.is_none() {
+            self.status = "No snoozed threads".into();
         }
         let query = shown.query.clone();
         self.shown = Some(shown);
@@ -1242,6 +1312,91 @@ impl App {
             Some(query) => self.load(query),
             None => Vec::new(),
         }
+    }
+
+    /// Switches to the next view, or the previous one when not `forward`,
+    /// wrapping round. From a filter no view has, the next view is the
+    /// first and the previous the last.
+    fn step_view(&mut self, forward: bool) -> Vec<Effect> {
+        self.take_count();
+        let n = self.views.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let index = match (self.active_view(), forward) {
+            (Some(i), true) => (i + 1) % n,
+            (Some(i), false) => (i + n - 1) % n,
+            (None, true) => 0,
+            (None, false) => n - 1,
+        };
+        self.switch_view(index)
+    }
+
+    /// Shows the view at `index`: its filter in its sort. A filter that
+    /// selects nothing is reported and the queue stays as it is.
+    fn switch_view(&mut self, index: usize) -> Vec<Effect> {
+        let view = self.views[index].clone();
+        self.status.clear();
+        match self.select(&view.filter, view.sort) {
+            Ok(shown) => {
+                self.view = Some(view.name);
+                self.show(shown, view.sort)
+            }
+            Err(error) => {
+                self.status = error.to_string();
+                Vec::new()
+            }
+        }
+    }
+
+    /// Saves the current filter and sort as the view `name`: in place of the
+    /// view of that name, or after the last view. The view is marked
+    /// active.
+    fn save_view(&mut self, name: String) -> Vec<Effect> {
+        let view = View {
+            name: name.clone(),
+            filter: self.filter().into(),
+            sort: self.sort,
+        };
+        match self.views.iter_mut().find(|v| v.name == name) {
+            Some(saved) => *saved = view,
+            None => self.views.push(view),
+        }
+        self.view = Some(name.clone());
+        self.write_views(format!("Saved view \"{name}\""))
+    }
+
+    /// The index of the view `name`, or none, saying so.
+    fn view_index(&mut self, name: &str) -> Option<usize> {
+        let index = self.views.iter().position(|v| v.name == name);
+        if index.is_none() {
+            self.status = format!("No view named \"{name}\"");
+        }
+        index
+    }
+
+    /// Deletes the view `name`, or says there is none. The queue stays as
+    /// it is.
+    fn delete_view(&mut self, name: &str) -> Vec<Effect> {
+        let Some(index) = self.view_index(name) else {
+            return Vec::new();
+        };
+        self.views.remove(index);
+        self.write_views(format!("Deleted view \"{name}\""))
+    }
+
+    /// Writes every view to the config file, reporting `done`. Without a
+    /// config file the views last the session, and the report says so.
+    fn write_views(&mut self, done: String) -> Vec<Effect> {
+        let Some(path) = self.config_file.clone() else {
+            self.status = format!("{done} for this session: no config file");
+            return Vec::new();
+        };
+        self.status = done;
+        vec![Effect::WriteConfig {
+            path,
+            contents: config::to_toml(&self.views),
+        }]
     }
 
     /// Sets the sort and, when it changes, reloads the queue in it; once it
@@ -1314,10 +1469,10 @@ impl App {
                 };
                 let text = open.prompt.text();
                 self.filter_history.push(text);
-                match self.select(text) {
+                match self.select(text, self.sort) {
                     Ok(shown) => {
                         self.status.clear();
-                        self.show(shown)
+                        self.show(shown, self.sort)
                     }
                     Err(error) => {
                         let effects = self.restore(open);
@@ -1336,10 +1491,10 @@ impl App {
                 };
                 open.prompt.edit(key, &self.filter_history);
                 let text = open.prompt.text().to_string();
-                let Ok(shown) = self.select(&text) else {
+                let Ok(shown) = self.select(&text, self.sort) else {
                     return Vec::new();
                 };
-                let effects = self.show(shown);
+                let effects = self.show(shown, self.sort);
                 if let Some(open) = &mut self.filter_prompt {
                     open.queried |= !effects.is_empty();
                 }
@@ -1434,8 +1589,12 @@ impl App {
                 c
             }
             None => {
-                let (range, candidates) =
-                    command::complete(open.prompt.text(), open.prompt.cursor(), &self.mailboxes);
+                let (range, candidates) = command::complete(
+                    open.prompt.text(),
+                    open.prompt.cursor(),
+                    &self.mailboxes,
+                    &self.views,
+                );
                 if candidates.is_empty() {
                     return;
                 }
@@ -1470,7 +1629,7 @@ impl App {
                 }
                 let to = match self.mailboxes.resolve(&name) {
                     Ok(mailbox) => mailbox.id.clone(),
-                    Err(_) if name.to_lowercase() == SNOOZE_MAILBOX.to_lowercase() => {
+                    Err(_) if Mailboxes::is_snooze_name(&name) => {
                         self.status = "Use z to snooze".into();
                         return Vec::new();
                     }
@@ -1494,6 +1653,9 @@ impl App {
                 self.pending_count = count;
                 Msg::Redo
             }
+            Command::View(name) => Msg::ShowView(name),
+            Command::SaveView(name) => Msg::SaveView(name),
+            Command::DeleteView(name) => Msg::DeleteView(name),
             Command::Filter(text) => Msg::SetFilter(text),
             Command::Sort(None) => Msg::ToggleSort,
             Command::Sort(Some(sort)) => Msg::SetSort(sort),
@@ -1878,13 +2040,14 @@ impl App {
     }
 
     /// Re-resolves an `in:any` queue's mailbox, whose excluded mailboxes
-    /// include the snooze mailbox once it exists.
+    /// include the snooze mailbox once it exists, and the snooze mailbox's
+    /// queue from before it existed.
     fn refresh_queue_mailbox(&mut self) {
         let Some(shown) = &self.shown else {
             return;
         };
-        if let QueueMailbox::Any(_) = shown.mailbox
-            && let Ok(refreshed) = self.select(&shown.filter.clone())
+        if let QueueMailbox::Any(_) | QueueMailbox::MissingSnooze = shown.mailbox
+            && let Ok(refreshed) = self.select(&shown.filter.clone(), self.sort)
         {
             self.shown = Some(refreshed);
         }
@@ -2980,6 +3143,18 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
             Sort::Oldest => Sort::Newest,
         }),
         Msg::SetSort(sort) => app.set_sort(sort),
+        Msg::NextView => app.step_view(true),
+        Msg::PreviousView => app.step_view(false),
+        Msg::ShowView(name) => match app.view_index(&name) {
+            Some(index) => app.switch_view(index),
+            None => Vec::new(),
+        },
+        Msg::SaveView(name) => app.save_view(name),
+        Msg::DeleteView(name) => app.delete_view(&name),
+        Msg::ConfigFailed { error } => {
+            app.status = format!("Could not save the views: {error}");
+            Vec::new()
+        }
         Msg::Digit(digit) => {
             let count = app.pending_count.unwrap_or(0);
             if count > 0 || digit > 0 {
