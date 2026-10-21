@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 
-use blorp::cli::{FirstLine, StoreError, TokenStore, find_token, logout, setup};
+use blorp::cli::{FirstLine, KEYRING, Prompt, StoreError, TokenStore, find_token, logout, setup};
 use blorp::jmap::Jmap;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
@@ -44,6 +44,49 @@ impl TokenStore for FakeStore {
     }
 }
 
+/// A store whose keyring cannot be reached, as on a Linux machine with no
+/// Secret Service.
+struct NoKeyring;
+
+impl TokenStore for NoKeyring {
+    fn reachable(&self) -> Result<(), StoreError> {
+        Err(no_keyring())
+    }
+
+    fn get(&self) -> Result<Option<SecretString>, StoreError> {
+        Err(no_keyring())
+    }
+
+    fn set(&self, _token: &SecretString) -> Result<(), StoreError> {
+        Err(no_keyring())
+    }
+
+    fn delete(&self) -> Result<bool, StoreError> {
+        Err(no_keyring())
+    }
+}
+
+fn no_keyring() -> StoreError {
+    StoreError::Unavailable("no session bus".into())
+}
+
+/// What blorp says when no keyring can be reached and no token is set.
+fn no_keyring_message() -> String {
+    format!(
+        "cannot reach {KEYRING} to keep the API token in: no session bus. \
+         Set BLORP_API_TOKEN to the token, or run `blorp setup` once it is available."
+    )
+}
+
+/// A prompt that fails the test if it is read.
+struct NoPrompt;
+
+impl Prompt for NoPrompt {
+    fn read_token(&mut self, _prompt: &str) -> std::io::Result<String> {
+        panic!("the prompt was read");
+    }
+}
+
 fn text(bytes: Vec<u8>) -> String {
     String::from_utf8(bytes).expect("utf-8 output")
 }
@@ -56,7 +99,10 @@ fn logout_deletes_the_stored_token() {
     logout(&store, false, &mut out).unwrap();
 
     assert_eq!(store.token(), None);
-    assert_eq!(text(out), "Deleted the API token from the keychain.\n");
+    assert_eq!(
+        text(out),
+        format!("Deleted the API token from {KEYRING}.\n")
+    );
 }
 
 #[test]
@@ -66,7 +112,10 @@ fn logout_succeeds_when_no_token_is_stored() {
 
     logout(&store, false, &mut out).unwrap();
 
-    assert_eq!(text(out), "No API token was stored in the keychain.\n");
+    assert_eq!(
+        text(out),
+        format!("No API token was stored in {KEYRING}.\n")
+    );
 }
 
 #[test]
@@ -78,8 +127,10 @@ fn logout_warns_that_the_environment_token_is_still_used() {
 
     assert_eq!(
         text(out),
-        "Deleted the API token from the keychain.\n\
-         BLORP_API_TOKEN is set, so blorp will still use the token it holds.\n"
+        format!(
+            "Deleted the API token from {KEYRING}.\n\
+             BLORP_API_TOKEN is set, so blorp will still use the token it holds.\n"
+        )
     );
 }
 
@@ -132,7 +183,7 @@ async fn setup_checks_the_token_then_stores_it_and_names_the_account() {
     assert_eq!(session.username, "kim@example.invalid");
     assert_eq!(
         text(out),
-        format!("{INTRO}Stored the API token for kim@example.invalid in the keychain.\n")
+        format!("{INTRO}Stored the API token for kim@example.invalid in {KEYRING}.\n")
     );
     jmap.get_mailboxes()
         .await
@@ -241,4 +292,33 @@ fn no_token_anywhere_means_setup_runs() {
     let token = find_token(None, &FakeStore::default()).unwrap();
 
     assert!(token.is_none());
+}
+
+#[test]
+fn with_no_keyring_the_environment_token_is_used() {
+    let token = find_token(Some(SecretString::from("env-token")), &NoKeyring).unwrap();
+
+    assert_eq!(token.unwrap().expose_secret(), "env-token");
+}
+
+#[test]
+fn with_no_keyring_and_no_environment_token_launch_names_both_options() {
+    let error = find_token(None, &NoKeyring).expect_err("no token");
+
+    assert_eq!(error.to_string(), no_keyring_message());
+}
+
+#[tokio::test]
+async fn with_no_keyring_setup_names_both_options_before_the_prompt() {
+    let server = MockServer::start().await;
+    let mut out = Vec::new();
+
+    let error = setup(&NoKeyring, &mut NoPrompt, &mut out, &session_url(&server))
+        .await
+        .err()
+        .expect("setup fails");
+
+    assert_eq!(error.to_string(), no_keyring_message());
+    assert_eq!(text(out), "");
+    assert!(server.received_requests().await.unwrap().is_empty());
 }

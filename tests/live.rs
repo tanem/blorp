@@ -14,7 +14,9 @@ use serde_json::json;
 
 mod e2e;
 
-use e2e::{Modes, Sandbox, statusline};
+#[cfg(unix)]
+use e2e::Modes;
+use e2e::{Sandbox, statusline};
 
 fn token() -> String {
     std::env::var("BLORP_API_TOKEN").expect("BLORP_API_TOKEN is set")
@@ -113,6 +115,7 @@ fn the_inbox_opens_in_a_terminal_moves_and_quits_cleanly() {
 
     assert_eq!(blorp.wait_exit().exit_code(), 0);
     assert!(!blorp.on_alternate_screen());
+    #[cfg(unix)]
     assert_eq!(blorp.modes(), Modes::COOKED);
     // Not assert_eq!, which would print a stored token.
     assert!(sandbox.stored_token().is_none(), "nothing was stored");

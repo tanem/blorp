@@ -6,8 +6,10 @@ use jiff::{SignedDuration, Timestamp};
 
 mod e2e;
 
+#[cfg(unix)]
+use e2e::Modes;
 use e2e::server::LocalJmap;
-use e2e::{Blorp, Modes, REJECTED, Sandbox, TOKEN, statusline};
+use e2e::{Blorp, REJECTED, Sandbox, TOKEN, statusline};
 
 /// RFC 3339 for `minutes` before now, so ages on screen do not depend on
 /// the date the tests run.
@@ -195,6 +197,7 @@ async fn q_and_ctrl_c_exit_0_and_restore_the_terminal() {
         let (_sandbox, mut blorp) = start(&server, 80, 24);
         blorp.wait_statusline("1/5");
         assert!(blorp.on_alternate_screen(), "{key:?}");
+        #[cfg(unix)]
         assert_eq!(blorp.modes(), Modes::RAW, "raw mode while running");
 
         blorp.keys(key);
@@ -202,6 +205,7 @@ async fn q_and_ctrl_c_exit_0_and_restore_the_terminal() {
 
         assert_eq!(status.exit_code(), 0, "{key:?}");
         assert!(!blorp.on_alternate_screen(), "{key:?}");
+        #[cfg(unix)]
         assert_eq!(blorp.modes(), Modes::COOKED, "{key:?}");
     }
 }

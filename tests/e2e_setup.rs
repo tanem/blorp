@@ -1,18 +1,23 @@
 //! Setup and logout in a pseudo-terminal against a local JMAP server, with
 //! a fake token and a fresh token file for each test.
 
+use blorp::cli::KEYRING;
 use blorp::jmap::fake::{EmailSpec, Store};
 
 mod e2e;
 
+#[cfg(unix)]
+use e2e::Modes;
 use e2e::server::LocalJmap;
-use e2e::{Modes, REJECTED, Sandbox, TOKEN};
+use e2e::{REJECTED, Sandbox, TOKEN};
 
 const INTRO: &str = "blorp needs a Fastmail API token. Create one in Fastmail under \
 Settings, Privacy & Security, Connected apps & API tokens, with the Email scope \
 only: not read-only, and not Email submission.";
 
-const STORED: &str = "Stored the API token for kim@example.invalid in the keychain.";
+fn stored() -> String {
+    format!("Stored the API token for kim@example.invalid in {KEYRING}.")
+}
 
 const NO_EMAIL_SCOPE: &str = "The API token does not give access to mail. It needs the Email \
 scope. Run `blorp setup` to store one that has it.";
@@ -52,7 +57,7 @@ async fn with_no_token_blorp_runs_setup_then_opens_the_inbox() {
         .iter()
         .position(|row| row == "API token:")
         .expect("the prompt row");
-    assert_eq!(rows[prompt + 1], STORED, "a line break follows Enter");
+    assert_eq!(rows[prompt + 1], stored(), "a line break follows Enter");
     assert!(rows.join("").contains(INTRO), "{rows:#?}");
     assert!(!blorp.output().contains(TOKEN), "the token was shown");
 }
@@ -100,6 +105,7 @@ async fn ctrl_c_at_the_prompt_exits_with_echo_restored() {
     blorp.keys("fake\x03");
 
     assert_eq!(blorp.wait_exit().exit_code(), 130);
+    #[cfg(unix)]
     assert_eq!(blorp.modes(), Modes::COOKED);
     assert_eq!(sandbox.stored_token(), None);
     assert!(!blorp.entered_alternate_screen());
@@ -150,7 +156,7 @@ async fn setup_prompts_even_with_the_environment_token_set() {
     blorp.keys(&format!("{TOKEN}\r"));
 
     assert_eq!(blorp.wait_exit().exit_code(), 0);
-    assert!(blorp.output().contains(STORED), "{}", blorp.output());
+    assert!(blorp.output().contains(&stored()), "{}", blorp.output());
     assert_eq!(sandbox.stored_token().as_deref(), Some(TOKEN));
 }
 
@@ -164,7 +170,7 @@ fn logout_deletes_the_stored_token() {
     assert!(
         blorp
             .output()
-            .contains("Deleted the API token from the keychain.")
+            .contains(&format!("Deleted the API token from {KEYRING}."))
     );
     assert_eq!(sandbox.stored_token(), None);
 }
@@ -178,7 +184,7 @@ fn logout_succeeds_when_no_token_is_stored() {
     assert!(
         blorp
             .output()
-            .contains("No API token was stored in the keychain.")
+            .contains(&format!("No API token was stored in {KEYRING}."))
     );
 }
 
@@ -191,7 +197,7 @@ fn logout_warns_when_the_environment_token_is_set() {
     assert_eq!(blorp.wait_exit().exit_code(), 0);
     let output = blorp.output();
     assert!(
-        output.contains("Deleted the API token from the keychain."),
+        output.contains(&format!("Deleted the API token from {KEYRING}.")),
         "{output}"
     );
     assert!(

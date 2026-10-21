@@ -16,6 +16,10 @@ _Avoid_: Message (when the whole conversation is meant), email, conversation
 The plain-terminal flow that takes an API token, checks it against Fastmail, and stores it. Runs on first launch or on request.
 _Avoid_: Login, onboarding, auth
 
+**Keyring**:
+The platform's store for secrets, where setup keeps the API token: the login keychain on macOS, Secret Service on Linux, Credential Manager on Windows.
+_Avoid_: Keychain (except for macOS's), vault, secret store
+
 **Reconcile**:
 Bringing the queue back in line with Fastmail: triggered by a push event or once a minute.
 _Avoid_: Sync (for the act), refresh (for the automatic case), poll

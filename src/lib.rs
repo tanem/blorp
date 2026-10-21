@@ -23,7 +23,7 @@ pub mod run;
 pub mod sync;
 pub mod ui;
 
-use cli::{Cli, Command, CommandError, Keychain, Stdin, StoreError, TokenFile, TokenStore};
+use cli::{Cli, Command, CommandError, Keyring, Stdin, StoreError, TokenFile, TokenStore};
 use config::DebugOverrides;
 use jmap::http::FASTMAIL_SESSION_URL;
 use jmap::{Fatal, HttpJmap};
@@ -103,7 +103,7 @@ impl From<StoreError> for Failure {
 /// `blorp setup`: always prompts, whether or not `BLORP_API_TOKEN` is set.
 fn setup() -> Result<(), Failure> {
     let overrides = debug_overrides();
-    let store = token_store(&overrides)?;
+    let store = token_store(&overrides);
     let _log = start_log()?;
     runtime()?.block_on(async {
         cli::setup(
@@ -119,7 +119,7 @@ fn setup() -> Result<(), Failure> {
 
 /// `blorp logout`.
 fn logout() -> Result<(), Failure> {
-    let store = token_store(&debug_overrides())?;
+    let store = token_store(&debug_overrides());
     cli::logout(&*store, env_token().is_some(), &mut io::stdout())?;
     Ok(())
 }
@@ -129,7 +129,7 @@ fn logout() -> Result<(), Failure> {
 /// session fetch and `Mailbox/get` are retried on the usual schedule.
 fn tui() -> Result<(), Failure> {
     let overrides = debug_overrides();
-    let store = token_store(&overrides)?;
+    let store = token_store(&overrides);
     let token = cli::find_token(env_token(), &*store)?;
     let session_url = session_url(&overrides);
     let _log = start_log()?;
@@ -178,11 +178,12 @@ fn session_url(overrides: &DebugOverrides) -> String {
         .unwrap_or_else(|| FASTMAIL_SESSION_URL.to_string())
 }
 
-/// The keychain, or the file `BLORP_TOKEN_STORE` names in a debug build.
-fn token_store(overrides: &DebugOverrides) -> Result<Box<dyn TokenStore>, StoreError> {
+/// The platform keyring, or the file `BLORP_TOKEN_STORE` names in a debug
+/// build.
+fn token_store(overrides: &DebugOverrides) -> Box<dyn TokenStore> {
     match &overrides.token_store {
-        Some(path) => Ok(Box::new(TokenFile::new(path))),
-        None => Ok(Box::new(Keychain::open()?)),
+        Some(path) => Box::new(TokenFile::new(path)),
+        None => Box::new(Keyring::open()),
     }
 }
 

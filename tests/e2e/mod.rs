@@ -32,8 +32,9 @@ const ALTERNATE_SCREEN: &str = "\x1b[?1049h";
 /// A temp directory for one run of blorp: its home, its state directory,
 /// and its token file. Every spawned binary gets an
 /// environment holding only these and what the test adds, so it reaches no
-/// keychain, nothing under the real home directory, and no
-/// `BLORP_API_TOKEN` from the shell that runs the tests.
+/// keyring, nothing under the real home directory, and no
+/// `BLORP_API_TOKEN` from the shell that runs the tests. On Windows it also
+/// gets `SystemRoot`, without which the binary cannot open a socket.
 pub struct Sandbox {
     dir: TempDir,
     vars: Vec<(String, String)>,
@@ -103,11 +104,18 @@ impl Sandbox {
         let base = [
             ("HOME", home.to_str().unwrap()),
             ("XDG_STATE_HOME", &format!("{}/state", home.display())),
+            ("LOCALAPPDATA", &format!("{}/AppData/Local", home.display())),
             ("BLORP_TOKEN_STORE", token_path.to_str().unwrap()),
             ("TERM", "xterm-256color"),
         ];
         for (name, value) in base {
             command.env(name, value);
+        }
+        if cfg!(windows) {
+            command.env(
+                "SystemRoot",
+                std::env::var_os("SystemRoot").expect("SystemRoot"),
+            );
         }
         for (name, value) in &self.vars {
             command.env(name, value);
@@ -143,7 +151,7 @@ impl Sandbox {
         });
         let writer = pair.master.take_writer().expect("pty writer");
         Blorp {
-            master: pair.master,
+            master: Some(pair.master),
             writer,
             child,
             shared,
@@ -174,14 +182,19 @@ struct State {
 
 /// A running blorp and the terminal it draws on.
 pub struct Blorp {
-    master: Box<dyn MasterPty + Send>,
+    /// `None` once blorp has exited on Windows, where the pseudo-console
+    /// must close before its output ends.
+    master: Option<Box<dyn MasterPty + Send>>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
     shared: Arc<Shared>,
     redact: bool,
 }
 
-/// The terminal modes blorp leaves behind.
+/// The terminal modes blorp leaves behind. Unix only: ConPTY gives no way
+/// to read the console mode of the child's console from outside, so the
+/// Windows runs leave these checks out.
+#[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct Modes {
     /// Line editing, off in raw mode.
@@ -189,6 +202,7 @@ pub struct Modes {
     pub echo: bool,
 }
 
+#[cfg(unix)]
 impl Modes {
     /// The modes of a terminal out of raw mode.
     pub const COOKED: Modes = Modes {
@@ -249,14 +263,16 @@ impl Blorp {
         self.writer.flush().expect("type keys");
     }
 
-    /// Resizes the terminal, which sends blorp `SIGWINCH`.
+    /// Resizes the terminal, which sends blorp `SIGWINCH` on Unix and a
+    /// resize event on Windows.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.state().parser.screen_mut().set_size(rows, cols);
-        self.master.resize(size(cols, rows)).expect("resize");
+        self.master().resize(size(cols, rows)).expect("resize");
     }
 
     /// Waits until the terminal stops echoing, as it does once a hidden
     /// prompt is reading.
+    #[cfg(unix)]
     pub fn wait_echo_off(&self) {
         let deadline = Instant::now() + TIMEOUT;
         while self.modes().echo {
@@ -265,8 +281,15 @@ impl Blorp {
         }
     }
 
+    /// Returns at once: the console mode cannot be read through ConPTY, and
+    /// keys typed before the prompt turns echo off wait in the console's
+    /// input buffer, unechoed, until the prompt reads them.
+    #[cfg(windows)]
+    pub fn wait_echo_off(&self) {}
+
+    #[cfg(unix)]
     pub fn modes(&self) -> Modes {
-        let termios = self.master.get_termios().expect("terminal modes");
+        let termios = self.master().get_termios().expect("terminal modes");
         let flags = termios.local_flags.bits();
         Modes {
             canonical: flags & libc::ICANON != 0,
@@ -292,6 +315,10 @@ impl Blorp {
             }
             std::thread::sleep(Duration::from_millis(10));
         };
+        // ConPTY ends the output only when the pseudo-console closes.
+        if cfg!(windows) {
+            self.master = None;
+        }
         let mut state = self.state();
         while !state.closed {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -314,6 +341,10 @@ impl Blorp {
     /// Whether the terminal is on the alternate screen now.
     pub fn on_alternate_screen(&self) -> bool {
         self.state().parser.screen().alternate_screen()
+    }
+
+    fn master(&self) -> &(dyn MasterPty + Send) {
+        self.master.as_deref().expect("blorp is running")
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
