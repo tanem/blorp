@@ -254,6 +254,7 @@ fn errors_close_the_prompt_and_show_in_the_status_line() {
         ("r all", "Usage: :read"),
         ("unread 2", "Usage: :unread"),
         ("quit now", "Usage: :quit"),
+        ("help keys", "Usage: :help"),
         ("undo two", "Usage: :undo [count]"),
         ("undo 0", "Usage: :undo [count]"),
         ("undo 1 2", "Usage: :undo [count]"),
@@ -403,7 +404,7 @@ fn tab_and_shift_tab_cycle_through_the_command_names_and_aliases() {
     let names = vec![
         "archive", "e", "delete", "d", "spam", "move", "m", "snooze", "z", "unsnooze", "uz",
         "flag", "f", "read", "r", "unread", "open", "o", "undo", "u", "redo", "view", "v",
-        "filter", "sort", "refresh", "dry", "quit", "q",
+        "filter", "sort", "refresh", "dry", "help", "h", "quit", "q",
     ];
     assert_eq!(candidates(&h), Some((names.clone(), 0)));
     assert_eq!(h.app.prompt(), Some("archive"));
@@ -413,7 +414,7 @@ fn tab_and_shift_tab_cycle_through_the_command_names_and_aliases() {
     press(&mut h, KeyCode::BackTab);
     press(&mut h, KeyCode::BackTab);
     assert_eq!(h.app.prompt(), Some("q"));
-    assert_eq!(candidates(&h), Some((names, 28)));
+    assert_eq!(candidates(&h), Some((names, 30)));
     assert_eq!(h.app.prompt_cursor(), Some(1));
 }
 

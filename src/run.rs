@@ -99,7 +99,8 @@ pub fn unconfirmed(n: usize) -> String {
 /// and says which: starts the `sync` task, sends the launch message, then
 /// turns key events, request results, push events, spinner ticks, and the
 /// reconcile tick at `App`'s `next_reconcile_at` into messages, redrawing
-/// once after everything ready is handled. While `q` waits for the
+/// once after everything ready is handled. The terminal's height is sent
+/// before the launch message and again on each resize. While `q` waits for the
 /// outbox, keys are not read, and the wait ends at `App`'s `quit_at`.
 pub async fn run<B, K, J, C>(
     terminal: &mut Terminal<B>,
@@ -134,6 +135,10 @@ where
     let quit = tokio::time::sleep(Duration::ZERO);
     tokio::pin!(quit);
     let mut quit_at = None;
+    let height = terminal.size().map_err(io::Error::other)?.height;
+    if let ControlFlow::Break(exit) = executor.dispatch(&mut app, &clock, Msg::Resize(height)) {
+        return Ok(exit);
+    }
     let mut next = Some(Msg::Start);
     loop {
         if let Some(msg) = next.take()
@@ -169,6 +174,7 @@ where
         next = tokio::select! {
             key = keys.next(), if quit_at.is_none() => match key {
                 Some(Ok(Event::Key(key))) => ui::key_msg(&app, key),
+                Some(Ok(Event::Resize(_, height))) => Some(Msg::Resize(height)),
                 Some(Ok(_)) => None,
                 Some(Err(error)) => return Err(error),
                 None => return Ok(Exit::Quit),

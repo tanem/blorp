@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use crate::command::{self, Command};
 use crate::config::{self, View};
 use crate::filter;
+use crate::help;
 use crate::jmap::{self, Class, SetResult};
 use crate::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, QueryResult, Reconciled};
 use crate::mail::{self, Email, Mailboxes, QueueMailbox, Role, SNOOZE_MAILBOX, Thread};
@@ -99,6 +100,10 @@ pub struct App {
     snooze_picker: Option<SnoozePicker>,
     /// The `m` picker, while it is open.
     move_picker: Option<MovePicker>,
+    /// The help overlay's first line shown, while it is open.
+    help: Option<usize>,
+    /// The terminal's height in rows, 0 until the first [`Msg::Resize`].
+    height: u16,
     /// The snooze mailbox being created, and the snooze waiting for it.
     creating: Option<Creating>,
     /// Whether the due-snooze check waits for the first queue to load.
@@ -223,6 +228,21 @@ pub enum PickerKey {
     Cancel,
     Char(char),
     Backspace,
+}
+
+/// A key at the help overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpKey {
+    /// `j`: scroll down a line.
+    Down,
+    /// `k`: scroll up a line.
+    Up,
+    /// `Ctrl-d`: scroll down half a page.
+    HalfDown,
+    /// `Ctrl-u`: scroll up half a page.
+    HalfUp,
+    /// Any key that does not scroll.
+    Close,
 }
 
 /// What asked for a reconcile. `Refresh` orders after `Auto`, so the
@@ -557,6 +577,12 @@ pub enum Msg {
     OpenSnooze,
     /// `m`: open the move picker for the selection.
     OpenMove,
+    /// `?` or `:help`: open the help overlay at its top.
+    OpenHelp,
+    /// A key at the open help overlay.
+    Help(HelpKey),
+    /// The terminal's height in rows, at launch and on a resize.
+    Resize(u16),
     /// A key at the open snooze or move picker.
     Picker(PickerKey),
     /// `:snooze <time>` or a picker choice: snooze the selection.
@@ -770,6 +796,8 @@ impl App {
             schedule_file: None,
             snooze_picker: None,
             move_picker: None,
+            help: None,
+            height: 0,
             creating: None,
             due_at_launch: false,
             checking: None,
@@ -864,6 +892,11 @@ impl App {
             index: picker.index,
             threads: self.queue.selection(picker.count.unwrap_or(1)).len(),
         })
+    }
+
+    /// The help overlay's first line shown, while it is open.
+    pub fn help(&self) -> Option<usize> {
+        self.help
     }
 
     /// The move picker, while it is open.
@@ -1677,6 +1710,7 @@ impl App {
             Command::Sort(Some(sort)) => Msg::SetSort(sort),
             Command::Refresh => Msg::Refresh,
             Command::Dry(on) => Msg::SetDryRun(on),
+            Command::Help => Msg::OpenHelp,
             Command::Quit => Msg::Quit,
         };
         handle(self, msg)
@@ -1774,6 +1808,32 @@ impl App {
             index: 0,
             count,
         });
+    }
+
+    /// Handles a key at the help overlay: `Down` and `Up` scroll a line,
+    /// `HalfDown` and `HalfUp` half a page, no further than its last page,
+    /// and `Close` closes it.
+    fn help_key(&mut self, key: HelpKey) {
+        let Some(top) = self.help else {
+            return;
+        };
+        let half = (help::page(self.height) / 2).max(1);
+        let top = match key {
+            HelpKey::Down => top + 1,
+            HelpKey::Up => top.saturating_sub(1),
+            HelpKey::HalfDown => top + half,
+            HelpKey::HalfUp => top.saturating_sub(half),
+            HelpKey::Close => {
+                self.help = None;
+                return;
+            }
+        };
+        self.help = Some(top.min(self.last_help_top()));
+    }
+
+    /// The first line the help overlay shows on its last page.
+    fn last_help_top(&self) -> usize {
+        help::lines().len().saturating_sub(help::page(self.height))
     }
 
     /// Handles a key at the move picker: a character or Backspace changes
@@ -3279,6 +3339,20 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
         }
         Msg::OpenMove => {
             app.open_move();
+            Vec::new()
+        }
+        Msg::OpenHelp => {
+            app.take_count();
+            app.help = Some(0);
+            Vec::new()
+        }
+        Msg::Help(key) => {
+            app.help_key(key);
+            Vec::new()
+        }
+        Msg::Resize(height) => {
+            app.height = height;
+            app.help = app.help.map(|top| top.min(app.last_help_top()));
             Vec::new()
         }
         Msg::Picker(key) if app.move_picker.is_some() => app.move_picker_key(key),
