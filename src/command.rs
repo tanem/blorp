@@ -12,10 +12,10 @@ use crate::snooze::{self, When};
 
 /// Each command name followed by its aliases, in the order Tab offers
 /// them.
-const NAMES: [&str; 27] = [
+const NAMES: [&str; 29] = [
     "archive", "e", "delete", "d", "spam", "move", "m", "snooze", "z", "unsnooze", "uz", "flag",
-    "f", "read", "r", "unread", "undo", "u", "redo", "view", "v", "filter", "sort", "refresh",
-    "dry", "quit", "q",
+    "f", "read", "r", "unread", "open", "o", "undo", "u", "redo", "view", "v", "filter", "sort",
+    "refresh", "dry", "quit", "q",
 ];
 
 /// A command typed at the `:` prompt.
@@ -40,6 +40,8 @@ pub enum Command {
     Read,
     /// `:unread`: mark unread.
     Unread,
+    /// `:open`, `:o`: open the selection in the browser, as `o` does.
+    Open,
     /// `:undo [count]`, `:u [count]`. The count given here is used in place
     /// of one typed before the colon.
     Undo(Option<usize>),
@@ -121,6 +123,7 @@ pub fn parse(text: &str) -> Result<Option<Command>, Error> {
         "flag" | "f" => bare(Command::Flag, ":flag")?,
         "read" | "r" => bare(Command::Read, ":read")?,
         "unread" => bare(Command::Unread, ":unread")?,
+        "open" | "o" => bare(Command::Open, ":open")?,
         "undo" | "u" => match rest {
             "" => Command::Undo(None),
             count => match count.parse() {

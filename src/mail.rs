@@ -395,6 +395,25 @@ impl Thread {
     }
 }
 
+/// The address of `thread` in Fastmail's web UI, under the mailbox named
+/// `mailbox`: the thread's id and its newest email's id, joined by `.`.
+/// The web UI shows the whole thread there with that email expanded, and
+/// opens it under a mailbox that holds none of its emails too. It adds its
+/// own `?u=` parameter, so none is given here.
+pub fn web_url(mailbox: &str, thread: &Thread) -> String {
+    let newest = thread
+        .emails
+        .iter()
+        .max_by_key(|e| e.received_at)
+        .unwrap_or_else(|| thread.hit());
+    let mut url = url::Url::parse("https://app.fastmail.com/mail").expect("valid URL");
+    url.path_segments_mut()
+        .expect("URL with a path")
+        .push(mailbox)
+        .push(&format!("{}.{}", thread.id, newest.id));
+    url.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,6 +445,48 @@ mod tests {
             sender: None,
             subject: None,
             received_at: Timestamp::UNIX_EPOCH,
+        }
+    }
+
+    fn thread_of(emails: &[(&str, &str)]) -> Thread {
+        let emails = emails
+            .iter()
+            .map(|(id, received)| Email {
+                id: id.to_string(),
+                received_at: received.parse().unwrap(),
+                ..email(&["inbox"])
+            })
+            .collect();
+        Thread::new("Tthread".into(), emails, "e-old").unwrap()
+    }
+
+    #[test]
+    fn the_web_url_names_the_mailbox_the_thread_and_its_newest_email() {
+        let thread = thread_of(&[
+            ("e-old", "2026-10-18T09:00:00Z"),
+            ("e-new", "2026-10-18T11:00:00Z"),
+            ("e-mid", "2026-10-18T10:00:00Z"),
+        ]);
+        assert_eq!(
+            web_url("Inbox", &thread),
+            "https://app.fastmail.com/mail/Inbox/Tthread.e-new"
+        );
+    }
+
+    #[test]
+    fn the_web_url_escapes_the_mailbox_name() {
+        let thread = thread_of(&[("e-old", "2026-10-18T09:00:00Z")]);
+        for (mailbox, segment) in [
+            ("Snoozed (blorp)", "Snoozed%20(blorp)"),
+            ("A/B", "A%2FB"),
+            ("Café", "Caf%C3%A9"),
+            ("50%", "50%25"),
+            ("Q?#", "Q%3F%23"),
+        ] {
+            assert_eq!(
+                web_url(mailbox, &thread),
+                format!("https://app.fastmail.com/mail/{segment}/Tthread.e-old")
+            );
         }
     }
 

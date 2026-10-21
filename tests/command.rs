@@ -402,8 +402,8 @@ fn tab_and_shift_tab_cycle_through_the_command_names_and_aliases() {
     press(&mut h, KeyCode::Tab);
     let names = vec![
         "archive", "e", "delete", "d", "spam", "move", "m", "snooze", "z", "unsnooze", "uz",
-        "flag", "f", "read", "r", "unread", "undo", "u", "redo", "view", "v", "filter", "sort",
-        "refresh", "dry", "quit", "q",
+        "flag", "f", "read", "r", "unread", "open", "o", "undo", "u", "redo", "view", "v",
+        "filter", "sort", "refresh", "dry", "quit", "q",
     ];
     assert_eq!(candidates(&h), Some((names.clone(), 0)));
     assert_eq!(h.app.prompt(), Some("archive"));
@@ -413,7 +413,7 @@ fn tab_and_shift_tab_cycle_through_the_command_names_and_aliases() {
     press(&mut h, KeyCode::BackTab);
     press(&mut h, KeyCode::BackTab);
     assert_eq!(h.app.prompt(), Some("q"));
-    assert_eq!(candidates(&h), Some((names, 26)));
+    assert_eq!(candidates(&h), Some((names, 28)));
     assert_eq!(h.app.prompt_cursor(), Some(1));
 }
 
