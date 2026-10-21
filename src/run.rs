@@ -391,6 +391,13 @@ impl<J: Jmap> Executor<J> {
                         let _ = self.tx.send(Msg::ConfigFailed { error });
                     }
                 }
+                Effect::Open { url } => {
+                    if let Err(error) = open::that_detached(&url) {
+                        tracing::error!("could not open {url}: {error}");
+                        let error = error.to_string();
+                        let _ = self.tx.send(Msg::OpenFailed { error });
+                    }
+                }
                 Effect::LogDryRun {
                     step,
                     action,

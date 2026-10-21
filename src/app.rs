@@ -16,7 +16,7 @@ use crate::config::{self, View};
 use crate::filter;
 use crate::jmap::{self, Class, SetResult};
 use crate::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, QueryResult, Reconciled};
-use crate::mail::{Email, Mailboxes, QueueMailbox, Role, SNOOZE_MAILBOX, Thread};
+use crate::mail::{self, Email, Mailboxes, QueueMailbox, Role, SNOOZE_MAILBOX, Thread};
 use crate::prompt::{History as PromptHistory, Key, Prompt};
 use crate::queue::Queue;
 use crate::snooze::{self, Preset, Schedule, When};
@@ -39,6 +39,9 @@ pub const PROBE_CAP: SignedDuration = SignedDuration::from_secs(60);
 
 /// How long `q` waits for the outbox to drain.
 pub const QUIT_WAIT: SignedDuration = SignedDuration::from_secs(3);
+
+/// The most threads `o` opens at once.
+pub const OPEN_LIMIT: usize = 10;
 
 /// The status message on entering the disconnected state.
 const DISCONNECTED: &str = "Disconnected from Fastmail";
@@ -568,6 +571,13 @@ pub enum Msg {
     ToggleRead,
     /// `:read` or `:unread`: mark the selection read, or unread.
     SetRead(bool),
+    /// `o` or `:open`: open the selection in Fastmail's web UI, one tab per
+    /// thread, unless it holds more than [`OPEN_LIMIT`] threads.
+    Open,
+    /// Opening a thread in the browser failed.
+    OpenFailed {
+        error: String,
+    },
     /// `x`: mark or unmark the row under the cursor, or as many rows as the
     /// count, and move past them.
     Mark,
@@ -701,6 +711,11 @@ pub enum Effect {
     WriteConfig {
         path: PathBuf,
         contents: String,
+    },
+    /// Open `url` in the browser. On failure, report back with
+    /// [`Msg::OpenFailed`].
+    Open {
+        url: String,
     },
     /// Log a dry-run action, undo, or redo to the `blorp::dry_run` target at
     /// info.
@@ -1645,6 +1660,7 @@ impl App {
             Command::Flag => return self.run_on_selection(Msg::ToggleFlag, count),
             Command::Read => return self.run_on_selection(Msg::SetRead(true), count),
             Command::Unread => return self.run_on_selection(Msg::SetRead(false), count),
+            Command::Open => return self.run_on_selection(Msg::Open, count),
             Command::Undo(n) => {
                 self.pending_count = n.or(count);
                 Msg::Undo
@@ -1692,6 +1708,44 @@ impl App {
                 self.set_keyword(repeat)
             }
             Action::Return => Vec::new(),
+        }
+    }
+
+    /// Opens each thread of the selection in the browser and closes the
+    /// visual range, or refuses when the selection holds more than
+    /// [`OPEN_LIMIT`] threads. Nothing is sent to Fastmail, so this works in
+    /// dry run and while disconnected, and records no undo entry.
+    fn open(&mut self, count: Option<usize>) -> Vec<Effect> {
+        let rows = self.queue.selection(count.unwrap_or(1));
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        if rows.len() > OPEN_LIMIT {
+            self.status = format!(
+                "Too many to open: {} (limit {OPEN_LIMIT})",
+                threads(rows.len())
+            );
+            return Vec::new();
+        }
+        self.queue.close_visual();
+        let mailbox = self.web_mailbox();
+        let effects: Vec<Effect> = rows
+            .iter()
+            .map(|&row| Effect::Open {
+                url: mail::web_url(mailbox, &self.queue.threads()[row]),
+            })
+            .collect();
+        self.status = format!("Opened {}", threads(effects.len()));
+        effects
+    }
+
+    /// The mailbox a thread opens under in the web UI: the queue mailbox's
+    /// own name, or `Inbox` for `in:any`.
+    fn web_mailbox(&self) -> &str {
+        match self.shown.as_ref().map(|s| &s.mailbox) {
+            Some(QueueMailbox::One(id)) => self.mailboxes.by_id(id).map_or("Inbox", |m| &m.name),
+            Some(QueueMailbox::MissingSnooze) => SNOOZE_MAILBOX,
+            Some(QueueMailbox::Any(_)) | None => "Inbox",
         }
     }
 
@@ -3269,6 +3323,14 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
                 action: Action::Read(on),
                 count,
             })
+        }
+        Msg::Open => {
+            let count = app.take_count();
+            app.open(count)
+        }
+        Msg::OpenFailed { error } => {
+            app.status = format!("Could not open the browser: {error}");
+            Vec::new()
         }
         Msg::MailboxCreated { job, result } => app.mailbox_created(job, result),
         Msg::SnoozedLoaded { result } => app.snoozed_loaded(result),

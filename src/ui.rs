@@ -524,6 +524,7 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Char('m') => Some(Msg::OpenMove),
         KeyCode::Char('f') => Some(Msg::ToggleFlag),
         KeyCode::Char('r') => Some(Msg::ToggleRead),
+        KeyCode::Char('o') => Some(Msg::Open),
         KeyCode::Char('u') => Some(Msg::Undo),
         KeyCode::Char('x') => Some(Msg::Mark),
         KeyCode::Char('X') => Some(Msg::ClearMarks),
