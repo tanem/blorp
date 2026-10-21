@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::app::{App, Effect, Msg, Source, update};
-use crate::jmap::retry::retrying;
+use crate::jmap::retry::{RETRIES, retrying};
 use crate::jmap::{Class, EmailUpdate, Error, Fatal, Jmap};
 use crate::mail::Mailboxes;
 use crate::undo::{Replay, Replayed};
@@ -80,7 +80,7 @@ pub enum Exit {
 pub async fn launch<J: Jmap>(jmap: &J, now: Timestamp) -> Result<App, Error> {
     let mailboxes = retrying(
         || jmap.get_mailboxes(),
-        |retry| tracing::info!("retrying Mailbox/get ({retry}/3)"),
+        |retry| tracing::info!("retrying Mailbox/get ({retry}/{RETRIES})"),
     )
     .await?;
     Ok(App::new(Mailboxes::from(mailboxes), now))
@@ -214,7 +214,7 @@ fn outbox<J: Jmap>(
             let retry = Retry {
                 tx: tx.clone(),
                 from: Source::Job(job),
-                on: true,
+                retry: true,
             };
             let msg = match work {
                 Job::Set(update) => Msg::Sent {
@@ -274,12 +274,13 @@ async fn replay_emails<J: Jmap>(
 }
 
 /// How a request is retried: on the usual schedule, reporting each retry
-/// as [`Msg::Retrying`], or while disconnected not at all, since then
-/// every request is a probe and the probe backoff spaces them.
+/// as [`Msg::Retrying`], or for a probe while disconnected not at all,
+/// since the probe backoff spaces probes.
 struct Retry {
     tx: UnboundedSender<Msg>,
     from: Source,
-    on: bool,
+    /// False for a probe.
+    retry: bool,
 }
 
 impl Retry {
@@ -288,7 +289,7 @@ impl Retry {
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, Error>>,
     {
-        if !self.on {
+        if !self.retry {
             return call().await;
         }
         retrying(call, |retry| {
@@ -315,23 +316,26 @@ impl<J: Jmap> Executor<J> {
     /// Sets the time, runs `update`, and carries out its effects. A queue
     /// query or reconcile aborts the one before it, if that is still
     /// running. A schedule write that fails cancels the outbox job it was
-    /// written for. A query is retried while connected; while disconnected
-    /// it is a probe, sent once.
+    /// written for.
     fn dispatch(&mut self, app: &mut App, clock: &impl Clock, msg: Msg) -> ControlFlow<Exit> {
         app.now = clock.now();
         let mut cancelled = None;
         for effect in update(app, msg) {
-            let retry = |from| Retry {
+            let policy = |from, retry| Retry {
                 tx: self.tx.clone(),
                 from,
-                on: app.connected(),
+                retry,
             };
             match effect {
                 Effect::SetEmails { job, .. } | Effect::Replay { job, .. }
                     if cancelled == Some(job) => {}
-                Effect::Query { generation, query } => {
+                Effect::Query {
+                    generation,
+                    query,
+                    retry,
+                } => {
                     let jmap = self.jmap.clone();
-                    let retry = retry(Source::Query(generation));
+                    let retry = policy(Source::Query(generation), retry);
                     self.supersede(async move {
                         let result = retry.run(|| jmap.query(&query)).await;
                         Msg::Loaded { generation, result }
@@ -341,9 +345,10 @@ impl<J: Jmap> Executor<J> {
                     generation,
                     query,
                     snoozed,
+                    retry,
                 } => {
                     let jmap = self.jmap.clone();
-                    let retry = retry(Source::Query(generation));
+                    let retry = policy(Source::Query(generation), retry);
                     self.supersede(async move {
                         let result = retry.run(|| jmap.reconcile(&query, snoozed.as_ref())).await;
                         Msg::Reconciled { generation, result }
@@ -358,10 +363,10 @@ impl<J: Jmap> Executor<J> {
                 Effect::CreateMailbox { job, name } => {
                     let _ = self.outbox.send((job, Job::CreateMailbox(name)));
                 }
-                Effect::QuerySnoozed { query } => {
+                Effect::QuerySnoozed { query, retry } => {
                     let jmap = self.jmap.clone();
                     let tx = self.tx.clone();
-                    let retry = retry(Source::SnoozeCheck);
+                    let retry = policy(Source::SnoozeCheck, retry);
                     tokio::spawn(async move {
                         let result = retry.run(|| jmap.query(&query)).await;
                         let _ = tx.send(Msg::SnoozedLoaded { result });

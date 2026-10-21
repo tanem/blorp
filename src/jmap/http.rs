@@ -528,10 +528,10 @@ fn response_of<T: DeserializeOwned>(
     serde_json::from_value(response.args.clone()).map_err(|e| Error::Parse(e.to_string()))
 }
 
-/// A response's body, or the failure a non-success status reports: a
-/// request-level error when the body is JMAP problem details, and the
-/// wait a `Retry-After` header asks for on HTTP 429 or 5xx. A bug is
-/// logged with the body.
+/// A response's body, or the failure a non-success status reports: the
+/// wait a `Retry-After` header asks for on HTTP 429, 5xx, or the
+/// request-level `limit` error, else a request-level error when the body
+/// is JMAP problem details. A bug is logged with the body.
 async fn read_body(response: reqwest::Response) -> Result<Vec<u8>, Error> {
     let status = response.status().as_u16();
     let retry_after = response
@@ -549,12 +549,11 @@ async fn read_body(response: reqwest::Response) -> Result<Vec<u8>, Error> {
             let kind = problem["type"].as_str()?.strip_prefix(PROBLEM_PREFIX)?;
             Some(kind.to_string())
         });
+    let busy = status == 429 || (500..600).contains(&status) || problem.as_deref() == Some("limit");
     let error = match (problem, retry_after) {
         _ if matches!(status, 401 | 403) => Error::Status(status),
+        (_, Some(wait)) if busy => Error::RetryAfter { status, wait },
         (Some(kind), _) => Error::Request(kind),
-        (None, Some(wait)) if status == 429 || (500..600).contains(&status) => {
-            Error::RetryAfter { status, wait }
-        }
         (None, _) => Error::Status(status),
     };
     if error.class() == Class::Bug {

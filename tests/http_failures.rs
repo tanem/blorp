@@ -97,6 +97,24 @@ async fn a_429_carries_the_wait_its_retry_after_asks_for() {
 }
 
 #[tokio::test]
+async fn the_limit_error_carries_the_wait_its_retry_after_asks_for() {
+    let server = MockServer::start().await;
+    let jmap = connect(&server).await;
+    answer(&server, problem("limit").insert_header("Retry-After", "3")).await;
+
+    let error = jmap.get_mailboxes().await.unwrap_err();
+
+    assert_eq!(
+        error,
+        Error::RetryAfter {
+            status: 400,
+            wait: Duration::from_secs(3),
+        }
+    );
+    assert_eq!(error.class(), Class::Transient);
+}
+
+#[tokio::test]
 async fn a_429_without_retry_after_is_transient() {
     let server = MockServer::start().await;
     let jmap = connect(&server).await;

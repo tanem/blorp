@@ -182,6 +182,7 @@ fn not_updated_rolls_the_archive_back_and_reconciles() {
             generation: 2,
             query: inbox_query(),
             snoozed: None,
+            retry: true,
         }]
     );
 }
@@ -207,6 +208,7 @@ fn a_failed_request_rolls_the_archive_back_and_reconciles() {
             generation: 2,
             query: inbox_query(),
             snoozed: None,
+            retry: true,
         }]
     );
     h.resolve(effects);
@@ -237,6 +239,7 @@ fn a_failed_archive_reconciles_once_the_outbox_drains() {
             generation: 2,
             query: inbox_query(),
             snoozed: None,
+            retry: true,
         }]
     );
     h.resolve(effects);

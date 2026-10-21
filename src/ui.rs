@@ -729,8 +729,12 @@ mod tests {
     #[test]
     fn retrying_80x24() {
         let mut h = Harness::loaded(busy_inbox());
+        let generation = match h.send(Msg::Wake)[..] {
+            [crate::app::Effect::Reconcile { generation, .. }] => generation,
+            ref other => panic!("{other:?}"),
+        };
         h.send(Msg::Retrying {
-            from: crate::app::Source::Query(1),
+            from: crate::app::Source::Query(generation),
             retry: 2,
         });
 

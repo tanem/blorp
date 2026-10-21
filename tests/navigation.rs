@@ -39,6 +39,7 @@ fn launch_queries_the_inbox_newest_first() {
         [Effect::Query {
             generation: 1,
             query: inbox_query(),
+            retry: true,
         }]
     );
 }

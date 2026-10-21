@@ -618,19 +618,23 @@ pub enum Msg {
 /// Something for the executor to do.
 #[derive(Debug, PartialEq)]
 pub enum Effect {
-    /// Run a queue query and report it back as [`Msg::Loaded`].
+    /// Run a queue query and report it back as [`Msg::Loaded`]. With
+    /// `retry`, a transient failure is retried; without, while
+    /// disconnected, the query is a probe and is sent once.
     Query {
         generation: u64,
         query: EmailQuery,
+        retry: bool,
     },
     /// Run a queue query with `Mailbox/get` in its first request, and the
     /// snooze mailbox's query too when there is one, and report it back as
-    /// [`Msg::Reconciled`]. It supersedes a query in flight as
-    /// [`Effect::Query`] does.
+    /// [`Msg::Reconciled`]. It supersedes a query in flight, and is
+    /// retried or not, as [`Effect::Query`] is.
     Reconcile {
         generation: u64,
         query: EmailQuery,
         snoozed: Option<EmailQuery>,
+        retry: bool,
     },
     /// Send an action's or a redo's `Email/set` through the outbox, after
     /// every job before it, and report it back as [`Msg::Sent`].
@@ -651,9 +655,11 @@ pub enum Effect {
         name: String,
     },
     /// Run a query on the snooze mailbox, beside any queue query, and
-    /// report it back as [`Msg::SnoozedLoaded`].
+    /// report it back as [`Msg::SnoozedLoaded`], retried or not as
+    /// [`Effect::Query`] is.
     QuerySnoozed {
         query: EmailQuery,
+        retry: bool,
     },
     /// Replace the schedule file with `contents` at once, before any effect
     /// after this one. On failure, skip the effects for `job` and report
@@ -986,6 +992,7 @@ impl App {
         vec![Effect::Query {
             generation: self.generation,
             query: self.with_extra(query),
+            retry: self.connected,
         }]
     }
 
@@ -1094,19 +1101,22 @@ impl App {
         Thread::new(id, emails, &hit)
     }
 
-    /// Records whether a request reached Fastmail. A success reconnects,
-    /// saying so, and puts the reconcile tick back a minute away. A
-    /// transient failure, which the executor has already retried,
+    /// Records what a request's reply says about the connection. A success
+    /// reconnects, saying so, and puts the reconcile tick back a minute
+    /// away. A transient failure, which the executor has already retried,
     /// disconnects, saying so, and while disconnected puts the next probe
-    /// the backoff away and doubles the backoff. A bug changes nothing.
-    fn heard(&mut self, failure: Option<&Error>) {
-        match failure {
-            None if !self.connected => {
+    /// the backoff away and doubles the backoff. A bug or a fatal failure
+    /// changes nothing.
+    fn record_reply<T>(&mut self, reply: &Result<T, Error>) {
+        match reply {
+            Ok(_) if !self.connected => {
                 self.connected = true;
                 self.next_reconcile_at = self.now + RECONCILE_INTERVAL;
                 self.status = "Reconnected".into();
             }
-            Some(error) if error.class() == Class::Transient => {
+            Err(error) if error.class() == Class::Transient => {
+                // The probes take over from a reconcile waiting to run.
+                self.pending_reconcile = None;
                 if self.connected {
                     self.connected = false;
                     self.probe_wait = PROBE_START;
@@ -1886,14 +1896,14 @@ impl App {
     /// snooze that waited for it goes ahead on those of its threads still
     /// in the queue.
     fn mailbox_created(&mut self, job: u64, result: Result<jmap::Mailbox, Error>) -> Vec<Effect> {
+        self.record_reply(&result);
         if let Err(error) = &result {
             match error.class() {
                 Class::Fatal(fatal) => return vec![Effect::Fatal(fatal)],
-                Class::Transient => return self.lost(job, error),
+                Class::Transient => return self.lost(job),
                 Class::Bug => {}
             }
         }
-        self.heard(result.as_ref().err());
         self.retrying.remove(&Source::Job(job));
         let Some(creating) = self.creating.take_if(|c| c.job == job) else {
             return Vec::new();
@@ -2343,15 +2353,13 @@ impl App {
 
     /// Handles an action's or a redo's `Email/set` result.
     fn sent(&mut self, job: u64, result: Result<SetResult, Error>) -> Vec<Effect> {
-        if result.is_ok() {
-            self.heard(None);
-        }
+        self.record_reply(&result);
         let failure = match result {
             Ok(set) if set.not_updated.is_empty() => None,
             Ok(set) => Some(not_updated(set.not_updated.len())),
             Err(error) => match error.class() {
                 Class::Fatal(fatal) => return vec![Effect::Fatal(fatal)],
-                Class::Transient => return self.lost(job, &error),
+                Class::Transient => return self.lost(job),
                 Class::Bug => Some(error.to_string()),
             },
         };
@@ -2360,29 +2368,26 @@ impl App {
 
     /// Handles an undo job's result.
     fn replayed(&mut self, job: u64, result: Result<Replayed, Error>) -> Vec<Effect> {
-        if result.is_ok() {
-            self.heard(None);
-        }
+        self.record_reply(&result);
         let (failure, skipped) = match result {
             Ok(r) if r.not_updated.is_empty() => (None, r.skipped),
             Ok(r) => (Some(not_updated(r.not_updated.len())), Vec::new()),
             Err(error) => match error.class() {
                 Class::Fatal(fatal) => return vec![Effect::Fatal(fatal)],
-                Class::Transient => return self.lost(job, &error),
+                Class::Transient => return self.lost(job),
                 Class::Bug => (Some(error.to_string()), Vec::new()),
             },
         };
         self.answered(job, failure, skipped)
     }
 
-    /// Handles outbox job `job` failing despite its retries, `error` being
-    /// the last failure. blorp is disconnected and the outbox holds back
+    /// Handles outbox job `job` failing despite its retries, which has
+    /// disconnected blorp and the outbox holds back
     /// the jobs behind it, which are dropped: every job in the outbox is
     /// rolled back, newest first, and its entry dropped, and a snooze
     /// waiting for the snooze mailbox is abandoned. No reconcile is issued;
     /// the probe that reconnects is one.
-    fn lost(&mut self, job: u64, error: &Error) -> Vec<Effect> {
-        self.heard(Some(error));
+    fn lost(&mut self, job: u64) -> Vec<Effect> {
         let mut effects = vec![Effect::DropJobs { through: self.job }];
         self.retrying
             .retain(|from, _| !matches!(from, Source::Job(_)));
@@ -2413,7 +2418,6 @@ impl App {
         if schedule {
             effects.extend(self.schedule_write(None));
         }
-        self.pending_reconcile = None;
         if let Some(quitting) = &mut self.quitting {
             quitting.failed += n;
         }
@@ -2529,7 +2533,10 @@ impl App {
         match self.snoozed_query() {
             Some(query) => {
                 self.checking = Some(self.job);
-                vec![Effect::QuerySnoozed { query }]
+                vec![Effect::QuerySnoozed {
+                    query,
+                    retry: self.connected,
+                }]
             }
             None => self.forget_due(),
         }
@@ -2548,7 +2555,7 @@ impl App {
         {
             return vec![Effect::Fatal(fatal)];
         }
-        self.heard(result.as_ref().err());
+        self.record_reply(&result);
         match result {
             Ok(_) if sent != Some(self.job) || !self.in_flight.is_empty() => Vec::new(),
             Ok(result) => self.return_due(Thread::all_from_query(result)),
@@ -2576,19 +2583,19 @@ impl App {
         }
     }
 
-    /// Whether the outbox holds no job.
-    fn outbox_empty(&self) -> bool {
-        self.in_flight.is_empty() && self.creating.is_none()
+    /// How many jobs the outbox holds.
+    fn outbox_len(&self) -> usize {
+        self.in_flight.len() + usize::from(self.creating.is_some())
     }
 
     /// `q` or `:quit`: quits at once when the outbox is empty, and
     /// otherwise waits up to [`QUIT_WAIT`] for it to drain.
     fn quit(&mut self) -> Vec<Effect> {
-        if self.outbox_empty() {
+        if self.outbox_len() == 0 {
             return vec![Effect::Quit];
         }
         if self.quitting.is_none() {
-            let n = self.in_flight.len() + usize::from(self.creating.is_some());
+            let n = self.outbox_len();
             self.quitting = Some(Quitting {
                 at: self.now + QUIT_WAIT,
                 failed: 0,
@@ -2602,13 +2609,10 @@ impl App {
     /// unconfirmed when a job failed meanwhile.
     fn drained(&self) -> Option<Effect> {
         let quitting = self.quitting.as_ref()?;
-        if !self.outbox_empty() {
+        if self.outbox_len() > 0 {
             return None;
         }
-        Some(match quitting.failed {
-            0 => Effect::Quit,
-            n => Effect::QuitUnconfirmed(n),
-        })
+        Some(quit_with(quitting.failed))
     }
 
     /// `q` has waited long enough: quits, with every job still in the
@@ -2617,11 +2621,7 @@ impl App {
         let Some(quitting) = &self.quitting else {
             return Vec::new();
         };
-        let n = quitting.failed + self.in_flight.len() + usize::from(self.creating.is_some());
-        vec![match n {
-            0 => Effect::Quit,
-            n => Effect::QuitUnconfirmed(n),
-        }]
+        vec![quit_with(quitting.failed + self.outbox_len())]
     }
 
     /// Drops the entries of the threads due to return, which have no snooze
@@ -2756,6 +2756,7 @@ impl App {
             generation: self.generation,
             query,
             snoozed: self.snoozed_query(),
+            retry: self.connected,
         }]
     }
 
@@ -2789,11 +2790,11 @@ impl App {
         {
             return vec![Effect::Fatal(fatal)];
         }
-        self.heard(result.as_ref().err());
-        self.retrying.remove(&Source::Query(generation));
         let Some(reconciling) = self.reconciling.take_if(|r| r.generation == generation) else {
             return Vec::new();
         };
+        self.record_reply(&result);
+        self.retrying.remove(&Source::Query(generation));
         self.loading = false;
         let trigger = reconciling.trigger;
         match result {
@@ -2887,6 +2888,14 @@ fn threads(n: usize) -> String {
     match n {
         1 => "1 thread".into(),
         n => format!("{n} threads"),
+    }
+}
+
+/// The quit effect with `unconfirmed` actions Fastmail did not confirm.
+fn quit_with(unconfirmed: usize) -> Effect {
+    match unconfirmed {
+        0 => Effect::Quit,
+        n => Effect::QuitUnconfirmed(n),
     }
 }
 
@@ -3148,10 +3157,10 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
             {
                 return vec![Effect::Fatal(fatal)];
             }
-            app.heard(result.as_ref().err());
             if generation != app.generation {
                 return Vec::new();
             }
+            app.record_reply(&result);
             app.loading = false;
             app.retrying.remove(&Source::Query(generation));
             let mut effects = Vec::new();
@@ -3171,7 +3180,8 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
                     app.query_failed(&error);
                 }
             }
-            if std::mem::take(&mut app.due_at_launch) {
+            // While disconnected, the probe that reconnects runs the check.
+            if std::mem::take(&mut app.due_at_launch) && app.connected {
                 effects.extend(app.check_due());
             }
             effects.extend(app.run_pending_reconcile());

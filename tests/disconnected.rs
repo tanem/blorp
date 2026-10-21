@@ -492,3 +492,51 @@ fn a_retry_reported_after_its_query_was_superseded_is_ignored() {
 
     assert_eq!(h.app.retrying(), None);
 }
+
+#[test]
+fn a_launch_query_that_fails_for_good_leaves_the_snooze_check_to_the_probe() {
+    let mut h = Harness::new(store());
+    h.start();
+
+    let effects = h.send(Msg::Loaded {
+        generation: 1,
+        result: Err(unreachable()),
+    });
+
+    assert_eq!(effects, []);
+    assert!(!h.app.connected());
+    assert_eq!(wait(&h), 5);
+}
+
+#[test]
+fn r_while_a_probe_is_in_flight_waits_for_it_and_is_dropped_when_it_fails() {
+    let mut h = disconnected();
+    h.app.now = h.app.next_reconcile_at();
+    let generation = reconcile_generation(&h.send(Msg::ReconcileTick));
+    assert_eq!(h.keys("R"), [], "R waits for the probe in flight");
+
+    let effects = h.send(Msg::Reconciled {
+        generation,
+        result: Err(unreachable()),
+    });
+
+    assert_eq!(effects, [], "no second probe straight after");
+    assert_eq!(wait(&h), 5, "R reset the backoff");
+}
+
+#[test]
+fn a_failure_of_a_superseded_query_is_ignored() {
+    let mut h = Harness::loaded(store());
+    let old = match h.send(Msg::SetFilter("in:archive".into()))[..] {
+        [Effect::Query { generation, .. }] => generation,
+        ref other => panic!("{other:?}"),
+    };
+    h.send(Msg::SetFilter("in:travel".into()));
+
+    h.send(Msg::Loaded {
+        generation: old,
+        result: Err(unreachable()),
+    });
+
+    assert!(h.app.connected());
+}

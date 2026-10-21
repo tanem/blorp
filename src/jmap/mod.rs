@@ -143,8 +143,8 @@ pub enum Error {
     Transport(String),
     /// Fastmail answered with a non-success HTTP status.
     Status(u16),
-    /// Fastmail answered HTTP 429 or 5xx with a `Retry-After` header
-    /// asking for this wait.
+    /// Fastmail answered HTTP 429, 5xx, or the request-level `limit`
+    /// error with a `Retry-After` header asking for this wait.
     RetryAfter { status: u16, wait: Duration },
     /// The session does not advertise the mail capability, or names no
     /// primary mail account.

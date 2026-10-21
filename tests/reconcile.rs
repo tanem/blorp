@@ -240,6 +240,7 @@ fn a_push_event_during_a_reconcile_runs_another_when_it_lands() {
             generation: 3,
             query: inbox_query(),
             snoozed: None,
+            retry: true,
         }]
     );
 }

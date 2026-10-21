@@ -727,7 +727,7 @@ fn the_return_is_one_email_set_per_thread_moving_the_snoozed_emails_back() {
     let effects = h.start();
     let effects = h.resolve(effects);
 
-    let Effect::QuerySnoozed { query } = &effects[0] else {
+    let Effect::QuerySnoozed { query, .. } = &effects[0] else {
         panic!("{effects:?}");
     };
     assert_eq!(query.filter, json!({"inMailbox": "mb-snooze"}));
@@ -794,7 +794,7 @@ fn a_failed_return_puts_the_entry_back() {
     let mut h = Harness::with_schedule(store(), due_schedule());
     let effects = h.start();
     let effects = h.resolve(effects);
-    let Effect::QuerySnoozed { query } = &effects[0] else {
+    let Effect::QuerySnoozed { query, .. } = &effects[0] else {
         panic!("{effects:?}");
     };
     let result = h.reconcile(query).map(|r| r.result);
