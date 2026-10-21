@@ -283,7 +283,8 @@ mod tests {
     use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
-        GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+        SE_FILE_OBJECT,
     };
     use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
     use windows_sys::core::PWSTR;
@@ -302,13 +303,12 @@ mod tests {
         }
     }
 
-    /// The file's access list in SDDL, such as `D:P(A;;FA;;;S-1-5-...)`.
+    /// The file's access list in SDDL, such as `D:PAI(A;;FA;;;S-1-5-...)`.
     fn dacl(path: &Path) -> String {
         let file = File::open(path).unwrap();
         let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
-        let mut text: PWSTR = null_mut();
-        // SAFETY: the handle is open with READ_CONTROL, and both outputs
-        // are freed by `take` and LocalFree.
+        // SAFETY: the handle is open with READ_CONTROL, and `sddl` frees
+        // the descriptor.
         unsafe {
             let error = GetSecurityInfo(
                 file.as_raw_handle() as HANDLE,
@@ -321,6 +321,38 @@ mod tests {
                 &mut descriptor,
             );
             assert_eq!(error, 0, "GetSecurityInfo");
+            sddl(descriptor)
+        }
+    }
+
+    /// `text` as Windows writes it back, which abbreviates well-known SIDs,
+    /// such as `LA` for the built-in administrator.
+    fn normalised(text: &str) -> String {
+        let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+        // SAFETY: `wide` is NUL-terminated, and `sddl` frees the
+        // descriptor.
+        unsafe {
+            let ok = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                null_mut(),
+            );
+            assert_ne!(
+                ok, 0,
+                "ConvertStringSecurityDescriptorToSecurityDescriptorW"
+            );
+            sddl(descriptor)
+        }
+    }
+
+    /// The access list of `descriptor` in SDDL, freeing `descriptor`.
+    unsafe fn sddl(descriptor: PSECURITY_DESCRIPTOR) -> String {
+        let mut text: PWSTR = null_mut();
+        // SAFETY: `descriptor` is a valid descriptor from Windows, and
+        // `take` frees the string.
+        unsafe {
             let ok = ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 descriptor,
                 SDDL_REVISION_1,
@@ -354,7 +386,13 @@ mod tests {
 
         write(&path, b"fake-token-1").unwrap();
 
-        assert_eq!(dacl(&path), format!("D:P(A;;FA;;;{})", user_sid()));
+        // P: protected, so nothing is inherited. AI: SetSecurityInfo marks
+        // the list as having taken part in inheritance. One entry: full
+        // access for the current user.
+        assert_eq!(
+            dacl(&path),
+            normalised(&format!("D:PAI(A;;FA;;;{})", user_sid()))
+        );
         assert_eq!(read(&path).unwrap().as_deref(), Some(&b"fake-token-1"[..]));
     }
 }
