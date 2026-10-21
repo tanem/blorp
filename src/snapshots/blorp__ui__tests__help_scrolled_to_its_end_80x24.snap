@@ -17,7 +17,7 @@ expression: screen
 "│   :undo [count]               :u   Undo, or undo count actions               │"
 "│   :redo                            Redo                                      │"
 "│   :view [save|delete] <name>  :v   Switch to, save, or delete a view         │"
-"│   :filter [query]                  Filter, or with no query show the Inbox   │"
+"│   :filter [text]                   Filter, or with no text show the Inbox    │"
 "│   :sort [newest|oldest]            Sort, or with no order toggle it          │"
 "│   :refresh                         Refresh                                   │"
 "│   :dry [off]                       Dry run on, or off                        │"

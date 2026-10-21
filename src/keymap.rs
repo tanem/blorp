@@ -8,13 +8,17 @@ use crate::app::Msg;
 /// A key as the keymap names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
+    /// A character typed without Ctrl, shifted or not.
     Char(char),
     /// A character typed with Ctrl.
     Ctrl(char),
+    /// Tab.
     Tab,
     /// Shift-Tab.
     BackTab,
+    /// Esc.
     Esc,
+    /// Enter.
     Enter,
     /// Any of `0` to `9`.
     Digit,
@@ -44,12 +48,14 @@ enum Sends {
 
 /// Keys and the message they send.
 pub struct Binding {
+    /// The keys, any of which sends the message.
     pub keys: &'static [Key],
     /// What help says the keys do.
     pub help: &'static str,
     sends: Sends,
 }
 
+/// A binding of `keys` to the message `msg` makes.
 const fn binding(keys: &'static [Key], help: &'static str, msg: fn() -> Msg) -> Binding {
     Binding {
         keys,

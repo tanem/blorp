@@ -7,6 +7,7 @@ use crate::keymap::BINDINGS;
 /// A line of the help overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Line {
+    /// The title of the lines that follow.
     Heading(&'static str),
     /// Keys, or a command's usage and aliases, and what they do.
     Entry {
@@ -14,6 +15,7 @@ pub enum Line {
         aliases: String,
         help: &'static str,
     },
+    /// An empty line between sections.
     Blank,
 }
 
@@ -35,6 +37,7 @@ pub fn lines() -> Vec<Line> {
     lines
 }
 
+/// `words`, a space apart.
 fn join(words: impl Iterator<Item = String>) -> String {
     words.collect::<Vec<_>>().join(" ")
 }

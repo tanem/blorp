@@ -266,7 +266,7 @@ fn help_lists_every_command_with_its_usage_and_aliases() {
         (":undo [count]", ":u"),
         (":redo", ""),
         (":view [save|delete] <name>", ":v"),
-        (":filter [query]", ""),
+        (":filter [text]", ""),
         (":sort [newest|oldest]", ""),
         (":refresh", ""),
         (":dry [off]", ""),

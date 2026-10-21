@@ -13,7 +13,9 @@ use crate::snooze::{self, When};
 /// A command the `:` prompt takes: its name, its aliases, its usage, what
 /// help says it does, and how its arguments are read.
 pub struct Spec {
+    /// The name, which help shows in the usage.
     pub name: &'static str,
+    /// Other names the command runs under, each shorter than the name.
     pub aliases: &'static [&'static str],
     /// The usage that help shows and a usage error reports.
     pub usage: &'static str,
@@ -133,8 +135,8 @@ pub const COMMANDS: &[Spec] = &[
     Spec {
         name: "filter",
         aliases: &[],
-        usage: ":filter [query]",
-        help: "Filter, or with no query show the Inbox",
+        usage: ":filter [text]",
+        help: "Filter, or with no text show the Inbox",
         args: |_, rest| Ok(Command::Filter(rest.into())),
     },
     Spec {
