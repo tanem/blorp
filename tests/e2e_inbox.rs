@@ -197,6 +197,7 @@ async fn q_and_ctrl_c_exit_0_and_restore_the_terminal() {
         let (_sandbox, mut blorp) = start(&server, 80, 24);
         blorp.wait_statusline("1/5");
         assert!(blorp.on_alternate_screen(), "{key:?}");
+        // ConPTY cannot report the console mode, so Windows skips this check.
         #[cfg(unix)]
         assert_eq!(blorp.modes(), Modes::RAW, "raw mode while running");
 
@@ -205,6 +206,7 @@ async fn q_and_ctrl_c_exit_0_and_restore_the_terminal() {
 
         assert_eq!(status.exit_code(), 0, "{key:?}");
         assert!(!blorp.on_alternate_screen(), "{key:?}");
+        // ConPTY cannot report the console mode, so Windows skips this check.
         #[cfg(unix)]
         assert_eq!(blorp.modes(), Modes::COOKED, "{key:?}");
     }

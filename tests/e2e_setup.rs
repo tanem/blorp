@@ -105,6 +105,7 @@ async fn ctrl_c_at_the_prompt_exits_with_echo_restored() {
     blorp.keys("fake\x03");
 
     assert_eq!(blorp.wait_exit().exit_code(), 130);
+    // ConPTY cannot report the console mode, so Windows skips this check.
     #[cfg(unix)]
     assert_eq!(blorp.modes(), Modes::COOKED);
     assert_eq!(sandbox.stored_token(), None);

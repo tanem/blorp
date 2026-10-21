@@ -17,7 +17,7 @@ The plain-terminal flow that takes an API token, checks it against Fastmail, and
 _Avoid_: Login, onboarding, auth
 
 **Keyring**:
-The platform's store for secrets, where setup keeps the API token: the login keychain on macOS, Secret Service on Linux, Credential Manager on Windows.
+The platform's store for secrets, where setup keeps the API token: the login keychain on macOS, Secret Service on Linux and other Unix systems, Credential Manager on Windows.
 _Avoid_: Keychain (except for macOS's), vault, secret store
 
 **Reconcile**:

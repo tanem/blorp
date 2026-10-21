@@ -115,6 +115,7 @@ fn the_inbox_opens_in_a_terminal_moves_and_quits_cleanly() {
 
     assert_eq!(blorp.wait_exit().exit_code(), 0);
     assert!(!blorp.on_alternate_screen());
+    // ConPTY cannot report the console mode, so Windows skips this check.
     #[cfg(unix)]
     assert_eq!(blorp.modes(), Modes::COOKED);
     // Not assert_eq!, which would print a stored token.

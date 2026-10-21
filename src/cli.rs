@@ -75,8 +75,10 @@ impl std::error::Error for StoreError {}
 /// The platform keyring blorp keeps the token in, as messages name it.
 #[cfg(target_os = "macos")]
 pub const KEYRING: &str = "the macOS keychain";
+/// The platform keyring blorp keeps the token in, as messages name it.
 #[cfg(target_os = "windows")]
 pub const KEYRING: &str = "Windows Credential Manager";
+/// The platform keyring blorp keeps the token in, as messages name it.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const KEYRING: &str = "the Secret Service keyring";
 
@@ -92,7 +94,7 @@ pub struct Keyring {
 impl Keyring {
     /// blorp's credential, which is not read or written until the store is
     /// used.
-    pub fn open() -> Keyring {
+    pub fn blorp() -> Keyring {
         Keyring::for_service("blorp")
     }
 
@@ -360,8 +362,9 @@ impl Drop for CtrlCHandler {
 }
 
 /// `blorp setup`, and the first launch with no token: checks the store can
-/// be reached, explains where to create a token, reads one through `prompt`, checks it against the session
-/// at `session_url`, and only then stores it, replacing any stored token.
+/// be reached, explains where to create a token, reads one through
+/// `prompt`, checks it against the session at `session_url`, and only then
+/// stores it, replacing any stored token.
 /// Returns the client and session the check produced.
 pub async fn setup(
     store: &dyn TokenStore,

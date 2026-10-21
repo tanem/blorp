@@ -183,7 +183,7 @@ fn session_url(overrides: &DebugOverrides) -> String {
 fn token_store(overrides: &DebugOverrides) -> Box<dyn TokenStore> {
     match &overrides.token_store {
         Some(path) => Box::new(TokenFile::new(path)),
-        None => Box::new(Keyring::open()),
+        None => Box::new(Keyring::blorp()),
     }
 }
 
