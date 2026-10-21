@@ -10,13 +10,195 @@ use crate::filter::{HAS_VALUES, IS_VALUES, KEYS};
 use crate::mail::{Mailbox, Mailboxes, Role};
 use crate::snooze::{self, When};
 
+/// A command the `:` prompt takes: its name, its aliases, its usage, what
+/// help says it does, and how its arguments are read.
+pub struct Spec {
+    pub name: &'static str,
+    pub aliases: &'static [&'static str],
+    /// The usage that help shows and a usage error reports.
+    pub usage: &'static str,
+    /// What help says the command does.
+    pub help: &'static str,
+    /// Reads the arguments, the rest of the line trimmed, given the usage.
+    args: fn(&'static str, &str) -> Result<Command, Error>,
+}
+
+/// Every command, in the order Tab offers their names and help lists them.
+pub const COMMANDS: &[Spec] = &[
+    Spec {
+        name: "archive",
+        aliases: &["e"],
+        usage: ":archive",
+        help: "Archive",
+        args: |usage, rest| bare(usage, rest, Command::Archive),
+    },
+    Spec {
+        name: "delete",
+        aliases: &["d"],
+        usage: ":delete",
+        help: "Delete",
+        args: |usage, rest| bare(usage, rest, Command::Delete),
+    },
+    Spec {
+        name: "spam",
+        aliases: &[],
+        usage: ":spam",
+        help: "Mark spam",
+        args: |usage, rest| bare(usage, rest, Command::Spam),
+    },
+    Spec {
+        name: "move",
+        aliases: &["m"],
+        usage: ":move <mailbox>",
+        help: "Move to a mailbox",
+        args: |usage, rest| match rest {
+            "" => Err(Error::Usage(usage)),
+            name => Ok(Command::Move(name.into())),
+        },
+    },
+    Spec {
+        name: "snooze",
+        aliases: &["z"],
+        usage: ":snooze <time>",
+        help: "Snooze until a time",
+        args: |usage, rest| match rest {
+            "" => Err(Error::Usage(usage)),
+            time => When::parse(time)
+                .map(Command::Snooze)
+                .ok_or_else(|| Error::SnoozeTime(time.into())),
+        },
+    },
+    Spec {
+        name: "unsnooze",
+        aliases: &["uz"],
+        usage: ":unsnooze",
+        help: "Return from the snooze mailbox now",
+        args: |usage, rest| bare(usage, rest, Command::Unsnooze),
+    },
+    Spec {
+        name: "flag",
+        aliases: &["f"],
+        usage: ":flag",
+        help: "Flag or unflag",
+        args: |usage, rest| bare(usage, rest, Command::Flag),
+    },
+    Spec {
+        name: "read",
+        aliases: &["r"],
+        usage: ":read",
+        help: "Mark read",
+        args: |usage, rest| bare(usage, rest, Command::Read),
+    },
+    Spec {
+        name: "unread",
+        aliases: &[],
+        usage: ":unread",
+        help: "Mark unread",
+        args: |usage, rest| bare(usage, rest, Command::Unread),
+    },
+    Spec {
+        name: "open",
+        aliases: &["o"],
+        usage: ":open",
+        help: "Open in the browser",
+        args: |usage, rest| bare(usage, rest, Command::Open),
+    },
+    Spec {
+        name: "undo",
+        aliases: &["u"],
+        usage: ":undo [count]",
+        help: "Undo, or undo count actions",
+        args: |usage, rest| match rest {
+            "" => Ok(Command::Undo(None)),
+            count => match count.parse() {
+                Ok(n) if n > 0 => Ok(Command::Undo(Some(n))),
+                _ => Err(Error::Usage(usage)),
+            },
+        },
+    },
+    Spec {
+        name: "redo",
+        aliases: &[],
+        usage: ":redo",
+        help: "Redo",
+        args: |usage, rest| bare(usage, rest, Command::Redo),
+    },
+    Spec {
+        name: "view",
+        aliases: &["v"],
+        usage: ":view [save|delete] <name>",
+        help: "Switch to, save, or delete a view",
+        args: view,
+    },
+    Spec {
+        name: "filter",
+        aliases: &[],
+        usage: ":filter [query]",
+        help: "Filter, or with no query show the Inbox",
+        args: |_, rest| Ok(Command::Filter(rest.into())),
+    },
+    Spec {
+        name: "sort",
+        aliases: &[],
+        usage: ":sort [newest|oldest]",
+        help: "Sort, or with no order toggle it",
+        args: |usage, rest| match rest {
+            "" => Ok(Command::Sort(None)),
+            "newest" => Ok(Command::Sort(Some(Sort::Newest))),
+            "oldest" => Ok(Command::Sort(Some(Sort::Oldest))),
+            _ => Err(Error::Usage(usage)),
+        },
+    },
+    Spec {
+        name: "refresh",
+        aliases: &[],
+        usage: ":refresh",
+        help: "Refresh",
+        args: |usage, rest| bare(usage, rest, Command::Refresh),
+    },
+    Spec {
+        name: "dry",
+        aliases: &[],
+        usage: ":dry [off]",
+        help: "Dry run on, or off",
+        args: |usage, rest| match rest {
+            "" => Ok(Command::Dry(true)),
+            "off" => Ok(Command::Dry(false)),
+            _ => Err(Error::Usage(usage)),
+        },
+    },
+    Spec {
+        name: "help",
+        aliases: &["h"],
+        usage: ":help",
+        help: "Help",
+        args: |usage, rest| bare(usage, rest, Command::Help),
+    },
+    Spec {
+        name: "quit",
+        aliases: &["q"],
+        usage: ":quit",
+        help: "Quit",
+        args: |usage, rest| bare(usage, rest, Command::Quit),
+    },
+];
+
 /// Each command name followed by its aliases, in the order Tab offers
 /// them.
-const NAMES: [&str; 29] = [
-    "archive", "e", "delete", "d", "spam", "move", "m", "snooze", "z", "unsnooze", "uz", "flag",
-    "f", "read", "r", "unread", "open", "o", "undo", "u", "redo", "view", "v", "filter", "sort",
-    "refresh", "dry", "quit", "q",
-];
+fn names() -> impl Iterator<Item = &'static str> {
+    COMMANDS
+        .iter()
+        .flat_map(|spec| std::iter::once(spec.name).chain(spec.aliases.iter().copied()))
+}
+
+/// `command` when there are no arguments, otherwise a usage error.
+fn bare(usage: &'static str, rest: &str, command: Command) -> Result<Command, Error> {
+    if rest.is_empty() {
+        Ok(command)
+    } else {
+        Err(Error::Usage(usage))
+    }
+}
 
 /// A command typed at the `:` prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +243,8 @@ pub enum Command {
     Refresh,
     /// `:dry [off]`: whether dry run is to be on.
     Dry(bool),
+    /// `:help`, `:h`: open the help overlay, as `?` does.
+    Help,
     /// `:quit`, `:q`.
     Quit,
 }
@@ -95,72 +279,25 @@ impl std::error::Error for Error {}
 /// Blank text is no command.
 pub fn parse(text: &str) -> Result<Option<Command>, Error> {
     let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
     let (name, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
-    let rest = rest.trim();
-    let bare = |command: Command, usage| {
-        if rest.is_empty() {
-            Ok(command)
-        } else {
-            Err(Error::Usage(usage))
-        }
-    };
-    let command = match name {
-        "" => return Ok(None),
-        "archive" | "e" => bare(Command::Archive, ":archive")?,
-        "delete" | "d" => bare(Command::Delete, ":delete")?,
-        "spam" => bare(Command::Spam, ":spam")?,
-        "move" | "m" => match rest {
-            "" => return Err(Error::Usage(":move <mailbox>")),
-            name => Command::Move(name.into()),
-        },
-        "snooze" | "z" => match rest {
-            "" => return Err(Error::Usage(":snooze <time>")),
-            time => {
-                Command::Snooze(When::parse(time).ok_or_else(|| Error::SnoozeTime(time.into()))?)
-            }
-        },
-        "unsnooze" | "uz" => bare(Command::Unsnooze, ":unsnooze")?,
-        "flag" | "f" => bare(Command::Flag, ":flag")?,
-        "read" | "r" => bare(Command::Read, ":read")?,
-        "unread" => bare(Command::Unread, ":unread")?,
-        "open" | "o" => bare(Command::Open, ":open")?,
-        "undo" | "u" => match rest {
-            "" => Command::Undo(None),
-            count => match count.parse() {
-                Ok(n) if n > 0 => Command::Undo(Some(n)),
-                _ => return Err(Error::Usage(":undo [count]")),
-            },
-        },
-        "redo" => bare(Command::Redo, ":redo")?,
-        "view" | "v" => view(rest)?,
-        "filter" => Command::Filter(rest.into()),
-        "sort" => Command::Sort(match rest {
-            "" => None,
-            "newest" => Some(Sort::Newest),
-            "oldest" => Some(Sort::Oldest),
-            _ => return Err(Error::Usage(":sort [newest|oldest]")),
-        }),
-        "refresh" => bare(Command::Refresh, ":refresh")?,
-        "dry" => match rest {
-            "" => Command::Dry(true),
-            "off" => Command::Dry(false),
-            _ => return Err(Error::Usage(":dry [off]")),
-        },
-        "quit" | "q" => bare(Command::Quit, ":quit")?,
-        name => return Err(Error::Unknown(name.into())),
-    };
-    Ok(Some(command))
+    let spec = COMMANDS
+        .iter()
+        .find(|spec| spec.name == name || spec.aliases.contains(&name))
+        .ok_or_else(|| Error::Unknown(name.into()))?;
+    (spec.args)(spec.usage, rest.trim()).map(Some)
 }
 
 /// The arguments of `:view`, the rest of the line: a view name, or `save`
 /// or `delete` and a view name, which cannot itself be `save` or `delete`.
-fn view(rest: &str) -> Result<Command, Error> {
-    const USAGE: Error = Error::Usage(":view [save|delete] <name>");
+fn view(usage: &'static str, rest: &str) -> Result<Command, Error> {
     let (word, name) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
     let name = name.trim();
     match word {
-        "" => Err(USAGE),
-        "save" | "delete" if name.is_empty() => Err(USAGE),
+        "" => Err(Error::Usage(usage)),
+        "save" | "delete" if name.is_empty() => Err(Error::Usage(usage)),
         "save" if RESERVED_VIEW_NAMES.contains(&name) => Err(Error::ReservedView(name.into())),
         "save" => Ok(Command::SaveView(name.into())),
         "delete" => Ok(Command::DeleteView(name.into())),
@@ -225,7 +362,7 @@ pub fn complete(
     }
     let typed: String = chars[start..cursor].iter().collect();
     let candidates = match (words, name) {
-        (0, _) => matching(NAMES, "", "", &typed),
+        (0, _) => matching(names(), "", "", &typed),
         (1, "sort") => matching(["newest", "oldest"], "", "", &typed),
         (1, "snooze" | "z") => matching(snooze::completions(), "", "", &typed.to_lowercase()),
         (_, "filter") => filter_token(&typed, mailboxes),

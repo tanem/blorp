@@ -9,8 +9,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Mode, MoveChoices, Msg, PickerKey, SnoozeChoices};
+use crate::app::{App, HelpKey, Mode, MoveChoices, Msg, PickerKey, SnoozeChoices};
+use crate::help;
 use crate::jmap::retry::RETRIES;
+use crate::keymap;
 use crate::mail::Thread;
 use crate::prompt::Key;
 
@@ -63,6 +65,65 @@ pub fn view(app: &App, frame: &mut Frame) {
     if let Some(choices) = app.move_picker() {
         move_picker(frame, &choices);
     }
+    if let Some(top) = app.help() {
+        help_overlay(frame, top);
+    }
+}
+
+/// The help overlay, over the rows between the tabline and the
+/// statusline: every key and command from line `top` on, a page at a time,
+/// with the lines shown at the bottom right when they do not all fit.
+fn help_overlay(frame: &mut Frame, top: usize) {
+    let all = help::lines();
+    let page = help::page(frame.area().height);
+    let key = Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD);
+    let lines: Vec<Line> = all
+        .chunk_by(|_, next| !matches!(next, help::Line::Heading(_)))
+        .flat_map(|section| {
+            let (name_width, alias_width) =
+                section.iter().fold((0, 0), |(n, a), line| match line {
+                    help::Line::Entry { name, aliases, .. } => {
+                        (n.max(name.width()), a.max(aliases.width()))
+                    }
+                    _ => (n, a),
+                });
+            section.iter().map(move |line| match line {
+                help::Line::Heading(text) => Line::styled(
+                    format!(" {text}"),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+                help::Line::Entry {
+                    name,
+                    aliases,
+                    help,
+                } => {
+                    let aliases = if alias_width == 0 {
+                        String::new()
+                    } else {
+                        format!("{aliases:<alias_width$}  ")
+                    };
+                    Line::from(vec![
+                        Span::styled(format!("   {name:<name_width$}  {aliases}"), key),
+                        Span::raw(*help),
+                    ])
+                }
+                help::Line::Blank => Line::raw(""),
+            })
+        })
+        .skip(top)
+        .take(page)
+        .collect();
+    let mut block = Block::bordered().title(" Help ");
+    if all.len() > page {
+        let last = (top + page).min(all.len());
+        block = block.title_bottom(
+            Line::raw(format!(" {}-{last} of {} ", top + 1, all.len())).right_aligned(),
+        );
+    }
+    let height = u16::try_from(page + 2).unwrap_or(u16::MAX);
+    let area = Rect::new(0, 1, frame.area().width, height).intersection(frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 const PICKER_WIDTH: u16 = 42;
@@ -504,43 +565,40 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
     if app.move_picker().is_some() {
         return move_picker_key(key);
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        return match key.code {
-            KeyCode::Char('c') => Some(Msg::Quit),
-            KeyCode::Char('r') => Some(Msg::Redo),
-            _ => None,
-        };
+    if app.help().is_some() {
+        return Some(help_key(key));
     }
-    match key.code {
-        KeyCode::Char('j') => Some(Msg::Down),
-        KeyCode::Char('k') => Some(Msg::Up),
-        KeyCode::Char('g') => Some(Msg::Top),
-        KeyCode::Char('G') => Some(Msg::Bottom),
-        KeyCode::Char('q') => Some(Msg::Quit),
-        KeyCode::Char('e') => Some(Msg::Archive),
-        KeyCode::Char('d') => Some(Msg::Delete),
-        KeyCode::Char('!') => Some(Msg::Spam),
-        KeyCode::Char('z') => Some(Msg::OpenSnooze),
-        KeyCode::Char('m') => Some(Msg::OpenMove),
-        KeyCode::Char('f') => Some(Msg::ToggleFlag),
-        KeyCode::Char('r') => Some(Msg::ToggleRead),
-        KeyCode::Char('o') => Some(Msg::Open),
-        KeyCode::Char('u') => Some(Msg::Undo),
-        KeyCode::Char('x') => Some(Msg::Mark),
-        KeyCode::Char('X') => Some(Msg::ClearMarks),
-        KeyCode::Char('V') => Some(Msg::Visual),
-        KeyCode::Char('.') => Some(Msg::Repeat),
-        KeyCode::Char('D') => Some(Msg::ToggleDryRun),
-        KeyCode::Char('R') => Some(Msg::Refresh),
-        KeyCode::Char('/') => Some(Msg::OpenFilter),
-        KeyCode::Char(':') => Some(Msg::OpenCommand),
-        KeyCode::Char('t') => Some(Msg::ToggleSort),
-        KeyCode::Tab => Some(Msg::NextView),
-        KeyCode::BackTab => Some(Msg::PreviousView),
-        KeyCode::Esc | KeyCode::Enter => Some(Msg::Cancel),
-        KeyCode::Char(c) => c.to_digit(10).map(|d| Msg::Digit(d as u8)),
-        _ => None,
-    }
+    let key = if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char(c) => keymap::Key::Ctrl(c),
+            _ => return None,
+        }
+    } else {
+        match key.code {
+            KeyCode::Char(c) => keymap::Key::Char(c),
+            KeyCode::Tab => keymap::Key::Tab,
+            KeyCode::BackTab => keymap::Key::BackTab,
+            KeyCode::Esc => keymap::Key::Esc,
+            KeyCode::Enter => keymap::Key::Enter,
+            _ => return None,
+        }
+    };
+    keymap::msg(key)
+}
+
+/// The message a key press at the help overlay stands for: `j`, `k`,
+/// Ctrl-d, and Ctrl-u scroll, Ctrl-c quits, and any other key closes it.
+fn help_key(key: KeyEvent) -> Msg {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let key = match (ctrl, key.code) {
+        (true, KeyCode::Char('c')) => return Msg::Quit,
+        (true, KeyCode::Char('d')) => HelpKey::HalfDown,
+        (true, KeyCode::Char('u')) => HelpKey::HalfUp,
+        (false, KeyCode::Char('j')) => HelpKey::Down,
+        (false, KeyCode::Char('k')) => HelpKey::Up,
+        _ => HelpKey::Close,
+    };
+    Msg::Help(key)
 }
 
 /// The message a key press at the snooze picker stands for: `j`, `k`, and
@@ -1114,6 +1172,37 @@ mod tests {
         let tabline = screen.lines().next().unwrap();
         assert!(tabline.contains(" from:ana "), "{tabline}");
         assert!(!tabline.contains("Inbox"), "{tabline}");
+    }
+
+    #[test]
+    fn help_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.send(Msg::Resize(24));
+        h.keys("?");
+
+        let screen = render(&h, 80, 24);
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(lines[2].contains(" Keys "), "{screen}");
+        assert!(lines[3].contains(" j "), "{screen}");
+        assert!(lines[22].contains(" NORMAL "), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn help_scrolled_to_its_end_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.send(Msg::Resize(24));
+        h.keys("?");
+        for _ in 0..10 {
+            h.ctrl('d');
+        }
+
+        let screen = render(&h, 80, 24);
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(lines[20].contains(":quit"), "{screen}");
+        assert!(lines[20].contains(":q "), "{screen}");
+        assert!(lines[22].contains(" NORMAL "), "{screen}");
+        insta::assert_snapshot!(screen);
     }
 
     #[test]
