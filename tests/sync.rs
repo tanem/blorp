@@ -5,7 +5,7 @@ use std::io;
 use std::time::Duration;
 
 use blorp::jmap::fake::{Call, EmailSpec, FakeJmap, Store};
-use blorp::jmap::{EmailQuery, Push};
+use blorp::jmap::{EmailQuery, Error, Fatal, Push};
 use blorp::run::{Exit, TestClock, launch, run};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use futures::{Stream, StreamExt, stream};
@@ -197,4 +197,41 @@ async fn a_reconcile_that_spans_an_action_is_discarded_and_run_again() {
         "{calls:?}"
     );
     state.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_push_stream_refused_for_the_token_ends_the_session_at_once() {
+    for (error, fatal) in [
+        (Error::Status(401), Fatal::TokenRejected),
+        (Error::Status(403), Fatal::NoEmailScope),
+    ] {
+        let jmap = FakeJmap::new(inbox());
+        jmap.refuse_stream_with(error.clone());
+        let state = start(&jmap, &[]).await;
+        sleep_ms(10).await;
+
+        assert!(state.is_finished(), "{error:?}");
+        assert_eq!(state.await.unwrap().unwrap(), Exit::Fatal(fatal));
+        assert_eq!(reconciles(&jmap), 0, "no reconcile was needed");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_push_stream_refused_for_the_token_ends_the_session_in_dry_run() {
+    let jmap = FakeJmap::new(inbox());
+    let state = start(&jmap, &[(100, 'D')]).await;
+    sleep_ms(500).await;
+    jmap.push(Push::State);
+    sleep_ms(10).await;
+    assert_eq!(reconciles(&jmap), 0, "dry run ignores the push stream");
+
+    jmap.refuse_stream_with(Error::Status(401));
+    jmap.close_streams();
+    sleep_ms(1_600).await;
+
+    assert!(state.is_finished());
+    assert_eq!(
+        state.await.unwrap().unwrap(),
+        Exit::Fatal(Fatal::TokenRejected)
+    );
 }

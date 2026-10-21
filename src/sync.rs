@@ -1,6 +1,6 @@
 //! The `sync` task: keeps the push stream open and sends [`Msg::Wake`] on
-//! each of its events. The reconcile tick is not here but in
-//! `update` (ADR 0002).
+//! each of its events, or [`Msg::StreamRefused`] when Fastmail refuses to
+//! open it for the token. The reconcile tick is not here but in `update` (ADR 0002).
 
 use std::time::Duration;
 
@@ -60,14 +60,21 @@ impl Backoff {
 /// Runs the push stream until `tx` closes or the session turns out to
 /// have no push stream. Each event, `state` or `ping`, including the first
 /// on every connection, is sent as [`Msg::Wake`]. A stream that fails to
-/// open, ends, fails, or stays silent for [`WATCHDOG`] is opened again
-/// after the [`Backoff`] wait.
+/// open with an error [`Error::fatal`](crate::jmap::Error::fatal) maps to a
+/// [`Fatal`](crate::jmap::Fatal) is sent as [`Msg::StreamRefused`] and not
+/// opened again. A stream that fails to open for any other reason, ends,
+/// fails, or stays silent for [`WATCHDOG`] is opened again after the
+/// [`Backoff`] wait.
 pub async fn run<J: Jmap>(jmap: J, tx: UnboundedSender<Msg>) {
     let mut backoff = Backoff::default();
     loop {
         let mut stream = match jmap.events().await {
             Ok(Some(stream)) => stream,
             Ok(None) => return,
+            Err(error) if let Some(fatal) = error.fatal() => {
+                let _ = tx.send(Msg::StreamRefused(fatal));
+                return;
+            }
             Err(error) => {
                 tracing::info!("push stream did not open: {error}");
                 wait(&mut backoff, Duration::ZERO).await;
