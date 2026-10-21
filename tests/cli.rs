@@ -38,7 +38,7 @@ fn help_lists_the_commands_and_flags() {
 
 #[test]
 fn an_unknown_flag_is_rejected() {
-    let output = blorp(&["--dry-run"]);
+    let output = blorp(&["--no-such-flag"]);
 
     assert_eq!(output.status.code(), Some(2));
 }

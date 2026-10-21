@@ -41,10 +41,9 @@ impl Default for Timeouts {
 }
 
 const MAILBOX_PROPERTIES: [&str; 3] = ["id", "name", "role"];
-const EMAIL_PROPERTIES: [&str; 7] = [
+const EMAIL_PROPERTIES: [&str; 6] = [
     "id",
     "threadId",
-    "mailboxIds",
     "keywords",
     "from",
     "subject",

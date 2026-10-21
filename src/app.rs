@@ -317,8 +317,10 @@ impl App {
     }
 
     /// Handles a reconcile's result: replaces the mailbox list and the
-    /// queue's rows with Fastmail's, keeping the cursor on its thread. A
-    /// failure shows only as a change of the connection state.
+    /// queue's rows with Fastmail's, keeping the cursor on its thread, and
+    /// clears the status message, or says `Reconnected` when the success
+    /// reconnects. A failure shows only as a change of the connection
+    /// state.
     fn reconciled(&mut self, generation: u64, result: Result<Reconciled, Error>) -> Vec<Effect> {
         if let Err(error) = &result
             && let Some(fatal) = error.fatal()
@@ -329,6 +331,9 @@ impl App {
             return Vec::new();
         }
         self.reconciling = None;
+        if result.is_ok() {
+            self.status.clear();
+        }
         self.record_reply(&result);
         self.retrying = None;
         if let Ok(reconciled) = result {

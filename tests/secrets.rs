@@ -126,7 +126,6 @@ async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
             "methodResponses": [["Email/get", {"list": [{
                 "id": "Me1",
                 "threadId": "Tt1",
-                "mailboxIds": {"mb-inbox": true},
                 "keywords": {},
                 "from": null,
                 "subject": "Lunch",
@@ -137,11 +136,20 @@ async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
         .up_to_n_times(1)
         .mount(&server)
         .await;
-    // The push stream is refused for the token once the queue has had
-    // time to load.
+    // The push stream sends one event, whose reconcile waits for the
+    // queue to load and is then refused for the token.
     Mock::given(method("GET"))
         .and(path("/event/"))
-        .respond_with(ResponseTemplate::new(401).set_delay(Duration::from_millis(500)))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("event: state\ndata: {}\n\n"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/"))
+        .respond_with(ResponseTemplate::new(401))
         .mount(&server)
         .await;
     let mut out = Vec::new();
@@ -174,13 +182,26 @@ async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
         run(&mut terminal, keys, jmap, blorp::run::SystemClock, app),
     )
     .await
-    .expect("the refused push stream stops the state task")
+    .expect("the 401 stops the state task")
     .unwrap();
     let Exit::Fatal(fatal) = exit else {
         panic!("expected a fatal exit, got {exit:?}");
     };
     let screen = format!("{:?}", terminal.backend().buffer());
     assert!(screen.contains("Lunch"), "the queue loaded: {screen}");
+    let bodies: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .collect();
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.contains("Mailbox/get") && body.contains("Email/query")),
+        "the reconcile was sent: {bodies:#?}"
+    );
     errors.push_str(&format!("{fatal}\n{fatal:?}\n"));
     let rejected = HttpJmap::connect(
         &format!("{}/missing", server.uri()),

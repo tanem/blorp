@@ -76,16 +76,6 @@ impl Sandbox {
         self.dir.path().join("secret/token")
     }
 
-    /// blorp's state directory, under `XDG_STATE_HOME`.
-    pub fn state_dir(&self) -> PathBuf {
-        self.dir.path().join("home/state/blorp")
-    }
-
-    /// The log file blorp writes under its state directory.
-    pub fn log_path(&self) -> PathBuf {
-        self.state_dir().join("blorp.log")
-    }
-
     pub fn store_token(&self, token: &str) {
         TokenFile::new(self.token_path())
             .set(&SecretString::from(token))

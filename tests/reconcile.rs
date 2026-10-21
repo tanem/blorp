@@ -128,6 +128,22 @@ fn the_cursor_moves_to_the_last_row_when_its_row_is_gone() {
 }
 
 #[test]
+fn a_reconcile_that_loads_the_queue_clears_the_launch_query_s_error() {
+    let mut h = Harness::new(store());
+    h.start();
+    h.send(Msg::Loaded {
+        generation: 1,
+        result: Err(Error::Status(400)),
+    });
+    assert_eq!(h.status(), "Fastmail error: HTTP 400");
+
+    reconcile(&mut h);
+
+    assert_eq!(h.status(), "");
+    assert_eq!(h.subjects(), ["One", "Two", "Three", "Four", "Five"]);
+}
+
+#[test]
 fn a_reconcile_replaces_the_mailbox_list() {
     let mut h = Harness::loaded(store());
     assert_eq!(h.app.queue_name(), "Inbox");

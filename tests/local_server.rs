@@ -121,7 +121,7 @@ async fn a_query_follows_the_back_references_to_every_email_of_each_thread() {
     let e1 = &result.emails[0];
     assert_eq!(e1.subject.as_deref(), Some("Lunch on Friday?"));
     assert_eq!(e1.from.as_ref().unwrap()[0].email, "ana@example.invalid");
-    assert!(e1.mailbox_ids.contains_key("mb-inbox"));
+    assert!(e1.mailbox_ids.is_empty(), "mailboxIds is not requested");
 }
 
 /// `threads` threads in the Inbox, each of `per_thread` emails received a

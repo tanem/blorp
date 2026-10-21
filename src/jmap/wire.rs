@@ -140,6 +140,10 @@ pub struct Thread {
 pub struct Email {
     pub id: String,
     pub thread_id: String,
+    /// The mailboxes the email is in. blorp does not request it, so it is
+    /// empty in what blorp fetches; the fake store keeps it to evaluate
+    /// `inMailbox`.
+    #[serde(default)]
     pub mailbox_ids: BTreeMap<String, bool>,
     pub keywords: BTreeMap<String, bool>,
     pub from: Option<Vec<EmailAddress>>,
@@ -345,12 +349,11 @@ mod tests {
     }
 
     #[test]
-    fn email_allows_a_null_sender_and_subject() {
+    fn email_allows_a_null_sender_and_subject_and_no_mailbox_ids() {
         let email: Email = serde_json::from_str(
             r#"{
                 "id": "Mf2",
                 "threadId": "Tt2",
-                "mailboxIds": {"mb1": true},
                 "keywords": {},
                 "from": null,
                 "subject": null,
@@ -361,6 +364,7 @@ mod tests {
 
         assert_eq!(email.from, None);
         assert_eq!(email.subject, None);
+        assert!(email.mailbox_ids.is_empty());
     }
 
     #[test]

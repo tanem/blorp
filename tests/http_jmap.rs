@@ -166,7 +166,7 @@ fn member_get(ids: &[String], call_id: &str) -> Value {
         "accountId": "u1a2b3c4",
         "ids": ids,
         "properties": [
-            "id", "threadId", "mailboxIds", "keywords",
+            "id", "threadId", "keywords",
             "from", "subject", "receivedAt"
         ]
     }, call_id])
@@ -174,7 +174,7 @@ fn member_get(ids: &[String], call_id: &str) -> Value {
 
 fn email(id: &str, received_at: &str) -> Value {
     json!({
-        "id": id, "threadId": "Tt1", "mailboxIds": {"mb1": true},
+        "id": id, "threadId": "Tt1",
         "keywords": {}, "from": [{"name": "Ana Lopez", "email": "ana@example.invalid"}],
         "subject": "Trip", "receivedAt": received_at
     })
@@ -223,12 +223,12 @@ async fn query_fetches_the_threads_then_their_emails_in_a_second_request() {
             "methodResponses": [
                 ["Email/get", {"accountId": "u1a2b3c4", "list": [
                     {
-                        "id": "Me1", "threadId": "Tt1", "mailboxIds": {"mb3": true},
+                        "id": "Me1", "threadId": "Tt1",
                         "keywords": {"$seen": true}, "from": [{"name": "Kim", "email": "kim@example.invalid"}],
                         "subject": "Trip", "receivedAt": "2026-10-16T08:00:00Z"
                     },
                     {
-                        "id": "Me2", "threadId": "Tt1", "mailboxIds": {"mb1": true},
+                        "id": "Me2", "threadId": "Tt1",
                         "keywords": {}, "from": [{"name": "Ana Lopez", "email": "ana@example.invalid"}],
                         "subject": "Re: Trip", "receivedAt": "2026-10-17T09:30:00Z"
                     }

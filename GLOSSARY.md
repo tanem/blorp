@@ -1,6 +1,6 @@
 # blorp
 
-A terminal UI for working through a Fastmail inbox quickly. This file is the glossary for the project's language.
+A terminal UI for a Fastmail account's Inbox over JMAP. This file is the glossary for the project's language.
 
 ## Language
 
@@ -11,14 +11,6 @@ _Avoid_: List, feed, timeline, mailbox (for the queue)
 **Thread**:
 A conversation as Fastmail groups it: one row of the queue.
 _Avoid_: Message (when the whole conversation is meant), email, conversation
-
-**Triage**:
-Working through the queue by giving each thread one action until the queue is empty.
-_Avoid_: Processing, sorting, cleaning
-
-**Agenda**:
-A read-only view of upcoming calendar events shown beside the queue. Out of scope for v1.
-_Avoid_: Calendar (for the pane), schedule (for the pane)
 
 **Setup**:
 The plain-terminal flow that takes an API token, checks it against Fastmail, and stores it. Runs on first launch or on request.

@@ -5,6 +5,7 @@
 use std::io;
 use std::time::Duration;
 
+use blorp::app::App;
 use blorp::jmap::Error;
 use blorp::jmap::fake::{Call, EmailSpec, FakeJmap, Store};
 use blorp::run::{Exit, TestClock, launch, run};
@@ -57,6 +58,19 @@ type Ended = (io::Result<Exit>, Vec<String>);
 /// gives how it ended and the screen it left.
 async fn start(jmap: &FakeJmap, keys: &'static [(u64, char)]) -> JoinHandle<Ended> {
     let app = launch(jmap, at("2026-10-18T10:00:00Z")).await.unwrap();
+    spawn(jmap, keys, app)
+}
+
+/// [`start`], with the Inbox query the state task sends first failing
+/// with `error`.
+async fn start_failing_query(jmap: &FakeJmap, error: Error) -> JoinHandle<Ended> {
+    let app = launch(jmap, at("2026-10-18T10:00:00Z")).await.unwrap();
+    jmap.fail_next(1, error);
+    spawn(jmap, &[], app)
+}
+
+/// Runs the state task over `jmap` with `keys` from `app`.
+fn spawn(jmap: &FakeJmap, keys: &'static [(u64, char)], app: App) -> JoinHandle<Ended> {
     let clock = TestClock::new(at("2026-10-18T10:00:00Z"));
     let jmap = jmap.clone();
     tokio::spawn(async move {
@@ -75,6 +89,13 @@ fn screen(terminal: &Terminal<TestBackend>) -> Vec<String> {
                 .collect::<String>()
         })
         .collect()
+}
+
+fn queries(jmap: &FakeJmap) -> usize {
+    jmap.calls()
+        .iter()
+        .filter(|call| matches!(call, Call::Query(_)))
+        .count()
 }
 
 fn reconciles(jmap: &FakeJmap) -> usize {
@@ -181,4 +202,44 @@ async fn the_first_probe_that_succeeds_reconciles_the_queue_and_reconnects() {
     assert!(screen[0].contains("Flights"), "{screen:#?}");
     assert!(!screen[22].contains("DISCONNECTED"), "{screen:#?}");
     assert_eq!(screen[23].trim_end(), "Reconnected");
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_after_sets_the_wait() {
+    let jmap = FakeJmap::new(inbox());
+    let started = tokio::time::Instant::now();
+    let state = start_failing_query(
+        &jmap,
+        Error::RetryAfter {
+            status: 429,
+            wait: Duration::from_secs(10),
+        },
+    )
+    .await;
+
+    until(started, 9_900).await;
+    assert_eq!(queries(&jmap), 1);
+    until(started, 10_100).await;
+    assert_eq!(queries(&jmap), 2);
+    state.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retry_after_over_a_minute_waits_a_minute() {
+    let jmap = FakeJmap::new(inbox());
+    let started = tokio::time::Instant::now();
+    let state = start_failing_query(
+        &jmap,
+        Error::RetryAfter {
+            status: 503,
+            wait: Duration::from_secs(120),
+        },
+    )
+    .await;
+
+    until(started, 59_900).await;
+    assert_eq!(queries(&jmap), 1);
+    until(started, 60_100).await;
+    assert_eq!(queries(&jmap), 2);
+    state.abort();
 }
