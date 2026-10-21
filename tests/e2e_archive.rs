@@ -1,6 +1,8 @@
 //! The blorp binary archives against a local JMAP server, live and in dry
 //! run.
 
+use std::time::Duration;
+
 use blorp::jmap::fake::{EmailSpec, Store};
 use jiff::{SignedDuration, Timestamp};
 use serde_json::{Value, json};
@@ -109,4 +111,25 @@ async fn dry_run_says_so_shows_the_badge_and_sends_nothing() {
     );
     let log = std::fs::read_to_string(sandbox.log_path()).unwrap();
     assert!(log.contains("blorp::dry_run: archive t1"), "{log}");
+}
+
+#[tokio::test]
+async fn q_prints_the_unconfirmed_line_when_fastmail_has_not_answered_after_3_s() {
+    let server = LocalJmap::start(inbox(), TOKEN).await;
+    server.delay_sets(Duration::from_secs(20));
+    let sandbox = Sandbox::new().session_url(&server.session_url());
+    sandbox.store_token(TOKEN);
+    let mut blorp = sandbox.spawn(&[], 80, 24);
+    blorp.wait_statusline(" 1/2");
+
+    blorp.keys("eq");
+
+    assert_eq!(blorp.wait_exit().exit_code(), 0);
+    assert!(
+        blorp
+            .output()
+            .contains("1 action was not confirmed by Fastmail; check the Inbox."),
+        "{}",
+        blorp.output()
+    );
 }

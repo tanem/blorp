@@ -2,14 +2,16 @@ use std::io;
 use std::time::Duration;
 
 use blorp::jmap::fake::{Call, EmailSpec, FakeJmap, Store};
-use blorp::jmap::{EmailQuery, Error, Fatal};
-use blorp::run::{Exit, TestClock, launch, run};
+use blorp::jmap::{EmailQuery, EmailUpdate, Error, Fatal};
+use blorp::run::{Exit, TestClock, connect, launch, run};
+use blorp::snooze::{Entry, Schedule};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use futures::{Stream, StreamExt, stream};
 use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn at(time: &str) -> Timestamp {
     time.parse().unwrap()
@@ -229,4 +231,94 @@ async fn q_stops_the_state_task_with_the_quit_exit() {
     .unwrap();
 
     assert_eq!(exit, Exit::Quit);
+}
+
+#[tokio::test(start_paused = true)]
+async fn launch_runs_from_the_session_fetch_to_the_initial_query_and_the_due_snooze_return() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("blorp/snooze.json");
+    let fake = FakeJmap::new(
+        Store::builder()
+            .role_mailbox("mb-inbox", "Inbox", "inbox")
+            .mailbox("mb-snooze", "Snoozed (blorp)")
+            .email(
+                EmailSpec::new("e1", "t1", "2026-10-18T09:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .seen()
+                    .subject("Lunch on Friday?"),
+            )
+            .email(
+                EmailSpec::new("e3", "t3", "2026-10-01T07:00:00Z")
+                    .in_mailbox("mb-snooze")
+                    .seen()
+                    .subject("Renewal"),
+            )
+            .build(),
+    );
+    let mut schedule = Schedule::default();
+    schedule.set(
+        "t3",
+        Some(Entry {
+            emails: [("e3".into(), "mb-inbox".into())].into(),
+            snoozed_at: at("2026-10-10T09:00:00Z"),
+            return_at: at("2026-10-18T07:00:00Z"),
+            returned_at: None,
+        }),
+    );
+    fake.fail_next(1, Error::Status(503));
+    let started = tokio::time::Instant::now();
+
+    let jmap = connect(|| fake.connect()).await.unwrap();
+    let app = launch(&jmap, at("2026-10-18T12:00:00Z"))
+        .await
+        .unwrap()
+        .with_time_zone(TimeZone::UTC)
+        .with_schedule(file, schedule);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    run(
+        &mut terminal,
+        script("q", Duration::from_secs(1)),
+        jmap,
+        TestClock::new(at("2026-10-18T12:00:00Z")),
+        app,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "the session fetch is retried after 1 s: {:?}",
+        started.elapsed()
+    );
+    let query = |mailbox: &str, extra_threads: &[&str]| {
+        Call::Query(EmailQuery {
+            filter: json!({"inMailbox": mailbox}),
+            ascending: false,
+            limit: 500,
+            extra_threads: extra_threads.iter().map(|t| t.to_string()).collect(),
+        })
+    };
+    let returned = EmailUpdate::from([(
+        "e3".to_string(),
+        [
+            ("mailboxIds/mb-snooze".to_string(), Value::Null),
+            ("mailboxIds/mb-inbox".to_string(), Value::Bool(true)),
+            ("keywords/$seen".to_string(), Value::Null),
+        ]
+        .into(),
+    )]);
+    assert_eq!(
+        fake.calls(),
+        [
+            Call::Session,
+            Call::Session,
+            Call::GetMailboxes,
+            query("mb-inbox", &[]),
+            query("mb-snooze", &["t3"]),
+            Call::SetEmails(returned),
+        ]
+    );
+    let screen = screen(&terminal);
+    assert!(screen[1].contains("Renewal"), "{screen:#?}");
+    assert!(screen[2].contains("Lunch on Friday?"), "{screen:#?}");
 }

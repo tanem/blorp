@@ -74,6 +74,19 @@ pub enum Exit {
     Fatal(Fatal),
 }
 
+/// The session fetch that starts every launch with a stored token, retried
+/// on the usual schedule.
+pub async fn connect<T, F, Fut>(connect: F) -> Result<T, Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, Error>>,
+{
+    retrying(connect, |retry| {
+        tracing::info!("retrying the session fetch ({retry}/{RETRIES})")
+    })
+    .await
+}
+
 /// The launch steps that need Fastmail before the TUI starts: `Mailbox/get`,
 /// retried on the usual schedule, giving the app the state task starts
 /// from.

@@ -33,7 +33,6 @@ pub mod undo;
 use cli::{Cli, Command, CommandError, Keychain, Stdin, StoreError, TokenFile, TokenStore};
 use config::DebugOverrides;
 use jmap::http::FASTMAIL_SESSION_URL;
-use jmap::retry::{RETRIES, retrying};
 use jmap::{Fatal, HttpJmap};
 use run::Exit;
 
@@ -157,11 +156,7 @@ fn tui(dry_run: bool) -> Result<(), Failure> {
         let (jmap, _session) = match token {
             Some(token) => {
                 let token = std::sync::Arc::new(token);
-                retrying(
-                    || HttpJmap::connect(&session_url, token.clone()),
-                    |retry| tracing::info!("retrying the session fetch ({retry}/{RETRIES})"),
-                )
-                .await?
+                run::connect(|| HttpJmap::connect(&session_url, token.clone())).await?
             }
             None => cli::setup(&*store, &mut Stdin, &mut io::stdout(), &session_url).await?,
         };

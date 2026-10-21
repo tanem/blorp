@@ -27,6 +27,8 @@ use super::{Mailbox, Push, PushStream, QueryResult, Reconciled, SetResult, Threa
 /// A call made to a [`FakeJmap`], in the order made.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Call {
+    /// The session fetch.
+    Session,
     GetMailboxes,
     Query(EmailQuery),
     /// The queue's query, and the snooze mailbox's when one was given.
@@ -139,6 +141,13 @@ impl FakeJmap {
     /// dropped while it waited out a delay is not here.
     pub fn answered(&self) -> Vec<Call> {
         self.inner.lock().unwrap().answered.clone()
+    }
+
+    /// Answers a session fetch with this fake, as connecting does with a
+    /// client bound to the account.
+    pub async fn connect(&self) -> Result<FakeJmap, Error> {
+        let fake = self.clone();
+        self.call(Call::Session, |_| Ok(fake)).await
     }
 
     async fn call<T>(

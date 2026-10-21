@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use blorp::jmap::Error;
 use blorp::jmap::fake::{Call, EmailSpec, FakeJmap, Store};
-use blorp::run::{Exit, TestClock, launch, run};
+use blorp::run::{Exit, TestClock, launch, run, unconfirmed};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use futures::{Stream, StreamExt, stream};
 use jiff::Timestamp;
@@ -301,5 +301,17 @@ async fn quit_gives_up_on_the_outbox_after_3_s() {
     assert!(
         ended >= Duration::from_millis(4010) && ended < Duration::from_millis(4100),
         "{ended:?}"
+    );
+}
+
+#[test]
+fn the_unconfirmed_line_counts_one_action_or_several() {
+    assert_eq!(
+        unconfirmed(1),
+        "1 action was not confirmed by Fastmail; check the Inbox."
+    );
+    assert_eq!(
+        unconfirmed(3),
+        "3 actions were not confirmed by Fastmail; check the Inbox."
     );
 }

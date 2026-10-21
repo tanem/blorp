@@ -18,6 +18,8 @@ pub const USERNAME: &str = "kim@example.invalid";
 /// A JMAP server on localhost that accepts one token.
 pub struct LocalJmap {
     server: MockServer,
+    /// How long the answer to a request holding `Email/set` is held back.
+    set_delay: Arc<Mutex<Duration>>,
 }
 
 impl LocalJmap {
@@ -56,15 +58,30 @@ impl LocalJmap {
             .mount(&server)
             .await;
         let store = Arc::new(Mutex::new(store));
+        let set_delay = Arc::new(Mutex::new(Duration::ZERO));
+        let delay = set_delay.clone();
         Mock::given(method("POST"))
             .and(path("/jmap/api/"))
             .respond_with(Authorized {
                 auth,
-                answer: Box::new(move |request| api_response(&store, max_calls, request)),
+                answer: Box::new(move |request| {
+                    let response = api_response(&store, max_calls, request);
+                    if holds_set(request) {
+                        response.set_delay(*delay.lock().unwrap())
+                    } else {
+                        response
+                    }
+                }),
             })
             .mount(&server)
             .await;
-        LocalJmap { server }
+        LocalJmap { server, set_delay }
+    }
+
+    /// Holds back the answer to every request holding `Email/set` by
+    /// `delay`, after the store has applied it.
+    pub fn delay_sets(&self, delay: Duration) {
+        *self.set_delay.lock().unwrap() = delay;
     }
 
     pub fn session_url(&self) -> String {
@@ -133,6 +150,15 @@ impl Respond for Authorized {
         }
         (self.answer)(request)
     }
+}
+
+/// Whether the API request holds an `Email/set` call.
+fn holds_set(request: &Request) -> bool {
+    serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| {
+        body["methodCalls"]
+            .as_array()
+            .is_some_and(|calls| calls.iter().any(|call| call[0] == "Email/set"))
+    })
 }
 
 fn api_response(store: &Mutex<Store>, max_calls: usize, request: &Request) -> ResponseTemplate {
