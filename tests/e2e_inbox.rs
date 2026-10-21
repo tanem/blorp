@@ -106,8 +106,9 @@ async fn the_inbox_loads_with_its_rows_and_statusline_at_80x24() {
 
     let rows = blorp.rows();
     assert_eq!(
-        rows[..6],
+        rows[..7],
         [
+            " Inbox  Unread  Flagged  Snoozed",
             "  2 ●  Ana Lopez            Lunch on Friday?                                  2m",
             "  1    Ravi Shah            Re: Trip to Wellington                        3   5h",
             "  3  ⚑ billing@shop.exampl… Your order 48213 has shipped and will arri…       3d",
@@ -134,8 +135,9 @@ async fn the_inbox_loads_with_its_rows_and_statusline_at_120x40() {
 
     let rows = blorp.rows();
     assert_eq!(
-        rows[..6],
+        rows[..7],
         [
+            " Inbox  Unread  Flagged  Snoozed",
             "  2 ●  Ana Lopez            Lunch on Friday?                                                                          2m",
             "  1    Ravi Shah            Re: Trip to Wellington                                                                3   5h",
             "  3  ⚑ billing@shop.exampl… Your order 48213 has shipped and will arrive between Tuesday and Thursday next week       3d",
@@ -163,7 +165,7 @@ async fn a_filter_and_the_sort_select_the_queue_from_the_server() {
     blorp.wait_statusline("oldest  1/2");
     blorp.wait_for("the oldest unread thread first", |screen| {
         let rows = rows(screen);
-        rows[0].contains("(no subject)") && rows[1].contains("Lunch on Friday?")
+        rows[1].contains("(no subject)") && rows[2].contains("Lunch on Friday?")
     });
 }
 
@@ -185,7 +187,7 @@ async fn motions_and_counts_move_the_cursor() {
         blorp.wait_statusline(position);
     }
     assert!(
-        blorp.rows()[0].contains("Subject 1 "),
+        blorp.rows()[1].contains("Subject 1 "),
         "the cursor row is on screen"
     );
 }

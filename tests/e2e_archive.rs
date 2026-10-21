@@ -68,7 +68,7 @@ async fn e_archives_the_thread_on_the_server() {
     let mut relaunched = sandbox.spawn(&[], 80, 24);
     relaunched.wait_statusline(" 1/1");
     assert!(
-        relaunched.rows()[0].contains("Trip to Wellington"),
+        relaunched.rows()[1].contains("Trip to Wellington"),
         "{:#?}",
         relaunched.rows()
     );

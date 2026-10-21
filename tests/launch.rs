@@ -92,12 +92,13 @@ async fn launch_loads_the_inbox_and_the_keys_move_through_it() {
         ]
     );
     let screen = screen(&terminal);
-    assert!(screen[0].contains("Lunch on Friday?"), "{screen:#?}");
+    assert!(screen[0].starts_with(" Inbox  Unread "), "{screen:#?}");
+    assert!(screen[1].contains("Lunch on Friday?"), "{screen:#?}");
     assert!(
-        screen[0].trim_end().ends_with("1h"),
+        screen[1].trim_end().ends_with("1h"),
         "ages come from the clock: {screen:#?}"
     );
-    assert!(screen[1].contains("Trip to Wellington"), "{screen:#?}");
+    assert!(screen[2].contains("Trip to Wellington"), "{screen:#?}");
     assert!(
         !screen.iter().any(|line| line.contains("Flights")),
         "{screen:#?}"

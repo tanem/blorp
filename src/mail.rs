@@ -52,6 +52,8 @@ pub enum QueueMailbox {
     One(String),
     /// Every mailbox except these ids, in the order the server listed them.
     Any(Vec<String>),
+    /// The snooze mailbox before blorp creates it, which holds no email.
+    MissingSnooze,
 }
 
 impl QueueMailbox {
@@ -60,6 +62,7 @@ impl QueueMailbox {
         match self {
             QueueMailbox::One(one) => one == id,
             QueueMailbox::Any(excluded) => !excluded.iter().any(|e| e == id),
+            QueueMailbox::MissingSnooze => false,
         }
     }
 }

@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde_json::{Value, json};
 
-use crate::mail::{Mailboxes, NameError, QueueMailbox, Role};
+use crate::mail::{Mailboxes, NameError, QueueMailbox, Role, SNOOZE_MAILBOX};
 
 /// A parsed filter: terms that must all match.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,7 +115,9 @@ impl Filter {
     /// Resolves the filter's mailbox names against `mailboxes`. With no
     /// `in:`, the queue mailbox is the Inbox; `in:any` is every mailbox
     /// except Trash, Junk, Drafts, Sent, and the snooze mailbox. Drafts and
-    /// Sent cannot be a queue. The `Email/query` filter is the queue
+    /// Sent cannot be a queue. Before the snooze mailbox exists, `in:` naming
+    /// it selects a queue mailbox that holds no email, through a condition
+    /// no email matches, and `-in:` naming it matches every email. The `Email/query` filter is the queue
     /// mailbox's condition, then one per term in order, joined with `AND`
     /// when there are several.
     pub fn resolve(&self, mailboxes: &Mailboxes) -> Result<Resolved, Error> {
@@ -124,7 +126,19 @@ impl Filter {
         for term in &self.terms {
             let condition = match &term.condition {
                 Condition::In(name) => {
-                    let mailbox = mailboxes.resolve(name).map_err(Error::Mailbox)?;
+                    let mailbox = match mailboxes.resolve(name) {
+                        Ok(mailbox) => mailbox,
+                        Err(NameError::NoMatch(_))
+                            if mailboxes.snooze().is_none()
+                                && name.to_lowercase() == SNOOZE_MAILBOX.to_lowercase() =>
+                        {
+                            if !term.negated {
+                                queue = Some((QueueMailbox::MissingSnooze, SNOOZE_MAILBOX.into()));
+                            }
+                            continue;
+                        }
+                        Err(error) => return Err(Error::Mailbox(error)),
+                    };
                     let path = mailboxes.path(mailbox);
                     if !term.negated {
                         if matches!(mailbox.role, Some(Role::Drafts | Role::Sent)) {
@@ -165,6 +179,10 @@ impl Filter {
         let first = match &mailbox {
             QueueMailbox::One(id) => json!({"inMailbox": id}),
             QueueMailbox::Any(excluded) => json!({"inMailboxOtherThan": excluded}),
+            QueueMailbox::MissingSnooze => json!({
+                "operator": "AND",
+                "conditions": [{"hasKeyword": "$seen"}, {"notKeyword": "$seen"}],
+            }),
         };
         let plain = conditions.is_empty();
         conditions.insert(0, first);
@@ -546,6 +564,59 @@ mod tests {
                 "{filter:?}"
             );
         }
+    }
+
+    #[test]
+    fn before_the_snooze_mailbox_exists_in_naming_it_matches_no_email() {
+        let mut mailboxes = mailboxes();
+        mailboxes.remove("mb-snooze");
+        let nothing = json!({"operator": "AND", "conditions": [
+            {"hasKeyword": "$seen"},
+            {"notKeyword": "$seen"},
+        ]});
+        for (filter, mailbox, name, condition, plain) in [
+            (
+                "in:\"Snoozed (blorp)\"",
+                QueueMailbox::MissingSnooze,
+                "Snoozed (blorp)",
+                nothing.clone(),
+                true,
+            ),
+            (
+                "in:\"snoozed (BLORP)\" from:ana",
+                QueueMailbox::MissingSnooze,
+                "Snoozed (blorp)",
+                json!({"operator": "AND", "conditions": [nothing, {"from": "ana"}]}),
+                false,
+            ),
+            (
+                "-in:\"Snoozed (blorp)\"",
+                one("mb-inbox"),
+                "Inbox",
+                json!({"inMailbox": "mb-inbox"}),
+                true,
+            ),
+        ] {
+            let resolved = parse(filter).unwrap().resolve(&mailboxes);
+
+            assert_eq!(
+                resolved,
+                Ok(Resolved {
+                    mailbox,
+                    name: name.into(),
+                    condition,
+                    plain,
+                }),
+                "{filter:?}"
+            );
+        }
+        let resolved = parse("in:\"Snoozed (blorp)/Later\"")
+            .unwrap()
+            .resolve(&mailboxes);
+        assert_eq!(
+            resolved.map_err(|e| e.to_string()),
+            Err("No mailbox matches \"Snoozed (blorp)/Later\"".to_string())
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@
 source: src/ui.rs
 expression: "render(&h, 80, 24)"
 ---
+" Inbox  Unread  Flagged  Snoozed                                                "
 "  1    Sender               Thread 1                                          1y"
 "  1    Sender               Thread 2                                          1y"
 "  2    Sender               Thread 3                                          1y"
@@ -23,6 +24,5 @@ expression: "render(&h, 80, 24)"
 " 18    Sender               Thread 19                                         1y"
 " 19    Sender               Thread 20                                         1y"
 " 20    Sender               Thread 21                                         1y"
-" 21    Sender               Thread 22                                         1y"
 " NORMAL  Inbox                                             newest  1/500 of 503 "
 "                                                                                "

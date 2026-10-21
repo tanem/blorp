@@ -2,7 +2,7 @@
 source: src/ui.rs
 expression: "render(&h, 80, 24)"
 ---
-" 21    Sender               Thread 5                                         12h"
+" Inbox  Unread  Flagged  Snoozed                                                "
 " 20    Sender               Thread 6                                         12h"
 " 19    Sender               Thread 7                                         12h"
 " 18    Sender               Thread 8                                         12h"
