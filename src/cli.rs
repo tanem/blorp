@@ -295,20 +295,34 @@ impl Drop for IgnoreSigint {
 
 /// Runs `read` with a console control handler that takes Ctrl-C. rpassword
 /// leaves Ctrl-C to the console, whose default handler ends the process
-/// before rpassword restores echo; handled here, Ctrl-C ends the read,
-/// which then fails as [`io::ErrorKind::Interrupted`] once rpassword has
-/// restored the console mode.
+/// before rpassword restores echo. Handled here, Ctrl-C cancels the
+/// console read on this thread, which fails with ERROR_OPERATION_ABORTED;
+/// rpassword then restores the console mode, and the read fails as
+/// [`io::ErrorKind::Interrupted`]. The console mode is also restored here,
+/// in case the cancel lands on rpassword's own restore.
 #[cfg(windows)]
 fn catching_ctrl_c(read: impl FnOnce() -> io::Result<String>) -> io::Result<String> {
     use std::sync::atomic::Ordering;
 
-    use windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED;
+    use std::os::windows::io::AsRawHandle;
 
+    use windows_sys::Win32::Foundation::{ERROR_OPERATION_ABORTED, HANDLE};
+    use windows_sys::Win32::System::Console::{GetConsoleMode, SetConsoleMode};
+
+    let input = io::stdin().as_raw_handle() as HANDLE;
+    let mut mode = 0;
+    // SAFETY: `input` is the console input handle, since stdin is a
+    // terminal, and `mode` is a valid pointer.
+    let saved = unsafe { GetConsoleMode(input, &mut mode) } != 0;
     let handler = CtrlCHandler::new()?;
     let result = read();
     let aborted = matches!(&result, Err(error)
         if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32));
     drop(handler);
+    if saved {
+        // SAFETY: puts back the mode read above.
+        unsafe { SetConsoleMode(input, mode) };
+    }
     if aborted || CTRL_C.load(Ordering::SeqCst) {
         return Err(io::ErrorKind::Interrupted.into());
     }
@@ -319,16 +333,35 @@ fn catching_ctrl_c(read: impl FnOnce() -> io::Result<String>) -> io::Result<Stri
 #[cfg(windows)]
 static CTRL_C: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The thread that reads the prompt, whose read [`on_ctrl_c`] cancels.
+#[cfg(windows)]
+static READER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Runs on a thread the console starts for the event.
 #[cfg(windows)]
 unsafe extern "system" fn on_ctrl_c(event: u32) -> windows_sys::core::BOOL {
-    use windows_sys::Win32::System::Console::CTRL_C_EVENT;
+    use std::sync::atomic::Ordering;
 
-    if event == CTRL_C_EVENT {
-        CTRL_C.store(true, std::sync::atomic::Ordering::SeqCst);
-        1
-    } else {
-        0
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Console::CTRL_C_EVENT;
+    use windows_sys::Win32::System::IO::CancelSynchronousIo;
+    use windows_sys::Win32::System::Threading::{OpenThread, THREAD_TERMINATE};
+
+    if event != CTRL_C_EVENT {
+        return 0;
     }
+    CTRL_C.store(true, Ordering::SeqCst);
+    // SAFETY: the thread handle is checked and closed. The cancel applies
+    // to whatever synchronous I/O the thread has in progress, which is the
+    // prompt's read unless the read has just ended.
+    unsafe {
+        let thread = OpenThread(THREAD_TERMINATE, 0, READER.load(Ordering::SeqCst));
+        if !thread.is_null() {
+            CancelSynchronousIo(thread);
+            CloseHandle(thread);
+        }
+    }
+    1
 }
 
 /// Handles Ctrl-C with [`on_ctrl_c`] until dropped.
@@ -338,10 +371,16 @@ struct CtrlCHandler;
 #[cfg(windows)]
 impl CtrlCHandler {
     fn new() -> io::Result<CtrlCHandler> {
-        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        use std::sync::atomic::Ordering;
 
-        CTRL_C.store(false, std::sync::atomic::Ordering::SeqCst);
-        // SAFETY: `on_ctrl_c` only stores to an atomic.
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+
+        CTRL_C.store(false, Ordering::SeqCst);
+        // SAFETY: GetCurrentThreadId has no preconditions.
+        READER.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
+        // SAFETY: `on_ctrl_c` touches only atomics and a thread handle it
+        // opens and closes.
         if unsafe { SetConsoleCtrlHandler(Some(on_ctrl_c), 1) } == 0 {
             return Err(io::Error::last_os_error());
         }
