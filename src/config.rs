@@ -6,6 +6,7 @@ use std::path::PathBuf;
 /// blorp's state directory: `$XDG_STATE_HOME/blorp` when that is an
 /// absolute path, else `$HOME/.local/state/blorp`. `env` looks up an
 /// environment variable.
+#[cfg(not(windows))]
 pub fn state_dir(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     let base = match env("XDG_STATE_HOME").map(PathBuf::from) {
         Some(dir) if dir.is_absolute() => dir,
@@ -14,19 +15,27 @@ pub fn state_dir(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     Some(base.join("blorp"))
 }
 
+/// blorp's state directory: `%LOCALAPPDATA%\blorp` when that is an absolute
+/// path. `env` looks up an environment variable.
+#[cfg(windows)]
+pub fn state_dir(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let base = PathBuf::from(env("LOCALAPPDATA")?);
+    base.is_absolute().then(|| base.join("blorp"))
+}
+
 /// What a debug build reads from the environment so tests can run the
-/// binary against a local server with no keychain.
+/// binary against a local server with no keyring.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DebugOverrides {
     /// `BLORP_SESSION_URL`, in place of Fastmail's session URL.
     pub session_url: Option<String>,
     /// `BLORP_TOKEN_STORE`, a file to hold the token in place of the
-    /// keychain.
+    /// keyring.
     pub token_store: Option<PathBuf>,
 }
 
 /// The overrides `env` sets, or none when `debug_build` is false, so a
-/// release build always talks to Fastmail and the keychain. Empty values
+/// release build always talks to Fastmail and the keyring. Empty values
 /// count as unset.
 pub fn debug_overrides(
     debug_build: bool,
@@ -90,6 +99,7 @@ mod tests {
         assert_eq!(debug_overrides(true, env(&vars)), DebugOverrides::default());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn state_dir_honours_xdg_state_home() {
         let vars = [("XDG_STATE_HOME", "/var/state"), ("HOME", "/Users/kim")];
@@ -100,6 +110,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn state_dir_falls_back_to_home() {
         let vars = [("HOME", "/Users/kim")];
@@ -110,6 +121,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn state_dir_ignores_an_empty_or_relative_xdg_state_home() {
         for value in ["", "state"] {
@@ -123,8 +135,32 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn state_dir_needs_a_home_without_xdg_state_home() {
         assert_eq!(state_dir(env(&[])), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn state_dir_is_under_local_app_data() {
+        let vars = [("LOCALAPPDATA", r"C:\Users\kim\AppData\Local")];
+
+        assert_eq!(
+            state_dir(env(&vars)),
+            Some(PathBuf::from(r"C:\Users\kim\AppData\Local\blorp"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn state_dir_needs_an_absolute_local_app_data() {
+        for vars in [
+            &[][..],
+            &[("LOCALAPPDATA", "")],
+            &[("LOCALAPPDATA", "Local")],
+        ] {
+            assert_eq!(state_dir(env(vars)), None, "{vars:?}");
+        }
     }
 }

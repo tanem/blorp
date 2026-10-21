@@ -9,8 +9,12 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    runs-on: macos-latest
+  platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -24,4 +28,14 @@ jobs:
       - run: rustup component add rustfmt clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo test --no-fail-fast
+
+  # The ruleset on main requires a check named "check". It passes only when
+  # every platform passes, and it runs whatever their result, including a
+  # cancelled run, since a skipped required check counts as passing.
+  check:
+    needs: platform
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.platform.result }}" = success

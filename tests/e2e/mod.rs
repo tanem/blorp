@@ -26,14 +26,18 @@ Settings. Run `blorp setup` to store a new one.";
 /// reach the local server may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How many of the last bytes of output a failure message shows.
+const OUTPUT_TAIL: usize = 400;
+
 /// The bytes that switch a terminal to the alternate screen.
 const ALTERNATE_SCREEN: &str = "\x1b[?1049h";
 
 /// A temp directory for one run of blorp: its home, its state directory,
 /// and its token file. Every spawned binary gets an
 /// environment holding only these and what the test adds, so it reaches no
-/// keychain, nothing under the real home directory, and no
-/// `BLORP_API_TOKEN` from the shell that runs the tests.
+/// keyring, nothing under the real home directory, and no
+/// `BLORP_API_TOKEN` from the shell that runs the tests. On Windows it also
+/// gets `SystemRoot`, without which the binary cannot open a socket.
 pub struct Sandbox {
     dir: TempDir,
     vars: Vec<(String, String)>,
@@ -103,11 +107,18 @@ impl Sandbox {
         let base = [
             ("HOME", home.to_str().unwrap()),
             ("XDG_STATE_HOME", &format!("{}/state", home.display())),
+            ("LOCALAPPDATA", &format!("{}/AppData/Local", home.display())),
             ("BLORP_TOKEN_STORE", token_path.to_str().unwrap()),
             ("TERM", "xterm-256color"),
         ];
         for (name, value) in base {
             command.env(name, value);
+        }
+        if cfg!(windows) {
+            command.env(
+                "SystemRoot",
+                std::env::var_os("SystemRoot").expect("SystemRoot"),
+            );
         }
         for (name, value) in &self.vars {
             command.env(name, value);
@@ -123,33 +134,61 @@ impl Sandbox {
             changed: Condvar::new(),
         });
         let mut reader = pair.master.try_clone_reader().expect("pty reader");
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().expect("pty writer")));
         let feed = shared.clone();
+        let answer = writer.clone();
         std::thread::spawn(move || {
             let mut buffer = [0u8; 4096];
             loop {
                 let n = reader.read(&mut buffer).unwrap_or(0);
                 let mut state = feed.state.lock().unwrap();
+                let mut replies = Vec::new();
                 if n == 0 {
                     state.closed = true;
                 } else {
                     state.parser.process(&buffer[..n]);
                     state.output.extend_from_slice(&buffer[..n]);
+                    replies = answers(&buffer[..n], state.parser.screen());
                 }
                 feed.changed.notify_all();
+                drop(state);
+                if !replies.is_empty() {
+                    let mut answer = answer.lock().unwrap();
+                    let _ = answer.write_all(&replies).and_then(|()| answer.flush());
+                }
                 if n == 0 {
                     break;
                 }
             }
         });
-        let writer = pair.master.take_writer().expect("pty writer");
         Blorp {
-            master: pair.master,
+            master: Some(pair.master),
             writer,
             child,
             shared,
             redact: self.redact,
         }
     }
+}
+
+/// The replies a terminal sends to the queries in `chunk`: the cursor
+/// position, and the primary device attributes. portable-pty opens ConPTY
+/// with `PSEUDOCONSOLE_INHERIT_CURSOR`, so ConPTY asks for the cursor
+/// position at startup and passes on no output until it gets a reply.
+/// Newer ConPTY also asks for the device attributes and waits up to a
+/// second for them.
+fn answers(chunk: &[u8], screen: &vt100::Screen) -> Vec<u8> {
+    let mut replies = Vec::new();
+    for at in 0..chunk.len() {
+        let rest = &chunk[at..];
+        if rest.starts_with(b"\x1b[c") || rest.starts_with(b"\x1b[0c") {
+            replies.extend_from_slice(b"\x1b[?1;2c");
+        } else if rest.starts_with(b"\x1b[6n") {
+            let (row, col) = screen.cursor_position();
+            replies.extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
+        }
+    }
+    replies
 }
 
 fn size(cols: u16, rows: u16) -> PtySize {
@@ -174,14 +213,21 @@ struct State {
 
 /// A running blorp and the terminal it draws on.
 pub struct Blorp {
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    /// `None` once blorp has exited on Windows, where the pseudo-console
+    /// must close before its output ends.
+    master: Option<Box<dyn MasterPty + Send>>,
+    /// Shared with the thread that reads the output, which answers the
+    /// terminal's queries through it.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
     shared: Arc<Shared>,
     redact: bool,
 }
 
-/// The terminal modes blorp leaves behind.
+/// The terminal modes blorp leaves behind. Unix only: ConPTY gives no way
+/// to read the console mode of the child's console from outside, so the
+/// Windows runs leave these checks out.
+#[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct Modes {
     /// Line editing, off in raw mode.
@@ -189,6 +235,7 @@ pub struct Modes {
     pub echo: bool,
 }
 
+#[cfg(unix)]
 impl Modes {
     /// The modes of a terminal out of raw mode.
     pub const COOKED: Modes = Modes {
@@ -245,18 +292,21 @@ impl Blorp {
 
     /// Types `keys` as the bytes a terminal sends.
     pub fn keys(&mut self, keys: &str) {
-        self.writer.write_all(keys.as_bytes()).expect("type keys");
-        self.writer.flush().expect("type keys");
+        let mut writer = self.writer.lock().unwrap();
+        writer.write_all(keys.as_bytes()).expect("type keys");
+        writer.flush().expect("type keys");
     }
 
-    /// Resizes the terminal, which sends blorp `SIGWINCH`.
+    /// Resizes the terminal, which sends blorp `SIGWINCH` on Unix and a
+    /// resize event on Windows.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.state().parser.screen_mut().set_size(rows, cols);
-        self.master.resize(size(cols, rows)).expect("resize");
+        self.master().resize(size(cols, rows)).expect("resize");
     }
 
     /// Waits until the terminal stops echoing, as it does once a hidden
     /// prompt is reading.
+    #[cfg(unix)]
     pub fn wait_echo_off(&self) {
         let deadline = Instant::now() + TIMEOUT;
         while self.modes().echo {
@@ -265,8 +315,15 @@ impl Blorp {
         }
     }
 
+    /// Returns at once: the console mode cannot be read through ConPTY, and
+    /// keys typed before the prompt turns echo off wait in the console's
+    /// input buffer, unechoed, until the prompt reads them.
+    #[cfg(windows)]
+    pub fn wait_echo_off(&self) {}
+
+    #[cfg(unix)]
     pub fn modes(&self) -> Modes {
-        let termios = self.master.get_termios().expect("terminal modes");
+        let termios = self.master().get_termios().expect("terminal modes");
         let flags = termios.local_flags.bits();
         Modes {
             canonical: flags & libc::ICANON != 0,
@@ -292,6 +349,10 @@ impl Blorp {
             }
             std::thread::sleep(Duration::from_millis(10));
         };
+        // ConPTY ends the output only when the pseudo-console closes.
+        if cfg!(windows) {
+            self.master = None;
+        }
         let mut state = self.state();
         while !state.closed {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -316,6 +377,10 @@ impl Blorp {
         self.state().parser.screen().alternate_screen()
     }
 
+    fn master(&self) -> &(dyn MasterPty + Send) {
+        self.master.as_deref().expect("blorp is running")
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         self.shared.state.lock().unwrap()
     }
@@ -324,7 +389,12 @@ impl Blorp {
         if self.redact {
             return String::new();
         }
-        format!(":\n{}", state.parser.screen().contents())
+        let tail = &state.output[state.output.len().saturating_sub(OUTPUT_TAIL)..];
+        format!(
+            ":\n{}\nlast output: {:?}",
+            state.parser.screen().contents(),
+            String::from_utf8_lossy(tail)
+        )
     }
 }
 

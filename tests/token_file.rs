@@ -1,18 +1,24 @@
-//! The token file that replaces the keychain in debug builds when
+//! The token file that replaces the keyring in debug builds when
 //! `BLORP_TOKEN_STORE` is set.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
+#[cfg(windows)]
+use std::os::windows::fs::symlink_file as symlink;
+#[cfg(unix)]
 use std::path::Path;
 
 use blorp::cli::{TokenFile, TokenStore};
 use secrecy::{ExposeSecret, SecretString};
 
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
 }
 
-/// A path in a directory blorp creates, since a temp directory is 0755.
+/// A path in a directory blorp creates, since on Unix a temp directory is
+/// 0755.
 fn token_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
     dir.path().join("secret/token")
 }
@@ -30,6 +36,9 @@ fn no_file_means_no_token() {
     assert_eq!(stored(&TokenFile::new(dir.path().join("token"))), None);
 }
 
+/// On Windows the file's access list is checked in `private_file`'s own
+/// tests.
+#[cfg(unix)]
 #[test]
 fn the_token_is_written_0600_in_a_new_0700_directory() {
     let dir = tempfile::tempdir().unwrap();
@@ -90,6 +99,9 @@ fn a_symlink_is_refused_and_its_target_left_alone() {
     assert!(fs::symlink_metadata(&path).unwrap().is_symlink());
 }
 
+/// Unix only: on Windows the directory's access list is not checked, and
+/// the file's own access list keeps others out.
+#[cfg(unix)]
 #[test]
 fn a_directory_others_can_open_is_refused() {
     let dir = tempfile::tempdir().unwrap();

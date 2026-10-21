@@ -4,7 +4,7 @@ use blorp::cli::{Cli, Command};
 use clap::Parser;
 
 /// Runs blorp with no API token in the environment. Only arguments that
-/// clap answers on its own are safe here: anything else reads the keychain.
+/// clap answers on its own are safe here: anything else reads the keyring.
 fn blorp(args: &[&str]) -> Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_blorp"))
         .args(args)
