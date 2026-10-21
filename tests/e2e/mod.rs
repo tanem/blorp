@@ -26,6 +26,9 @@ Settings. Run `blorp setup` to store a new one.";
 /// reach the local server may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How many of the last bytes of output a failure message shows.
+const OUTPUT_TAIL: usize = 400;
+
 /// The bytes that switch a terminal to the alternate screen.
 const ALTERNATE_SCREEN: &str = "\x1b[?1049h";
 
@@ -131,25 +134,33 @@ impl Sandbox {
             changed: Condvar::new(),
         });
         let mut reader = pair.master.try_clone_reader().expect("pty reader");
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().expect("pty writer")));
         let feed = shared.clone();
+        let answer = writer.clone();
         std::thread::spawn(move || {
             let mut buffer = [0u8; 4096];
             loop {
                 let n = reader.read(&mut buffer).unwrap_or(0);
                 let mut state = feed.state.lock().unwrap();
+                let mut replies = Vec::new();
                 if n == 0 {
                     state.closed = true;
                 } else {
                     state.parser.process(&buffer[..n]);
                     state.output.extend_from_slice(&buffer[..n]);
+                    replies = answers(&buffer[..n], state.parser.screen());
                 }
                 feed.changed.notify_all();
+                drop(state);
+                if !replies.is_empty() {
+                    let mut answer = answer.lock().unwrap();
+                    let _ = answer.write_all(&replies).and_then(|()| answer.flush());
+                }
                 if n == 0 {
                     break;
                 }
             }
         });
-        let writer = pair.master.take_writer().expect("pty writer");
         Blorp {
             master: Some(pair.master),
             writer,
@@ -158,6 +169,26 @@ impl Sandbox {
             redact: self.redact,
         }
     }
+}
+
+/// The replies a terminal sends to the queries in `chunk`: the cursor
+/// position, and the primary device attributes. portable-pty opens ConPTY
+/// with `PSEUDOCONSOLE_INHERIT_CURSOR`, so ConPTY asks for the cursor
+/// position at startup and passes on no output until it gets a reply.
+/// Newer ConPTY also asks for the device attributes and waits up to a
+/// second for them.
+fn answers(chunk: &[u8], screen: &vt100::Screen) -> Vec<u8> {
+    let mut replies = Vec::new();
+    for at in 0..chunk.len() {
+        let rest = &chunk[at..];
+        if rest.starts_with(b"\x1b[c") || rest.starts_with(b"\x1b[0c") {
+            replies.extend_from_slice(b"\x1b[?1;2c");
+        } else if rest.starts_with(b"\x1b[6n") {
+            let (row, col) = screen.cursor_position();
+            replies.extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
+        }
+    }
+    replies
 }
 
 fn size(cols: u16, rows: u16) -> PtySize {
@@ -185,7 +216,9 @@ pub struct Blorp {
     /// `None` once blorp has exited on Windows, where the pseudo-console
     /// must close before its output ends.
     master: Option<Box<dyn MasterPty + Send>>,
-    writer: Box<dyn Write + Send>,
+    /// Shared with the thread that reads the output, which answers the
+    /// terminal's queries through it.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
     shared: Arc<Shared>,
     redact: bool,
@@ -259,8 +292,9 @@ impl Blorp {
 
     /// Types `keys` as the bytes a terminal sends.
     pub fn keys(&mut self, keys: &str) {
-        self.writer.write_all(keys.as_bytes()).expect("type keys");
-        self.writer.flush().expect("type keys");
+        let mut writer = self.writer.lock().unwrap();
+        writer.write_all(keys.as_bytes()).expect("type keys");
+        writer.flush().expect("type keys");
     }
 
     /// Resizes the terminal, which sends blorp `SIGWINCH` on Unix and a
@@ -355,7 +389,12 @@ impl Blorp {
         if self.redact {
             return String::new();
         }
-        format!(":\n{}", state.parser.screen().contents())
+        let tail = &state.output[state.output.len().saturating_sub(OUTPUT_TAIL)..];
+        format!(
+            ":\n{}\nlast output: {:?}",
+            state.parser.screen().contents(),
+            String::from_utf8_lossy(tail)
+        )
     }
 }
 
