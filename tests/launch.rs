@@ -110,7 +110,7 @@ async fn launch_loads_the_inbox_and_the_keys_move_through_it() {
 async fn a_failed_initial_query_is_reported_on_the_bottom_line() {
     let jmap = FakeJmap::new(inbox());
     let app = launch(&jmap, at("2026-10-18T00:00:00Z")).await.unwrap();
-    jmap.fail_next(1, Error::Status(503));
+    jmap.fail_next(1, Error::Status(400));
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     let clock = TestClock::new(at("2026-10-18T10:00:00Z"));
 
@@ -125,7 +125,7 @@ async fn a_failed_initial_query_is_reported_on_the_bottom_line() {
     .unwrap();
 
     let screen = screen(&terminal);
-    assert_eq!(screen[23].trim_end(), "Fastmail returned HTTP 503");
+    assert_eq!(screen[23].trim_end(), "Fastmail error: HTTP 400");
 }
 
 #[tokio::test(start_paused = true)]
@@ -151,13 +151,42 @@ async fn the_spinner_ticks_every_250_ms_while_the_query_is_in_flight() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn launch_fails_when_mailbox_get_fails() {
+async fn launch_retries_mailbox_get_after_1_2_and_4_s() {
     let jmap = FakeJmap::new(inbox());
-    jmap.fail_next(1, Error::Status(500));
+    jmap.fail_next(3, Error::Status(503));
+    let started = tokio::time::Instant::now();
+
+    let result = launch(&jmap, at("2026-10-18T00:00:00Z")).await;
+
+    assert!(result.is_ok());
+    assert_eq!(jmap.calls(), vec![Call::GetMailboxes; 4]);
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_secs(7) && waited <= Duration::from_millis(8500),
+        "{waited:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn launch_fails_when_mailbox_get_fails_three_retries_later() {
+    let jmap = FakeJmap::new(inbox());
+    jmap.fail_next(4, Error::Status(500));
 
     let result = launch(&jmap, at("2026-10-18T00:00:00Z")).await;
 
     assert_eq!(result.err(), Some(Error::Status(500)));
+    assert_eq!(jmap.calls().len(), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn launch_fails_at_once_on_a_bug() {
+    let jmap = FakeJmap::new(inbox());
+    jmap.fail_next(1, Error::Status(400));
+
+    let result = launch(&jmap, at("2026-10-18T00:00:00Z")).await;
+
+    assert_eq!(result.err(), Some(Error::Status(400)));
+    assert_eq!(jmap.calls().len(), 1);
 }
 
 #[tokio::test(start_paused = true)]

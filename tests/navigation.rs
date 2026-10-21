@@ -151,11 +151,11 @@ fn a_failed_load_leaves_the_queue_empty_and_reports_the_error() {
 
     h.send(Msg::Loaded {
         generation: 1,
-        result: Err(Error::Status(503)),
+        result: Err(Error::Status(400)),
     });
 
     assert!(h.subjects().is_empty());
-    assert_eq!(h.status(), "Fastmail returned HTTP 503");
+    assert_eq!(h.status(), "Fastmail error: HTTP 400");
 }
 
 #[test]

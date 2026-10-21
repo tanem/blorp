@@ -373,13 +373,13 @@ fn a_failed_undo_is_rolled_back_and_dropped() {
 
     let effects = h.send(Msg::Replayed {
         job: 2,
-        result: Err(Error::Status(503)),
+        result: Err(Error::Status(400)),
     });
 
     assert_eq!(h.subjects(), ["Trip", "Invoice"]);
     assert_eq!(
         h.status(),
-        "Could not undo archive 1 thread: Fastmail returned HTTP 503"
+        "Could not undo archive 1 thread: Fastmail error: HTTP 400"
     );
     assert!(
         matches!(effects[..], [Effect::Reconcile { .. }]),
@@ -433,7 +433,7 @@ fn a_failed_action_leaves_the_history() {
 
     h.send(Msg::Sent {
         job: 1,
-        result: Err(Error::Status(503)),
+        result: Err(Error::Status(400)),
     });
 
     assert_eq!(h.app.undo_depth(), 0);
@@ -509,13 +509,13 @@ fn a_failed_redo_is_rolled_back_and_dropped() {
 
     let effects = h.send(Msg::Sent {
         job: 3,
-        result: Err(Error::Status(503)),
+        result: Err(Error::Status(400)),
     });
 
     assert_eq!(h.subjects(), ["Trip", "Lunch", "Invoice"]);
     assert_eq!(
         h.status(),
-        "Could not redo archive 1 thread: Fastmail returned HTTP 503"
+        "Could not redo archive 1 thread: Fastmail error: HTTP 400"
     );
     assert!(
         matches!(effects[..], [Effect::Reconcile { .. }]),

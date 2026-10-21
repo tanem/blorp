@@ -297,14 +297,14 @@ fn a_failed_keyword_action_is_rolled_back() {
 
     h.send(blorp::app::Msg::Sent {
         job: 1,
-        result: Err(blorp::jmap::Error::Status(503)),
+        result: Err(blorp::jmap::Error::Status(400)),
     });
 
     assert_eq!(flagged(&h), [true, true, false]);
     assert_eq!(h.app.undo_depth(), 0);
     assert_eq!(
         h.status(),
-        "Could not unflag 1 thread: Fastmail returned HTTP 503"
+        "Could not unflag 1 thread: Fastmail error: HTTP 400"
     );
 }
 

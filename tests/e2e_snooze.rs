@@ -46,7 +46,6 @@ async fn z_creates_the_snooze_mailbox_writes_the_schedule_and_moves_the_thread()
     blorp.wait_text("Later today");
     blorp.keys("n");
     blorp.wait_text("Snoozed 1 thread until");
-    server.wait_for_calls("Email/set", 1).await;
     blorp.keys("q");
     assert_eq!(blorp.wait_exit().exit_code(), 0);
 
@@ -115,7 +114,6 @@ async fn a_due_thread_returns_to_the_top_of_the_inbox_at_launch() {
     blorp.wait_text("Returned 1 thread from snooze");
     blorp.wait_statusline(" 1/2");
     assert!(blorp.rows()[0].contains("Renewal"), "{:#?}", blorp.rows());
-    server.wait_for_calls("Email/set", 1).await;
     blorp.keys("q");
     assert_eq!(blorp.wait_exit().exit_code(), 0);
 

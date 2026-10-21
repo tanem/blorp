@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Mode, MoveChoices, Msg, PickerKey, SnoozeChoices};
+use crate::jmap::retry::RETRIES;
 use crate::mail::Thread;
 use crate::prompt::Key;
 
@@ -348,6 +349,16 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         ));
         right.push(Span::raw(" "));
     }
+    if !app.connected() {
+        right.push(Span::styled(
+            " DISCONNECTED ",
+            Style::new()
+                .fg(Color::White)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ));
+        right.push(Span::raw(" "));
+    }
     right.push(Span::styled(
         format!(" {} ", app.sort_name()),
         Style::new().fg(Color::DarkGray),
@@ -365,8 +376,11 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
 }
 
 fn bottom_line(app: &App) -> Line<'static> {
+    let frame = SPINNER[app.spinner() % SPINNER.len()];
+    if let Some(retry) = app.retrying() {
+        return Line::raw(format!("{frame} Retrying Fastmail ({retry}/{RETRIES})"));
+    }
     if app.loading() {
-        let frame = SPINNER[app.spinner() % SPINNER.len()];
         return Line::raw(format!("{frame} Loading {}", app.queue_name()));
     }
     if app.queue().visual().is_some() {
@@ -710,6 +724,46 @@ mod tests {
         h.keys("De");
 
         insta::assert_snapshot!(render(&h, 80, 24));
+    }
+
+    #[test]
+    fn retrying_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.send(Msg::Retrying {
+            from: crate::app::Source::Query(1),
+            retry: 2,
+        });
+
+        insta::assert_snapshot!(render(&h, 80, 24));
+    }
+
+    /// The harness after a reconcile that failed despite its retries.
+    fn disconnected() -> Harness {
+        let mut h = Harness::loaded(busy_inbox());
+        let generation = match h.send(Msg::Refresh)[..] {
+            [crate::app::Effect::Reconcile { generation, .. }] => generation,
+            ref other => panic!("{other:?}"),
+        };
+        h.send(Msg::Reconciled {
+            generation,
+            result: Err(crate::jmap::Error::Transport("connection refused".into())),
+        });
+        h
+    }
+
+    #[test]
+    fn disconnected_80x24() {
+        let h = disconnected();
+
+        insta::assert_snapshot!(render(&h, 80, 24));
+    }
+
+    #[test]
+    fn disconnected_in_dry_run_120x40() {
+        let mut h = disconnected();
+        h.keys("D");
+
+        insta::assert_snapshot!(render(&h, 120, 40));
     }
 
     #[test]

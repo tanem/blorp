@@ -50,11 +50,8 @@ async fn e_archives_the_thread_on_the_server() {
     let mut blorp = sandbox.spawn(&[], 80, 24);
     blorp.wait_statusline(" 1/2");
 
-    blorp.keys("e");
-    blorp.wait_statusline(" 1/1");
-    blorp.wait_text("Archived 1 thread");
-    server.wait_for_calls("Email/set", 1).await;
-    blorp.keys("q");
+    // q straight after the action waits for its Email/set.
+    blorp.keys("eq");
     assert_eq!(blorp.wait_exit().exit_code(), 0);
 
     let sets: Vec<Value> = method_calls(&server)

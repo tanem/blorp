@@ -57,7 +57,6 @@ async fn u_puts_the_archived_thread_back_on_the_server() {
     blorp.keys("u");
     blorp.wait_statusline(" 1/2");
     blorp.wait_text("Undone: archive 1 thread");
-    server.wait_for_calls("Email/set", 2).await;
     blorp.keys("q");
     assert_eq!(blorp.wait_exit().exit_code(), 0);
 

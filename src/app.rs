@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::command::{self, Command};
 use crate::filter;
-use crate::jmap::{self, SetResult};
+use crate::jmap::{self, Class, SetResult};
 use crate::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, QueryResult, Reconciled};
 use crate::mail::{Email, Mailboxes, QueueMailbox, Role, SNOOZE_MAILBOX, Thread};
 use crate::prompt::{History as PromptHistory, Key, Prompt};
@@ -27,6 +27,19 @@ pub const QUEUE_LIMIT: usize = 500;
 
 /// How often a reconcile runs, whether or not the push stream is up.
 pub const RECONCILE_INTERVAL: SignedDuration = SignedDuration::from_secs(60);
+
+/// The wait before the first probe once disconnected. Each probe that
+/// fails doubles it, up to [`PROBE_CAP`].
+pub const PROBE_START: SignedDuration = SignedDuration::from_secs(5);
+
+/// The longest wait between probes while disconnected.
+pub const PROBE_CAP: SignedDuration = SignedDuration::from_secs(60);
+
+/// How long `q` waits for the outbox to drain.
+pub const QUIT_WAIT: SignedDuration = SignedDuration::from_secs(3);
+
+/// The status message on entering the disconnected state.
+const DISCONNECTED: &str = "Disconnected from Fastmail";
 
 /// The id dry run gives the snooze mailbox it pretends to create.
 const DRY_RUN_SNOOZE_MAILBOX: &str = "blorp-dry-run-snooze";
@@ -90,6 +103,46 @@ pub struct App {
     checking: Option<u64>,
     /// The returned threads the latest queue query fetched by id.
     extra: Extra,
+    /// False from when a request fails despite its retries until one
+    /// succeeds.
+    connected: bool,
+    /// While disconnected, the wait before the probe after the next one
+    /// fails.
+    probe_wait: SignedDuration,
+    /// The requests being retried, and the retry each is on.
+    retrying: BTreeMap<Source, u32>,
+    /// The filter and sort shown before the query in flight, which loads a
+    /// new one, to go back to if it fails.
+    previous: Option<Previous>,
+    /// While `q` waits for the outbox to drain.
+    quitting: Option<Quitting>,
+}
+
+/// A request the executor may retry, as [`Msg::Retrying`] names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Source {
+    /// The queue query or reconcile of this generation.
+    Query(u64),
+    /// The outbox job with this number.
+    Job(u64),
+    /// The due-snooze check's query at launch.
+    SnoozeCheck,
+}
+
+/// The filter and sort a queue showed before a new one was asked for.
+#[derive(Debug)]
+struct Previous {
+    shown: Option<Shown>,
+    sort: Sort,
+}
+
+/// `q` waiting for the outbox to drain.
+#[derive(Debug)]
+struct Quitting {
+    /// When it stops waiting.
+    at: Timestamp,
+    /// The jobs that failed while it waited.
+    failed: usize,
 }
 
 /// The returned threads a queue query fetched by id, and the last outbox
@@ -516,6 +569,15 @@ pub enum Msg {
     ReconcileTick,
     /// `R` or `:refresh`: reconcile at once.
     Refresh,
+    /// A request failed transiently and is being retried for the `retry`th
+    /// time, counted from 1.
+    Retrying {
+        from: Source,
+        retry: u32,
+    },
+    /// `q` has waited [`QUIT_WAIT`] for the outbox, at
+    /// [`App::quit_at`].
+    QuitTimeout,
     /// A queue query's result, tagged with the generation it was sent for.
     Loaded {
         generation: u64,
@@ -608,7 +670,16 @@ pub enum Effect {
         action: Action,
         thread_ids: Vec<String>,
     },
+    /// Drop every outbox job numbered up to `through` that has not been
+    /// sent. After a job fails transiently, the outbox sends nothing more
+    /// until this comes.
+    DropJobs {
+        through: u64,
+    },
     Quit,
+    /// Restore the terminal, say how many actions Fastmail did not
+    /// confirm, and exit 0.
+    QuitUnconfirmed(usize),
     /// Restore the terminal, print the fixed message, and exit 1.
     Fatal(Fatal),
 }
@@ -649,6 +720,11 @@ impl App {
             due_at_launch: false,
             checking: None,
             extra: Extra::default(),
+            connected: true,
+            probe_wait: PROBE_START,
+            retrying: BTreeMap::new(),
+            previous: None,
+            quitting: None,
         }
     }
 
@@ -849,6 +925,28 @@ impl App {
         self.loading
     }
 
+    /// False while disconnected: from when a request fails despite its
+    /// retries until one succeeds.
+    pub fn connected(&self) -> bool {
+        self.connected
+    }
+
+    /// The highest retry a request is on, while any is being retried.
+    pub fn retrying(&self) -> Option<u32> {
+        self.retrying.values().max().copied()
+    }
+
+    /// Whether the spinner turns: while the queue loads or a request is
+    /// being retried.
+    pub fn spinning(&self) -> bool {
+        self.loading || !self.retrying.is_empty()
+    }
+
+    /// When `q` stops waiting for the outbox, while it waits.
+    pub fn quit_at(&self) -> Option<Timestamp> {
+        self.quitting.as_ref().map(|q| q.at)
+    }
+
     /// When the state task sends the next [`Msg::ReconcileTick`].
     pub fn next_reconcile_at(&self) -> Timestamp {
         self.next_reconcile_at
@@ -882,13 +980,21 @@ impl App {
     /// Runs `query`, superseding any query in flight, a reconcile
     /// included.
     fn load(&mut self, query: EmailQuery) -> Vec<Effect> {
-        self.generation += 1;
+        self.next_generation();
         self.loading = true;
         self.reconciling = None;
         vec![Effect::Query {
             generation: self.generation,
             query: self.with_extra(query),
         }]
+    }
+
+    /// Starts a new generation of queue query, whose result supersedes any
+    /// in flight, so that one's retry is over.
+    fn next_generation(&mut self) {
+        self.generation += 1;
+        self.retrying
+            .retain(|from, _| !matches!(from, Source::Query(_)));
     }
 
     /// `query` fetching by id, too, the returned threads the queue shown
@@ -988,6 +1094,59 @@ impl App {
         Thread::new(id, emails, &hit)
     }
 
+    /// Records whether a request reached Fastmail. A success reconnects,
+    /// saying so, and puts the reconcile tick back a minute away. A
+    /// transient failure, which the executor has already retried,
+    /// disconnects, saying so, and while disconnected puts the next probe
+    /// the backoff away and doubles the backoff. A bug changes nothing.
+    fn heard(&mut self, failure: Option<&Error>) {
+        match failure {
+            None if !self.connected => {
+                self.connected = true;
+                self.next_reconcile_at = self.now + RECONCILE_INTERVAL;
+                self.status = "Reconnected".into();
+            }
+            Some(error) if error.class() == Class::Transient => {
+                if self.connected {
+                    self.connected = false;
+                    self.probe_wait = PROBE_START;
+                    self.status = DISCONNECTED.into();
+                }
+                self.next_reconcile_at = self.now + self.probe_wait;
+                self.probe_wait = (self.probe_wait * 2).min(PROBE_CAP);
+            }
+            _ => {}
+        }
+    }
+
+    /// While disconnected, starts the probe backoff again, for a probe that
+    /// runs at once.
+    fn probe_now(&mut self) {
+        if !self.connected {
+            self.probe_wait = PROBE_START;
+        }
+    }
+
+    /// Whether an action must be refused because it would send to
+    /// Fastmail while disconnected, saying so if it is. Dry run sends
+    /// nothing, so its actions go ahead.
+    fn refused(&mut self) -> bool {
+        if self.connected || self.dry_run {
+            return false;
+        }
+        self.status = "Disconnected, action not sent".into();
+        true
+    }
+
+    /// Reports a queue query's failure: a transient one as being
+    /// disconnected, and a bug as Fastmail's error.
+    fn query_failed(&mut self, error: &Error) {
+        self.status = match error.class() {
+            Class::Transient => DISCONNECTED.into(),
+            _ => error.to_string(),
+        };
+    }
+
     /// Shows an action's message, marked `[dry]` in dry run.
     fn report(&mut self, message: impl std::fmt::Display) {
         self.status = if self.dry_run {
@@ -1028,24 +1187,45 @@ impl App {
     }
 
     /// Shows `shown`. When its query is not the one the queue was loaded
-    /// with, the selection is cleared, the cursor goes to the first row,
-    /// and the query is run.
+    /// with, the query is run; once it loads, the selection is cleared and
+    /// the cursor goes to the first row.
     fn show(&mut self, shown: Shown) -> Vec<Effect> {
         let same = self.shown.as_ref().is_some_and(|s| s.query == shown.query);
+        if !same {
+            self.remember();
+        }
         let query = shown.query.clone();
         self.shown = Some(shown);
         if same {
             return Vec::new();
         }
-        self.load_new(query)
+        self.load(query)
     }
 
-    /// Clears the selection, puts the cursor on the first row, and runs
-    /// `query`, for a queue whose filter or sort has changed.
-    fn load_new(&mut self, query: EmailQuery) -> Vec<Effect> {
-        self.queue.clear_selection();
-        self.queue.to_first();
-        self.load(query)
+    /// Records the filter and sort shown, to go back to if the query for a
+    /// new one fails, unless a query for a new one is already loading, in
+    /// which case the record from before that one stands.
+    fn remember(&mut self) {
+        if self.previous.is_none() {
+            self.previous = Some(Previous {
+                shown: self.shown.clone(),
+                sort: self.sort,
+            });
+        }
+    }
+
+    /// Goes back to the filter and sort shown before a new one's query
+    /// failed. The first queue, with none before it, stays, so that a
+    /// probe can load it.
+    fn go_back(&mut self) {
+        if let Some(Previous {
+            shown: Some(shown),
+            sort,
+        }) = self.previous.take()
+        {
+            self.shown = Some(shown);
+            self.sort = sort;
+        }
     }
 
     /// Runs the shown queue's query again, if a queue is shown.
@@ -1056,11 +1236,15 @@ impl App {
         }
     }
 
-    /// Sets the sort and, when it changes, reloads the queue in it,
-    /// clearing the selection and putting the cursor on the first row.
+    /// Sets the sort and, when it changes, reloads the queue in it; once it
+    /// loads, the selection is cleared and the cursor goes to the first
+    /// row.
     fn set_sort(&mut self, sort: Sort) -> Vec<Effect> {
         if sort == self.sort {
             return Vec::new();
+        }
+        if self.shown.is_some() {
+            self.remember();
         }
         self.sort = sort;
         let Some(shown) = &mut self.shown else {
@@ -1068,7 +1252,7 @@ impl App {
         };
         shown.query.ascending = self.sort.ascending();
         let query = shown.query.clone();
-        self.load_new(query)
+        self.load(query)
     }
 
     /// Turns dry run on or off. A change clears the undo history, so real
@@ -1161,6 +1345,7 @@ impl App {
     /// and the earlier query is run again.
     fn restore(&mut self, open: FilterPrompt) -> Vec<Effect> {
         self.shown = open.shown;
+        self.previous = None;
         if !open.queried {
             return Vec::new();
         }
@@ -1308,7 +1493,7 @@ impl App {
             Command::Dry(on) => Msg::SetDryRun(on),
             Command::Quit => Msg::Quit,
         };
-        update(self, msg)
+        handle(self, msg)
     }
 
     /// Runs `msg`, an action on the selection, with `count` as the count
@@ -1319,10 +1504,14 @@ impl App {
             return Vec::new();
         }
         self.pending_count = count;
-        update(self, msg)
+        handle(self, msg)
     }
 
+    /// Carries out an action on the selection, unless it is refused.
     fn perform(&mut self, repeat: Repeat) -> Vec<Effect> {
+        if self.refused() {
+            return Vec::new();
+        }
         match repeat.action {
             Action::Archive | Action::Delete | Action::Spam | Action::Move(_) => {
                 self.move_selection(repeat)
@@ -1398,7 +1587,7 @@ impl App {
                 };
                 self.pending_count = picker.count;
                 self.move_picker = None;
-                return update(self, Msg::Move(to));
+                return handle(self, Msg::Move(to));
             }
         }
         Vec::new()
@@ -1435,7 +1624,7 @@ impl App {
         };
         self.pending_count = picker.count;
         self.snooze_picker = None;
-        update(self, Msg::Snooze(When::Preset(preset)))
+        handle(self, Msg::Snooze(When::Preset(preset)))
     }
 
     /// Snoozes the selection until `until`: each thread's emails a move
@@ -1697,16 +1886,25 @@ impl App {
     /// snooze that waited for it goes ahead on those of its threads still
     /// in the queue.
     fn mailbox_created(&mut self, job: u64, result: Result<jmap::Mailbox, Error>) -> Vec<Effect> {
+        if let Err(error) = &result {
+            match error.class() {
+                Class::Fatal(fatal) => return vec![Effect::Fatal(fatal)],
+                Class::Transient => return self.lost(job, error),
+                Class::Bug => {}
+            }
+        }
+        self.heard(result.as_ref().err());
+        self.retrying.remove(&Source::Job(job));
         let Some(creating) = self.creating.take_if(|c| c.job == job) else {
             return Vec::new();
         };
         let mailbox = match result {
             Ok(mailbox) => mailbox,
             Err(error) => {
-                if let Some(fatal) = error.fatal() {
-                    return vec![Effect::Fatal(fatal)];
-                }
                 self.status = format!("Could not create {SNOOZE_MAILBOX}: {error}");
+                if let Some(quitting) = &mut self.quitting {
+                    quitting.failed += 1;
+                }
                 return self.reconcile(Trigger::Auto);
             }
         };
@@ -1992,6 +2190,9 @@ impl App {
     /// that answer can narrow the entry.
     fn replay(&mut self, step: Step) -> Vec<Effect> {
         let count = self.take_count().unwrap_or(1);
+        if self.refused() {
+            return Vec::new();
+        }
         let mut effects = Vec::new();
         let mut done: Vec<(Action, usize)> = Vec::new();
         let mut restored = Vec::new();
@@ -2142,12 +2343,16 @@ impl App {
 
     /// Handles an action's or a redo's `Email/set` result.
     fn sent(&mut self, job: u64, result: Result<SetResult, Error>) -> Vec<Effect> {
+        if result.is_ok() {
+            self.heard(None);
+        }
         let failure = match result {
             Ok(set) if set.not_updated.is_empty() => None,
             Ok(set) => Some(not_updated(set.not_updated.len())),
-            Err(error) => match error.fatal() {
-                Some(fatal) => return vec![Effect::Fatal(fatal)],
-                None => Some(error.to_string()),
+            Err(error) => match error.class() {
+                Class::Fatal(fatal) => return vec![Effect::Fatal(fatal)],
+                Class::Transient => return self.lost(job, &error),
+                Class::Bug => Some(error.to_string()),
             },
         };
         self.answered(job, failure, Vec::new())
@@ -2155,14 +2360,75 @@ impl App {
 
     /// Handles an undo job's result.
     fn replayed(&mut self, job: u64, result: Result<Replayed, Error>) -> Vec<Effect> {
-        match result {
-            Ok(r) if r.not_updated.is_empty() => self.answered(job, None, r.skipped),
-            Ok(r) => self.answered(job, Some(not_updated(r.not_updated.len())), Vec::new()),
-            Err(error) => match error.fatal() {
-                Some(fatal) => vec![Effect::Fatal(fatal)],
-                None => self.answered(job, Some(error.to_string()), Vec::new()),
-            },
+        if result.is_ok() {
+            self.heard(None);
         }
+        let (failure, skipped) = match result {
+            Ok(r) if r.not_updated.is_empty() => (None, r.skipped),
+            Ok(r) => (Some(not_updated(r.not_updated.len())), Vec::new()),
+            Err(error) => match error.class() {
+                Class::Fatal(fatal) => return vec![Effect::Fatal(fatal)],
+                Class::Transient => return self.lost(job, &error),
+                Class::Bug => (Some(error.to_string()), Vec::new()),
+            },
+        };
+        self.answered(job, failure, skipped)
+    }
+
+    /// Handles outbox job `job` failing despite its retries, `error` being
+    /// the last failure. blorp is disconnected and the outbox holds back
+    /// the jobs behind it, which are dropped: every job in the outbox is
+    /// rolled back, newest first, and its entry dropped, and a snooze
+    /// waiting for the snooze mailbox is abandoned. No reconcile is issued;
+    /// the probe that reconnects is one.
+    fn lost(&mut self, job: u64, error: &Error) -> Vec<Effect> {
+        self.heard(Some(error));
+        let mut effects = vec![Effect::DropJobs { through: self.job }];
+        self.retrying
+            .retain(|from, _| !matches!(from, Source::Job(_)));
+        let what = match self.in_flight.iter().find(|f| f.job == job) {
+            Some(f) => Some(format!(
+                "{}{} {}",
+                f.step.prefix(),
+                f.entry.action.name(),
+                threads(f.entry.threads.len())
+            )),
+            None => self
+                .creating
+                .as_ref()
+                .filter(|c| c.job == job)
+                .map(|_| format!("create {SNOOZE_MAILBOX}")),
+        };
+        let mut n = 0;
+        let mut schedule = false;
+        while let Some(InFlight { step, entry, .. }) = self.in_flight.pop() {
+            self.apply(&entry, step.side().other());
+            self.history.forget(entry.id);
+            schedule |= !entry.schedule.is_empty();
+            n += 1;
+        }
+        if self.creating.take().is_some() {
+            n += 1;
+        }
+        if schedule {
+            effects.extend(self.schedule_write(None));
+        }
+        self.pending_reconcile = None;
+        if let Some(quitting) = &mut self.quitting {
+            quitting.failed += n;
+        }
+        self.status = match what {
+            Some(what) if n == 2 => {
+                format!("{DISCONNECTED}; could not {what} or the action after it")
+            }
+            Some(what) if n > 2 => format!(
+                "{DISCONNECTED}; could not {what} or the {} actions after it",
+                n - 1
+            ),
+            Some(what) => format!("{DISCONNECTED}; could not {what}"),
+            None => DISCONNECTED.into(),
+        };
+        effects
     }
 
     /// Finishes job `job`. On failure its change to the queue is rolled
@@ -2175,9 +2441,13 @@ impl App {
             return Vec::new();
         };
         let InFlight { step, entry, .. } = self.in_flight.remove(position);
+        self.retrying.remove(&Source::Job(job));
         let n = entry.threads.len();
         let mut effects = Vec::new();
         if let Some(reason) = failure {
+            if let Some(quitting) = &mut self.quitting {
+                quitting.failed += 1;
+            }
             self.apply(&entry, step.side().other());
             effects.extend(self.write_schedule(None, &entry));
             self.history.forget(entry.id);
@@ -2272,17 +2542,86 @@ impl App {
     /// runs the check.
     fn snoozed_loaded(&mut self, result: Result<QueryResult, Error>) -> Vec<Effect> {
         let sent = self.checking.take();
+        self.retrying.remove(&Source::SnoozeCheck);
+        if let Err(error) = &result
+            && let Some(fatal) = error.fatal()
+        {
+            return vec![Effect::Fatal(fatal)];
+        }
+        self.heard(result.as_ref().err());
         match result {
             Ok(_) if sent != Some(self.job) || !self.in_flight.is_empty() => Vec::new(),
             Ok(result) => self.return_due(Thread::all_from_query(result)),
-            Err(error) => match error.fatal() {
-                Some(fatal) => vec![Effect::Fatal(fatal)],
-                None => {
-                    self.status = format!("Could not check snoozed threads: {error}");
-                    Vec::new()
-                }
-            },
+            // The probe that reconnects runs the check.
+            Err(error) if error.class() == Class::Transient => Vec::new(),
+            Err(error) => {
+                self.status = format!("Could not check snoozed threads: {error}");
+                Vec::new()
+            }
         }
+    }
+
+    /// Whether a result from `from` is still to come, so that a retry it
+    /// reports late, after it was superseded or dropped, is ignored.
+    fn awaits(&self, from: Source) -> bool {
+        match from {
+            Source::Query(generation) => {
+                generation == self.generation && (self.loading || self.reconciling.is_some())
+            }
+            Source::Job(job) => {
+                self.in_flight.iter().any(|f| f.job == job)
+                    || self.creating.as_ref().is_some_and(|c| c.job == job)
+            }
+            Source::SnoozeCheck => self.checking.is_some(),
+        }
+    }
+
+    /// Whether the outbox holds no job.
+    fn outbox_empty(&self) -> bool {
+        self.in_flight.is_empty() && self.creating.is_none()
+    }
+
+    /// `q` or `:quit`: quits at once when the outbox is empty, and
+    /// otherwise waits up to [`QUIT_WAIT`] for it to drain.
+    fn quit(&mut self) -> Vec<Effect> {
+        if self.outbox_empty() {
+            return vec![Effect::Quit];
+        }
+        if self.quitting.is_none() {
+            let n = self.in_flight.len() + usize::from(self.creating.is_some());
+            self.quitting = Some(Quitting {
+                at: self.now + QUIT_WAIT,
+                failed: 0,
+            });
+            self.status = format!("Waiting for Fastmail to confirm {}", actions(n));
+        }
+        Vec::new()
+    }
+
+    /// The quit effect once the outbox has drained while `q` waits:
+    /// unconfirmed when a job failed meanwhile.
+    fn drained(&self) -> Option<Effect> {
+        let quitting = self.quitting.as_ref()?;
+        if !self.outbox_empty() {
+            return None;
+        }
+        Some(match quitting.failed {
+            0 => Effect::Quit,
+            n => Effect::QuitUnconfirmed(n),
+        })
+    }
+
+    /// `q` has waited long enough: quits, with every job still in the
+    /// outbox and every one that failed meanwhile unconfirmed.
+    fn quit_timeout(&self) -> Vec<Effect> {
+        let Some(quitting) = &self.quitting else {
+            return Vec::new();
+        };
+        let n = quitting.failed + self.in_flight.len() + usize::from(self.creating.is_some());
+        vec![match n {
+            0 => Effect::Quit,
+            n => Effect::QuitUnconfirmed(n),
+        }]
     }
 
     /// Drops the entries of the threads due to return, which have no snooze
@@ -2392,9 +2731,10 @@ impl App {
     /// mailbox's query for the due-snooze check, to bring the queue, the
     /// mailbox list, and the snoozed threads back in line with Fastmail.
     /// While a query is in flight or the outbox is busy it waits, and runs
-    /// once both are done. In dry run only `R` runs one.
+    /// once both are done. In dry run only `R` runs one, and a probe while
+    /// disconnected.
     fn reconcile(&mut self, trigger: Trigger) -> Vec<Effect> {
-        if self.dry_run && trigger == Trigger::Auto {
+        if self.dry_run && trigger == Trigger::Auto && self.connected {
             return Vec::new();
         }
         let Some(query) = self.shown.as_ref().map(|s| s.query.clone()) else {
@@ -2404,7 +2744,7 @@ impl App {
             self.pending_reconcile = self.pending_reconcile.max(Some(trigger));
             return Vec::new();
         }
-        self.generation += 1;
+        self.next_generation();
         self.loading = trigger == Trigger::Refresh;
         self.reconciling = Some(Reconciling {
             generation: self.generation,
@@ -2442,13 +2782,15 @@ impl App {
     /// stayed idle from when it was sent, so a snapshot taken before an
     /// action landed never brings back a thread the action moved; otherwise
     /// it is discarded and run again once the outbox drains. A failure is
-    /// reported only for `R`.
+    /// reported only for `R`, apart from the connection state changing.
     fn reconciled(&mut self, generation: u64, result: Result<Reconciled, Error>) -> Vec<Effect> {
         if let Err(error) = &result
             && let Some(fatal) = error.fatal()
         {
             return vec![Effect::Fatal(fatal)];
         }
+        self.heard(result.as_ref().err());
+        self.retrying.remove(&Source::Query(generation));
         let Some(reconciling) = self.reconciling.take_if(|r| r.generation == generation) else {
             return Vec::new();
         };
@@ -2457,7 +2799,7 @@ impl App {
         match result {
             Err(error) => {
                 if trigger == Trigger::Refresh {
-                    self.status = error.to_string();
+                    self.query_failed(&error);
                 }
             }
             Ok(_) if self.job != reconciling.job || !self.in_flight.is_empty() => {
@@ -2548,6 +2890,14 @@ fn threads(n: usize) -> String {
     }
 }
 
+/// `1 action`, `3 actions`.
+fn actions(n: usize) -> String {
+    match n {
+        1 => "1 action".into(),
+        n => format!("{n} actions"),
+    }
+}
+
 /// The failure reason for `n` emails in `notUpdated`.
 fn not_updated(n: usize) -> String {
     match n {
@@ -2574,7 +2924,23 @@ fn move_patch(email: &Email, from: &QueueMailbox, to: &str) -> Option<EmailPatch
 }
 
 /// Applies `msg` to `app` and returns what the executor should do. Pure.
+/// While `q` waits for the outbox, the message that drains it ends with
+/// the quit.
 pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
+    let mut effects = handle(app, msg);
+    let exits = effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Quit | Effect::QuitUnconfirmed(_) | Effect::Fatal(_)
+        )
+    });
+    if !exits {
+        effects.extend(app.drained());
+    }
+    effects
+}
+
+fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
     match msg {
         Msg::Start => {
             app.next_reconcile_at = app.now + RECONCILE_INTERVAL;
@@ -2631,7 +2997,8 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             app.queue.close_visual();
             Vec::new()
         }
-        Msg::Quit => vec![Effect::Quit],
+        Msg::Quit => app.quit(),
+        Msg::QuitTimeout => app.quit_timeout(),
         Msg::Archive => {
             let count = app.take_count();
             app.perform(Repeat {
@@ -2755,14 +3122,24 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             app.spinner = app.spinner.wrapping_add(1);
             Vec::new()
         }
-        Msg::Wake => app.reconcile(Trigger::Auto),
+        Msg::Wake => {
+            app.probe_now();
+            app.reconcile(Trigger::Auto)
+        }
         Msg::ReconcileTick => {
             app.next_reconcile_at = app.now + RECONCILE_INTERVAL;
             app.reconcile(Trigger::Auto)
         }
         Msg::Refresh => {
             app.take_count();
+            app.probe_now();
             app.reconcile(Trigger::Refresh)
+        }
+        Msg::Retrying { from, retry } => {
+            if app.awaits(from) {
+                app.retrying.insert(from, retry);
+            }
+            Vec::new()
         }
         Msg::Reconciled { generation, result } => app.reconciled(generation, result),
         Msg::Loaded { generation, result } => {
@@ -2771,19 +3148,28 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             {
                 return vec![Effect::Fatal(fatal)];
             }
+            app.heard(result.as_ref().err());
             if generation != app.generation {
                 return Vec::new();
             }
             app.loading = false;
+            app.retrying.remove(&Source::Query(generation));
             let mut effects = Vec::new();
             match result {
                 Ok(result) => {
+                    if app.previous.take().is_some() {
+                        app.queue.clear_selection();
+                        app.queue.to_first();
+                    }
                     app.total = result.total;
                     let (threads, forgotten) = app.queue_threads(result);
                     app.queue.replace(threads);
                     effects.extend(forgotten);
                 }
-                Err(error) => app.status = error.to_string(),
+                Err(error) => {
+                    app.go_back();
+                    app.query_failed(&error);
+                }
             }
             if std::mem::take(&mut app.due_at_launch) {
                 effects.extend(app.check_due());

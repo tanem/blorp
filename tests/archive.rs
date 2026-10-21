@@ -193,13 +193,13 @@ fn a_failed_request_rolls_the_archive_back_and_reconciles() {
 
     let effects = h.send(Msg::Sent {
         job: 1,
-        result: Err(Error::Status(503)),
+        result: Err(Error::Status(400)),
     });
 
     assert_eq!(h.subjects(), ["Re: Trip", "Lunch", "Invoice"]);
     assert_eq!(
         h.status(),
-        "Could not archive 1 thread: Fastmail returned HTTP 503"
+        "Could not archive 1 thread: Fastmail error: HTTP 400"
     );
     assert_eq!(
         effects,
@@ -220,7 +220,7 @@ fn a_failed_archive_reconciles_once_the_outbox_drains() {
 
     let effects = h.send(Msg::Sent {
         job: 1,
-        result: Err(Error::Status(503)),
+        result: Err(Error::Status(400)),
     });
 
     assert_eq!(effects, [], "the second archive is still in the outbox");
@@ -228,7 +228,7 @@ fn a_failed_archive_reconciles_once_the_outbox_drains() {
 
     let effects = h.send(Msg::Sent {
         job: 2,
-        result: Err(Error::Status(503)),
+        result: Err(Error::Status(400)),
     });
 
     assert_eq!(
@@ -348,7 +348,7 @@ fn an_archive_takes_its_thread_off_the_total_and_a_rollback_puts_it_back() {
 
     h.send(Msg::Sent {
         job: 1,
-        result: Err(Error::Status(503)),
+        result: Err(Error::Status(400)),
     });
     assert_eq!(h.app.total(), 3);
 }

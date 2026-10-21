@@ -287,7 +287,12 @@ impl Blorp {
 
     /// Waits for blorp to exit and its output to be read.
     pub fn wait_exit(&mut self) -> ExitStatus {
-        let deadline = Instant::now() + TIMEOUT;
+        self.wait_exit_within(TIMEOUT)
+    }
+
+    /// Waits up to `timeout` for blorp to exit and its output to be read.
+    pub fn wait_exit_within(&mut self, timeout: Duration) -> ExitStatus {
+        let deadline = Instant::now() + timeout;
         let status = loop {
             if let Some(status) = self.child.try_wait().expect("blorp's status") {
                 break status;

@@ -31,6 +31,7 @@ pub mod undo;
 use cli::{Cli, Command, CommandError, Keychain, Stdin, StoreError, TokenFile, TokenStore};
 use config::DebugOverrides;
 use jmap::http::FASTMAIL_SESSION_URL;
+use jmap::retry::retrying;
 use jmap::{Fatal, HttpJmap};
 use run::Exit;
 
@@ -48,6 +49,10 @@ pub fn run(cli: Cli) -> ExitCode {
             eprintln!("{fatal}");
             ExitCode::FAILURE
         }
+        Err(Failure::Unreachable(error)) => {
+            eprintln!("Could not reach Fastmail: {error}");
+            ExitCode::FAILURE
+        }
         Err(Failure::Other(message)) => {
             eprintln!("blorp: {message}");
             ExitCode::FAILURE
@@ -56,11 +61,13 @@ pub fn run(cli: Cli) -> ExitCode {
 }
 
 /// Why blorp exits 1: Fastmail refused the token, printed as the fixed
-/// message, or anything else, printed after `blorp: `. Ctrl-C at the setup
-/// prompt exits 130, as a shell reports SIGINT, with nothing printed.
+/// message; Fastmail could not be reached at launch despite retries; or
+/// anything else, printed after `blorp: `. Ctrl-C at the setup prompt
+/// exits 130, as a shell reports SIGINT, with nothing printed.
 enum Failure {
     Cancelled,
     Fatal(Fatal),
+    Unreachable(jmap::Error),
     Other(String),
 }
 
@@ -83,7 +90,12 @@ impl From<CommandError> for Failure {
 }
 
 impl From<jmap::Error> for Failure {
+    /// A transient failure, which has been retried, is Fastmail being out
+    /// of reach.
     fn from(error: jmap::Error) -> Self {
+        if error.class() == jmap::Class::Transient {
+            return Failure::Unreachable(error);
+        }
         CommandError::from(error).into()
     }
 }
@@ -119,7 +131,8 @@ fn logout() -> Result<(), Failure> {
 }
 
 /// Everything up to `Mailbox/get` runs on the plain terminal, including
-/// setup when no token is found; only then does the TUI take over.
+/// setup when no token is found; only then does the TUI take over. The
+/// session fetch and `Mailbox/get` are retried on the usual schedule.
 fn tui(dry_run: bool) -> Result<(), Failure> {
     let overrides = debug_overrides();
     let store = token_store(&overrides)?;
@@ -130,7 +143,14 @@ fn tui(dry_run: bool) -> Result<(), Failure> {
         config::state_dir(|name| env::var_os(name)).map(|dir| dir.join(snooze::FILE_NAME));
     runtime()?.block_on(async {
         let (jmap, _session) = match token {
-            Some(token) => HttpJmap::connect(&session_url, token).await?,
+            Some(token) => {
+                let token = std::sync::Arc::new(token);
+                retrying(
+                    || HttpJmap::connect(&session_url, token.clone()),
+                    |retry| tracing::info!("retrying the session fetch ({retry}/3)"),
+                )
+                .await?
+            }
             None => cli::setup(&*store, &mut Stdin, &mut io::stdout(), &session_url).await?,
         };
         let mut app = run::launch(&jmap, Timestamp::now())
@@ -166,6 +186,10 @@ fn tui(dry_run: bool) -> Result<(), Failure> {
         ratatui::restore();
         match result.map_err(|e| e.to_string())? {
             Exit::Quit => Ok(()),
+            Exit::Unconfirmed(n) => {
+                println!("{}", run::unconfirmed(n));
+                Ok(())
+            }
             Exit::Fatal(fatal) => Err(Failure::Fatal(fatal)),
         }
     })
