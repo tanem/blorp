@@ -55,8 +55,8 @@ struct Inner {
     streams: Vec<UnboundedSender<Result<Push, Error>>>,
     /// How many push streams have been asked for.
     streams_opened: usize,
-    /// How many of the next push stream openings fail.
-    refused_streams: usize,
+    /// The errors the next push stream openings fail with, in turn.
+    refused_streams: VecDeque<Error>,
 }
 
 enum Injected {
@@ -74,7 +74,7 @@ impl FakeJmap {
                 injected: VecDeque::new(),
                 streams: Vec::new(),
                 streams_opened: 0,
-                refused_streams: 0,
+                refused_streams: VecDeque::new(),
             })),
         }
     }
@@ -112,9 +112,17 @@ impl FakeJmap {
         self.inner.lock().unwrap().streams.clear();
     }
 
-    /// Makes the next `n` push stream openings fail.
+    /// Makes the next `n` push stream openings fail with HTTP 503.
     pub fn refuse_streams(&self, n: usize) {
-        self.inner.lock().unwrap().refused_streams += n;
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .refused_streams
+            .extend(std::iter::repeat_n(Error::Status(503), n));
+    }
+
+    /// Makes the next push stream opening fail with `error`.
+    pub fn refuse_stream_with(&self, error: Error) {
+        self.inner.lock().unwrap().refused_streams.push_back(error);
     }
 
     /// How many push streams have been asked for, including those refused.
@@ -185,9 +193,8 @@ impl Jmap for FakeJmap {
     async fn events(&self) -> Result<Option<PushStream>, Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.streams_opened += 1;
-        if inner.refused_streams > 0 {
-            inner.refused_streams -= 1;
-            return Err(Error::Status(503));
+        if let Some(error) = inner.refused_streams.pop_front() {
+            return Err(error);
         }
         let (tx, rx) = unbounded_channel();
         inner.streams.push(tx);

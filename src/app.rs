@@ -628,6 +628,8 @@ pub enum Msg {
     Tick,
     /// An event on the push stream: a change, or a ping.
     Wake,
+    /// Fastmail refused to open the push stream for the token.
+    StreamRefused(Fatal),
     /// The reconcile tick, at [`App::next_reconcile_at`].
     ReconcileTick,
     /// `R` or `:refresh`: reconcile at once.
@@ -3454,6 +3456,7 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
             app.probe_now();
             app.reconcile(Trigger::Auto)
         }
+        Msg::StreamRefused(fatal) => vec![Effect::Fatal(fatal)],
         Msg::ReconcileTick => {
             app.next_reconcile_at = app.now + RECONCILE_INTERVAL;
             app.reconcile(Trigger::Auto)
