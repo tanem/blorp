@@ -23,14 +23,21 @@ pub struct LocalJmap {
 impl LocalJmap {
     /// Serves `store` to requests bearing `token`.
     pub async fn start(store: Store, token: &str) -> LocalJmap {
-        LocalJmap::serve(store, token, true, Limits::FASTMAIL.max_calls_in_request).await
+        LocalJmap::serve(
+            MockServer::start().await,
+            store,
+            token,
+            true,
+            Limits::FASTMAIL.max_calls_in_request,
+        )
+        .await
     }
 
     /// Serves `store` to requests bearing `token` on `listener`, so the
     /// session URL is known before the server starts.
     pub async fn start_on(listener: TcpListener, store: Store, token: &str) -> LocalJmap {
         let server = MockServer::builder().listener(listener).start().await;
-        LocalJmap::serve_on(
+        LocalJmap::serve(
             server,
             store,
             token,
@@ -43,12 +50,13 @@ impl LocalJmap {
     /// Serves `store`, advertising and enforcing `max_calls` as the
     /// session's `maxCallsInRequest`.
     pub async fn start_with_max_calls(store: Store, token: &str, max_calls: usize) -> LocalJmap {
-        LocalJmap::serve(store, token, true, max_calls).await
+        LocalJmap::serve(MockServer::start().await, store, token, true, max_calls).await
     }
 
     /// Serves a session that does not advertise the mail capability.
     pub async fn start_without_mail(token: &str) -> LocalJmap {
         LocalJmap::serve(
+            MockServer::start().await,
             Store::builder().build(),
             token,
             false,
@@ -57,11 +65,7 @@ impl LocalJmap {
         .await
     }
 
-    async fn serve(store: Store, token: &str, mail: bool, max_calls: usize) -> LocalJmap {
-        LocalJmap::serve_on(MockServer::start().await, store, token, mail, max_calls).await
-    }
-
-    async fn serve_on(
+    async fn serve(
         server: MockServer,
         store: Store,
         token: &str,

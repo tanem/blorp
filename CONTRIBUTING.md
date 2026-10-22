@@ -34,4 +34,7 @@ blorp starts from a minimal set of keys, and a key is added only when using blor
 - The subject is an imperative sentence in sentence case, with no prefix and no trailing period, such as `Keep the required check named check`.
 - The body, wrapped at 72 columns, says what changed and why.
 - The body ends with `Refs #<issue>.`, or `Closes #<issue>.` when the commit finishes the issue.
-- Write plain, factual prose in commits, comments, and docs. Markdown prose is not hard-wrapped.
+
+## Writing
+
+Commits, comments, and docs are plain and factual. Markdown prose is not hard-wrapped; commit bodies are.
