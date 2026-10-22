@@ -1,0 +1,28 @@
+---
+source: src/ui.rs
+expression: screen
+---
+"●  Ana Lopez            Lunch on Friday?                                      1h"
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                   ┌ Mailbox ───────────────────────────────┐                   "
+"                   │ >                                      │                   "
+"                   │   Family                               │                   "
+"                   │   Junk                                 │                   "
+"                   │   Newsletters                          │                   "
+"                   │   Receipts                             │                   "
+"                   │   Sent                                 │                   "
+"                   │   Trash                                │                   "
+"                   │   Travel                               │                   "
+"                   │   Work                                 │                   "
+"                   │   Work/Plans                           │                   "
+"                   │   Work/Reports                         │                   "
+"                   └────────────────────────────────────────┘                   "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+" Inbox                                                                      1/1 "
+"                                                                                "

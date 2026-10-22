@@ -27,7 +27,7 @@ blorp starts from a minimal set of keys, and a key is added only when using blor
 
 ## Demo
 
-`demo/blorp.tape` renders `demo/blorp.gif` with [VHS](https://github.com/charmbracelet/vhs). Run `vhs demo/blorp.tape` from the repo root. The tape runs a debug build against the made-up Inbox in `examples/demo_server.rs`, served on `127.0.0.1:4848`, never a real account.
+`demo/blorp.tape` renders `demo/blorp.gif` with [VHS](https://github.com/charmbracelet/vhs). Run `vhs demo/blorp.tape` from the repo root. The tape runs a debug build against the made-up account in `examples/demo_server.rs`, served on `127.0.0.1:4848`, never a real account.
 
 ## Commits
 

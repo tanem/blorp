@@ -1,4 +1,4 @@
-//! blorp shows a Fastmail account's Inbox over JMAP.
+//! blorp shows a Fastmail account's mailboxes over JMAP.
 
 use std::env;
 use std::io;

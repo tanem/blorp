@@ -248,6 +248,15 @@ impl Store {
         }
     }
 
+    /// Deletes the mailbox with `id` and takes its emails out of it, as the
+    /// web client would.
+    pub fn delete_mailbox(&mut self, id: &str) {
+        self.mailboxes.retain(|m| m.id != id);
+        for email in &mut self.emails {
+            email.mailbox_ids.remove(id);
+        }
+    }
+
     /// Evaluates `query` the way [`Jmap::query`] does: the same calls the
     /// reqwest adapter makes, each get held to [`MAX_OBJECTS_IN_GET`], with
     /// the threads' emails fetched in gets of at most that many ids.
@@ -459,10 +468,20 @@ impl StoreBuilder {
         self.push_mailbox(id, name, Some(role))
     }
 
+    /// A mailbox with no role inside the mailbox with id `parent`.
+    pub fn child_mailbox(mut self, id: &str, name: &str, parent: &str) -> Self {
+        self = self.push_mailbox(id, name, None);
+        if let Some(mailbox) = self.store.mailboxes.last_mut() {
+            mailbox.parent_id = Some(parent.into());
+        }
+        self
+    }
+
     fn push_mailbox(mut self, id: &str, name: &str, role: Option<&str>) -> Self {
         self.store.mailboxes.push(Mailbox {
             id: id.into(),
             name: name.into(),
+            parent_id: None,
             role: role.map(Into::into),
         });
         self

@@ -1,6 +1,6 @@
 # Renders demo/blorp.gif. Run `vhs demo/blorp.tape` from the repo root.
 #
-# blorp runs as a debug build against the made-up Inbox that
+# blorp runs as a debug build against the made-up account that
 # examples/demo_server.rs serves on localhost, never a real account. The
 # token and log stay out of the keyring and the home directory.
 
@@ -47,6 +47,12 @@ Type "k"
 Sleep 1s
 Type "e"
 Sleep 1.5s
+Type "m"
+Sleep 1s
+Type "arch"
+Sleep 700ms
+Enter
+Sleep 2s
 Type "q"
 Sleep 1s
 

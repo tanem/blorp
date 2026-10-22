@@ -96,8 +96,10 @@ pub async fn launch<J: Jmap>(jmap: &J, now: Timestamp) -> Result<App, Error> {
 /// confirmed.
 pub fn unconfirmed(n: usize) -> String {
     match n {
-        1 => "1 action was not confirmed by Fastmail; check the Inbox.".into(),
-        n => format!("{n} actions were not confirmed by Fastmail; check the Inbox."),
+        1 => "1 action was not confirmed by Fastmail; check the mailbox it came from.".into(),
+        n => format!(
+            "{n} actions were not confirmed by Fastmail; check the mailboxes they came from."
+        ),
     }
 }
 
@@ -174,7 +176,7 @@ where
             .map_err(io::Error::other)?;
         next = tokio::select! {
             key = keys.next(), if quit_at.is_none() => match key {
-                Some(Ok(Event::Key(key))) => ui::key_msg(key),
+                Some(Ok(Event::Key(key))) => ui::key_msg(&app, key),
                 Some(Ok(_)) => None,
                 Some(Err(error)) => return Err(error),
                 None => return Ok(Exit::Quit),

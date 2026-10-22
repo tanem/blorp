@@ -90,7 +90,7 @@ impl Harness {
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Vec<Effect> {
-        match ui::key_msg(key) {
+        match ui::key_msg(&self.app, key) {
             Some(msg) => self.send(msg),
             None => Vec::new(),
         }
