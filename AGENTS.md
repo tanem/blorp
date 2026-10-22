@@ -1,5 +1,7 @@
 # blorp
 
+Build, check, and test commands, the demo, and the commit style are in `CONTRIBUTING.md`. Domain terms are in `GLOSSARY.md` and decisions in `docs/adr/`.
+
 ## Agent skills
 
 ### Issue tracker

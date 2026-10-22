@@ -426,8 +426,8 @@ pub async fn setup(
     writeln!(
         out,
         "blorp needs a Fastmail API token. Create one in Fastmail under \
-         Settings, Privacy & Security, Connected apps & API tokens, with the \
-         Email scope only: not read-only, and not Email submission."
+         Settings, Privacy & Security, Connected apps & API tokens, with \
+         read-only access and the Email scope only."
     )?;
     out.flush()?;
     let mut typed = prompt
