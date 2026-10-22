@@ -44,6 +44,8 @@ Sleep 1s
 Type "k"
 Sleep 700ms
 Type "k"
+Sleep 1s
+Type "e"
 Sleep 1.5s
 Type "q"
 Sleep 1s

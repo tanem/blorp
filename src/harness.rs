@@ -41,9 +41,9 @@ impl Harness {
         update(&mut self.app, msg)
     }
 
-    /// Answers every query and reconcile in `effects` from the store, in
-    /// order, and returns the remaining effects, including those the
-    /// answers produce.
+    /// Answers every query, reconcile, and `Email/set` in `effects` from
+    /// the store, in order, and returns the remaining effects, including
+    /// those the answers produce.
     pub fn resolve(&mut self, effects: Vec<Effect>) -> Vec<Effect> {
         let mut rest = Vec::new();
         for effect in effects {
@@ -59,6 +59,10 @@ impl Harness {
                 } => {
                     let result = self.store.reconcile(&query);
                     rest.extend(self.send(Msg::Reconciled { generation, result }));
+                }
+                Effect::SetEmails { job, update } => {
+                    let result = Ok(self.store.set_emails(&update));
+                    rest.extend(self.send(Msg::Sent { job, result }));
                 }
                 other => rest.push(other),
             }

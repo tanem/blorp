@@ -32,6 +32,30 @@ impl Queue {
         self.cursor = self.cursor.min(self.last());
     }
 
+    /// Removes the thread under the cursor. The cursor stays on the same
+    /// row number, so the next thread slides into place, or on the last row
+    /// if that was the one removed.
+    pub fn remove_current(&mut self) -> Option<Thread> {
+        if self.cursor >= self.threads.len() {
+            return None;
+        }
+        let thread = self.threads.remove(self.cursor);
+        self.cursor = self.cursor.min(self.last());
+        Some(thread)
+    }
+
+    /// Inserts `thread` where it sorts, newest first by the email that
+    /// stands for it, after any that tie. The cursor keeps its row number.
+    pub fn insert(&mut self, thread: Thread) {
+        let at = thread.hit().received_at;
+        let index = self
+            .threads
+            .iter()
+            .position(|t| t.hit().received_at < at)
+            .unwrap_or(self.threads.len());
+        self.threads.insert(index, thread);
+    }
+
     /// The thread under the cursor.
     pub fn current(&self) -> Option<&Thread> {
         self.threads.get(self.cursor)

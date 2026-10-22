@@ -17,6 +17,8 @@ pub const MAIL: &str = "urn:ietf:params:jmap:mail";
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub capabilities: HashMap<String, Value>,
+    #[serde(default)]
+    pub accounts: HashMap<String, Account>,
     pub primary_accounts: HashMap<String, String>,
     pub username: String,
     pub api_url: String,
@@ -35,6 +37,14 @@ impl Session {
         self.primary_accounts.get(MAIL).map(String::as_str)
     }
 
+    /// Whether the session marks the primary mail account read-only, so
+    /// that blorp cannot change its mail.
+    pub fn read_only(&self) -> bool {
+        self.mail_account()
+            .and_then(|id| self.accounts.get(id))
+            .is_some_and(|account| account.is_read_only)
+    }
+
     /// The request limits the core capability advertises. A limit that is
     /// missing, or not a positive integer, takes its value in
     /// [`Limits::FASTMAIL`].
@@ -51,8 +61,17 @@ impl Session {
             max_objects_in_get: limit("maxObjectsInGet").unwrap_or(default.max_objects_in_get),
             max_calls_in_request: limit("maxCallsInRequest")
                 .unwrap_or(default.max_calls_in_request),
+            max_objects_in_set: limit("maxObjectsInSet").unwrap_or(default.max_objects_in_set),
         }
     }
+}
+
+/// An account the session gives access to (RFC 8620 section 2).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    #[serde(default)]
+    pub is_read_only: bool,
 }
 
 /// The session limits blorp works within (RFC 8620 section 2).
@@ -62,13 +81,19 @@ pub struct Limits {
     pub max_objects_in_get: usize,
     /// The most method calls one request may carry.
     pub max_calls_in_request: usize,
+    /// The most objects one `/set` call may create, update, or destroy.
+    pub max_objects_in_set: usize,
 }
 
 impl Limits {
-    /// Fastmail's values, as its session advertised them on 2026-10-19.
+    /// Fastmail's values: `maxObjectsInGet` and `maxCallsInRequest` as its
+    /// session advertised them on 2026-10-19, and `maxObjectsInSet` as two
+    /// published dumps of its session show it, not yet checked against a
+    /// live session.
     pub const FASTMAIL: Limits = Limits {
         max_objects_in_get: 4096,
         max_calls_in_request: 50,
+        max_objects_in_set: 4096,
     };
 }
 
@@ -140,9 +165,7 @@ pub struct Thread {
 pub struct Email {
     pub id: String,
     pub thread_id: String,
-    /// The mailboxes the email is in. blorp does not request it, so it is
-    /// empty in what blorp fetches; the fake store keeps it to evaluate
-    /// `inMailbox`.
+    /// The mailboxes the email is in.
     #[serde(default)]
     pub mailbox_ids: BTreeMap<String, bool>,
     pub keywords: BTreeMap<String, bool>,
@@ -225,6 +248,25 @@ mod tests {
         assert_eq!(session.mail_account(), None);
     }
 
+    #[test]
+    fn session_reads_whether_the_mail_account_is_read_only() {
+        let session: Session = serde_json::from_str(SESSION).unwrap();
+        assert!(!session.read_only());
+
+        let session: Session = serde_json::from_str(
+            &SESSION.replace(r#""isReadOnly": false"#, r#""isReadOnly": true"#),
+        )
+        .unwrap();
+        assert!(session.read_only());
+    }
+
+    #[test]
+    fn a_session_that_does_not_list_the_mail_account_is_not_read_only() {
+        let session = session_with_core(serde_json::json!({}));
+
+        assert!(!session.read_only());
+    }
+
     fn session_with_core(core: Value) -> Session {
         serde_json::from_value(serde_json::json!({
             "capabilities": {CORE: core, MAIL: {}},
@@ -239,14 +281,16 @@ mod tests {
 
     #[test]
     fn session_limits_are_read_from_the_core_capability() {
-        let session =
-            session_with_core(serde_json::json!({"maxObjectsInGet": 256, "maxCallsInRequest": 16}));
+        let session = session_with_core(
+            serde_json::json!({"maxObjectsInGet": 256, "maxObjectsInSet": 128, "maxCallsInRequest": 16}),
+        );
 
         assert_eq!(
             session.limits(),
             Limits {
                 max_objects_in_get: 256,
                 max_calls_in_request: 16,
+                max_objects_in_set: 128,
             }
         );
     }
@@ -260,6 +304,7 @@ mod tests {
             Limits {
                 max_objects_in_get: 4096,
                 max_calls_in_request: 50,
+                max_objects_in_set: 4096,
             }
         );
     }
@@ -274,7 +319,7 @@ mod tests {
             Value::Null,
         ] {
             let session = session_with_core(
-                serde_json::json!({"maxObjectsInGet": value, "maxCallsInRequest": value}),
+                serde_json::json!({"maxObjectsInGet": value, "maxObjectsInSet": value, "maxCallsInRequest": value}),
             );
 
             assert_eq!(
@@ -282,6 +327,7 @@ mod tests {
                 Limits {
                     max_objects_in_get: 4096,
                     max_calls_in_request: 50,
+                    max_objects_in_set: 4096,
                 },
                 "{value}"
             );
@@ -349,11 +395,12 @@ mod tests {
     }
 
     #[test]
-    fn email_allows_a_null_sender_and_subject_and_no_mailbox_ids() {
+    fn email_allows_a_null_sender_and_subject() {
         let email: Email = serde_json::from_str(
             r#"{
                 "id": "Mf2",
                 "threadId": "Tt2",
+                "mailboxIds": {"mb1": true},
                 "keywords": {},
                 "from": null,
                 "subject": null,
@@ -364,7 +411,6 @@ mod tests {
 
         assert_eq!(email.from, None);
         assert_eq!(email.subject, None);
-        assert!(email.mailbox_ids.is_empty());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! The reqwest adapter for [`Jmap`].
 
+use std::collections::BTreeMap;
 use std::error::Error as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,9 +11,9 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::{CORE, Class, Email, EmailQuery, Error, Invocation, Jmap, Limits, MAIL};
+use super::{CORE, Class, Email, EmailQuery, EmailUpdate, Error, Invocation, Jmap, Limits, MAIL};
 use super::{Mailbox, PushStream, QueryResult, Reconciled, Request, Response, Session};
-use super::{Thread, push};
+use super::{SetResult, Thread, push};
 
 /// Fastmail's session resource.
 pub const FASTMAIL_SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
@@ -41,9 +42,10 @@ impl Default for Timeouts {
 }
 
 const MAILBOX_PROPERTIES: [&str; 3] = ["id", "name", "role"];
-const EMAIL_PROPERTIES: [&str; 6] = [
+const EMAIL_PROPERTIES: [&str; 7] = [
     "id",
     "threadId",
+    "mailboxIds",
     "keywords",
     "from",
     "subject",
@@ -310,6 +312,39 @@ impl Jmap for HttpJmap {
         }
         Ok(Some(push::pushes(response.bytes_stream()).boxed()))
     }
+
+    async fn set_emails(&self, update: &EmailUpdate) -> Result<SetResult, Error> {
+        let entries: Vec<_> = update.iter().collect();
+        let chunks: Vec<EmailUpdate> = entries
+            .chunks(self.limits.max_objects_in_set)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|(id, patch)| ((*id).clone(), (*patch).clone()))
+                    .collect()
+            })
+            .collect();
+        let responses: Vec<SetResponse> = self
+            .send_chunked(
+                "Email/set",
+                &chunks,
+                |chunk| json!({"accountId": self.account_id, "update": chunk}),
+            )
+            .await?;
+        let not_updated: BTreeMap<String, Value> = responses
+            .into_iter()
+            .flat_map(|set| set.not_updated.unwrap_or_default())
+            .collect();
+        if not_updated.values().any(|e| e["type"] == "rateLimit") {
+            return Err(Error::Method {
+                method: "Email/set".into(),
+                kind: "rateLimit".into(),
+            });
+        }
+        Ok(SetResult {
+            not_updated: not_updated.into_keys().collect(),
+        })
+    }
 }
 
 /// The ids of every email of `threads`, thread by thread in the order of
@@ -341,6 +376,12 @@ struct Hit {
 #[derive(Deserialize)]
 struct GetResponse<T> {
     list: Vec<T>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetResponse {
+    not_updated: Option<BTreeMap<String, Value>>,
 }
 
 #[derive(Deserialize)]
