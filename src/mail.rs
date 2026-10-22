@@ -124,3 +124,69 @@ impl Thread {
         self.emails.len()
     }
 }
+
+/// The address of `thread` in Fastmail's web UI, under the mailbox named
+/// `mailbox`: the thread's id and the id of the email the query matched,
+/// its newest in the queue mailbox, joined by `.`. The web UI shows the
+/// whole thread there with that email expanded. It adds its own `?u=`
+/// parameter, so none is given here.
+pub fn web_url(mailbox: &str, thread: &Thread) -> String {
+    let mut url = url::Url::parse("https://app.fastmail.com/mail").expect("valid URL");
+    url.path_segments_mut()
+        .expect("URL with a path")
+        .push(mailbox)
+        .push(&format!("{}.{}", thread.id, thread.hit().id));
+    url.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A thread of emails with `ids`, standing for itself by the one at
+    /// `hit`.
+    fn thread(ids: &[&str], hit: usize) -> Thread {
+        let emails = ids
+            .iter()
+            .map(|id| Email {
+                id: id.to_string(),
+                seen: true,
+                flagged: false,
+                sender: None,
+                subject: None,
+                received_at: Timestamp::UNIX_EPOCH,
+            })
+            .collect();
+        Thread {
+            id: "Tthread".into(),
+            emails,
+            hit,
+        }
+    }
+
+    #[test]
+    fn the_web_url_names_the_mailbox_the_thread_and_the_email_the_query_matched() {
+        let thread = thread(&["e-old", "e-new", "e-sent"], 1);
+        assert_eq!(
+            web_url("Inbox", &thread),
+            "https://app.fastmail.com/mail/Inbox/Tthread.e-new"
+        );
+    }
+
+    #[test]
+    fn the_web_url_escapes_the_mailbox_name() {
+        let thread = thread(&["e1"], 0);
+        for (mailbox, segment) in [
+            ("Snoozed (blorp)", "Snoozed%20(blorp)"),
+            ("A/B", "A%2FB"),
+            ("Café", "Caf%C3%A9"),
+            ("50%", "50%25"),
+            ("Q?#", "Q%3F%23"),
+        ] {
+            assert_eq!(
+                web_url(mailbox, &thread),
+                format!("https://app.fastmail.com/mail/{segment}/Tthread.e1")
+            );
+        }
+    }
+}

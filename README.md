@@ -6,7 +6,7 @@ A terminal UI for a Fastmail account's Inbox over JMAP.
 
 [![ci](https://github.com/tanem/blorp/actions/workflows/ci.yml/badge.svg)](https://github.com/tanem/blorp/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/github/license/tanem/blorp)](LICENSE)
 
-Status: early. blorp shows the Inbox and has three keys, `j`, `k`, and `q`, with `Ctrl-c` also quitting; more are added as using blorp shows they are needed ([ADR 0003](docs/adr/0003-every-key-earns-its-place.md)).
+Status: early. blorp shows the Inbox and has four keys, `j`, `k`, `o`, and `q`, with `Ctrl-c` also quitting; more are added as using blorp shows they are needed ([ADR 0003](docs/adr/0003-every-key-earns-its-place.md)).
 
 ## Requirements
 
@@ -40,6 +40,7 @@ BLORP_API_TOKEN="$(pass show fastmail/blorp)" blorp
 | --- | --- |
 | `j` | Down |
 | `k` | Up |
+| `o` | Open in Fastmail |
 | `q` | Quit |
 | `Ctrl-c` | Quit |
 

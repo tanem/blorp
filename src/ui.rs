@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn only_j_k_q_and_ctrl_c_send_a_message() {
+    fn only_j_k_o_q_and_ctrl_c_send_a_message() {
         let press = |code, modifiers| key_msg(KeyEvent::new(code, modifiers));
 
         assert!(matches!(
@@ -405,6 +405,10 @@ mod tests {
             Some(Msg::Up)
         ));
         assert!(matches!(
+            press(KeyCode::Char('o'), KeyModifiers::NONE),
+            Some(Msg::Open)
+        ));
+        assert!(matches!(
             press(KeyCode::Char('q'), KeyModifiers::NONE),
             Some(Msg::Quit)
         ));
@@ -412,7 +416,7 @@ mod tests {
             press(KeyCode::Char('c'), KeyModifiers::CONTROL),
             Some(Msg::Quit)
         ));
-        for c in "gGeEd!mzfroux XV./tR:D?0123456789Jc".chars() {
+        for c in "gGeEd!mzfrux XV./tR:D?0123456789Jc".chars() {
             assert!(press(KeyCode::Char(c), KeyModifiers::NONE).is_none(), "{c}");
         }
         for code in [
