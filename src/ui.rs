@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn only_j_k_o_q_and_ctrl_c_send_a_message() {
+    fn only_j_k_e_o_q_and_ctrl_c_send_a_message() {
         let press = |code, modifiers| key_msg(KeyEvent::new(code, modifiers));
 
         assert!(matches!(
@@ -403,6 +403,10 @@ mod tests {
         assert!(matches!(
             press(KeyCode::Char('k'), KeyModifiers::NONE),
             Some(Msg::Up)
+        ));
+        assert!(matches!(
+            press(KeyCode::Char('e'), KeyModifiers::NONE),
+            Some(Msg::Archive)
         ));
         assert!(matches!(
             press(KeyCode::Char('o'), KeyModifiers::NONE),
@@ -416,7 +420,7 @@ mod tests {
             press(KeyCode::Char('c'), KeyModifiers::CONTROL),
             Some(Msg::Quit)
         ));
-        for c in "gGeEd!mzfrux XV./tR:D?0123456789Jc".chars() {
+        for c in "gGEd!mzfrux XV./tR:D?0123456789Jc".chars() {
             assert!(press(KeyCode::Char(c), KeyModifiers::NONE).is_none(), "{c}");
         }
         for code in [
@@ -429,7 +433,7 @@ mod tests {
         ] {
             assert!(press(code, KeyModifiers::NONE).is_none(), "{code:?}");
         }
-        for c in ['j', 'k', 'q', 'r', 'd', 'u'] {
+        for c in ['j', 'k', 'e', 'q', 'r', 'd', 'u'] {
             assert!(
                 press(KeyCode::Char(c), KeyModifiers::CONTROL).is_none(),
                 "Ctrl-{c}"

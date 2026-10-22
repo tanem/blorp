@@ -2,9 +2,9 @@
 //! from a fake store on a loopback port.
 
 use std::net::TcpListener;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use blorp::jmap::fake::{MAX_OBJECTS_IN_GET, Store, api};
+use blorp::jmap::fake::{MAX_OBJECTS_IN_GET, MAX_OBJECTS_IN_SET, Store, api};
 use blorp::jmap::{CORE, Limits, MAIL};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
@@ -27,7 +27,7 @@ impl LocalJmap {
             MockServer::start().await,
             store,
             token,
-            true,
+            Access::Mail,
             Limits::FASTMAIL.max_calls_in_request,
         )
         .await
@@ -41,7 +41,7 @@ impl LocalJmap {
             server,
             store,
             token,
-            true,
+            Access::Mail,
             Limits::FASTMAIL.max_calls_in_request,
         )
         .await
@@ -50,7 +50,27 @@ impl LocalJmap {
     /// Serves `store`, advertising and enforcing `max_calls` as the
     /// session's `maxCallsInRequest`.
     pub async fn start_with_max_calls(store: Store, token: &str, max_calls: usize) -> LocalJmap {
-        LocalJmap::serve(MockServer::start().await, store, token, true, max_calls).await
+        LocalJmap::serve(
+            MockServer::start().await,
+            store,
+            token,
+            Access::Mail,
+            max_calls,
+        )
+        .await
+    }
+
+    /// Serves `store` to requests bearing `token`, with a session that
+    /// marks the account read-only.
+    pub async fn start_read_only(store: Store, token: &str) -> LocalJmap {
+        LocalJmap::serve(
+            MockServer::start().await,
+            store,
+            token,
+            Access::ReadOnly,
+            Limits::FASTMAIL.max_calls_in_request,
+        )
+        .await
     }
 
     /// Serves a session that does not advertise the mail capability.
@@ -59,7 +79,7 @@ impl LocalJmap {
             MockServer::start().await,
             Store::builder().build(),
             token,
-            false,
+            Access::None,
             Limits::FASTMAIL.max_calls_in_request,
         )
         .await
@@ -69,11 +89,11 @@ impl LocalJmap {
         server: MockServer,
         store: Store,
         token: &str,
-        mail: bool,
+        access: Access,
         max_calls: usize,
     ) -> LocalJmap {
         let auth = format!("Bearer {token}");
-        let session = session(&server.uri(), mail, max_calls);
+        let session = session(&server.uri(), access, max_calls);
         Mock::given(method("GET"))
             .and(path("/jmap/session"))
             .respond_with(Authorized {
@@ -82,7 +102,7 @@ impl LocalJmap {
             })
             .mount(&server)
             .await;
-        let store = Arc::new(store);
+        let store = Arc::new(Mutex::new(store));
         Mock::given(method("POST"))
             .and(path("/jmap/api/"))
             .respond_with(Authorized {
@@ -116,6 +136,17 @@ impl LocalJmap {
     }
 }
 
+/// What the session gives the token access to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// Mail, read and write.
+    Mail,
+    /// Mail, read-only.
+    ReadOnly,
+    /// No mail capability.
+    None,
+}
+
 type Answer = Box<dyn Fn(&Request) -> ResponseTemplate + Send + Sync>;
 
 /// Answers requests bearing the token, and 401 to any other.
@@ -137,10 +168,13 @@ impl Respond for Authorized {
     }
 }
 
-fn api_response(store: &Store, max_calls: usize, request: &Request) -> ResponseTemplate {
+fn api_response(store: &Mutex<Store>, max_calls: usize, request: &Request) -> ResponseTemplate {
     let result = serde_json::from_slice::<Value>(&request.body)
         .map_err(|_| api::problem("urn:ietf:params:jmap:error:notJSON"))
-        .and_then(|body| api::respond(store, ACCOUNT_ID, max_calls, &body));
+        .and_then(|body| {
+            let mut store = store.lock().unwrap();
+            api::respond(&mut store, ACCOUNT_ID, max_calls, &body)
+        });
     match result {
         Ok(response) => ResponseTemplate::new(200).set_body_json(response),
         Err(problem) => ResponseTemplate::new(400).set_body_json(problem),
@@ -148,20 +182,26 @@ fn api_response(store: &Store, max_calls: usize, request: &Request) -> ResponseT
 }
 
 /// A session resource in Fastmail's shape, advertising Fastmail's
-/// `maxObjectsInGet`, and `max_calls` as `maxCallsInRequest`.
-fn session(base: &str, mail: bool, max_calls: usize) -> Value {
+/// `maxObjectsInGet` and `maxObjectsInSet`, and `max_calls` as
+/// `maxCallsInRequest`.
+fn session(base: &str, access: Access, max_calls: usize) -> Value {
     let mut capabilities = json!({CORE: {
         "maxObjectsInGet": MAX_OBJECTS_IN_GET,
+        "maxObjectsInSet": MAX_OBJECTS_IN_SET,
         "maxCallsInRequest": max_calls
     }});
     let mut primary = json!({CORE: ACCOUNT_ID});
-    if mail {
+    if access != Access::None {
         capabilities[MAIL] = json!({});
         primary[MAIL] = json!(ACCOUNT_ID);
     }
     json!({
         "capabilities": capabilities,
-        "accounts": {ACCOUNT_ID: {"name": USERNAME, "isPersonal": true, "isReadOnly": false}},
+        "accounts": {ACCOUNT_ID: {
+            "name": USERNAME,
+            "isPersonal": true,
+            "isReadOnly": access == Access::ReadOnly
+        }},
         "primaryAccounts": primary,
         "username": USERNAME,
         "apiUrl": format!("{base}/jmap/api/"),

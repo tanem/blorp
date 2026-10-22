@@ -1,6 +1,6 @@
 //! The in-memory snapshot of fetched mailboxes, threads, and emails.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use jiff::Timestamp;
 
@@ -13,7 +13,35 @@ pub struct Mailboxes(Vec<jmap::Mailbox>);
 impl Mailboxes {
     /// The mailbox carrying the `inbox` role, if any.
     pub fn inbox(&self) -> Option<&jmap::Mailbox> {
-        self.0.iter().find(|m| m.role.as_deref() == Some("inbox"))
+        self.by_role("inbox")
+    }
+
+    /// The mailbox carrying the `archive` role, if any.
+    pub fn archive(&self) -> Option<&jmap::Mailbox> {
+        self.by_role("archive")
+    }
+
+    fn by_role(&self, role: &str) -> Option<&jmap::Mailbox> {
+        self.0.iter().find(|m| m.role.as_deref() == Some(role))
+    }
+
+    /// Whether a move out of mailbox `from` moves `email`: it is in `from`,
+    /// in no Drafts or Sent mailbox, and in no Trash or Junk mailbox other
+    /// than `from`.
+    pub fn moves(&self, email: &Email, from: &str) -> bool {
+        let kept = |id: &String| {
+            let role = self
+                .0
+                .iter()
+                .find(|m| m.id == *id)
+                .and_then(|m| m.role.as_deref());
+            match role {
+                Some("drafts" | "sent") => true,
+                Some("trash" | "junk") => id != from,
+                _ => false,
+            }
+        };
+        email.mailbox_ids.contains(from) && !email.mailbox_ids.iter().any(kept)
     }
 }
 
@@ -26,6 +54,8 @@ impl From<Vec<jmap::Mailbox>> for Mailboxes {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Email {
     pub id: String,
+    /// The ids of the mailboxes the email is in.
+    pub mailbox_ids: BTreeSet<String>,
     pub seen: bool,
     pub flagged: bool,
     /// The first `From` address's name, or its address when it has none.
@@ -48,6 +78,7 @@ impl From<jmap::Email> for Email {
             seen: email.keywords.contains_key("$seen"),
             flagged: email.keywords.contains_key("$flagged"),
             id: email.id,
+            mailbox_ids: email.mailbox_ids.into_keys().collect(),
             sender,
             subject: email.subject,
             received_at: email.received_at,
@@ -150,6 +181,7 @@ mod tests {
             .iter()
             .map(|id| Email {
                 id: id.to_string(),
+                mailbox_ids: BTreeSet::new(),
                 seen: true,
                 flagged: false,
                 sender: None,

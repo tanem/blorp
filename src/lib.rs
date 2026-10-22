@@ -134,14 +134,15 @@ fn tui() -> Result<(), Failure> {
     let session_url = session_url(&overrides);
     let _log = start_log()?;
     runtime()?.block_on(async {
-        let (jmap, _session) = match token {
+        let (jmap, session) = match token {
             Some(token) => {
                 let token = std::sync::Arc::new(token);
                 run::connect(|| HttpJmap::connect(&session_url, token.clone())).await?
             }
             None => cli::setup(&*store, &mut Stdin, &mut io::stdout(), &session_url).await?,
         };
-        let app = run::launch(&jmap, Timestamp::now()).await?;
+        let mut app = run::launch(&jmap, Timestamp::now()).await?;
+        app.set_read_only(session.read_only());
         let mut terminal = ratatui::try_init().map_err(|e| {
             ratatui::restore();
             e.to_string()
@@ -157,6 +158,10 @@ fn tui() -> Result<(), Failure> {
         ratatui::restore();
         match result.map_err(|e| e.to_string())? {
             Exit::Quit => Ok(()),
+            Exit::Unconfirmed(n) => {
+                println!("{}", run::unconfirmed(n));
+                Ok(())
+            }
             Exit::Fatal(fatal) => Err(Failure::Fatal(fatal)),
         }
     })

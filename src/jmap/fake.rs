@@ -3,7 +3,8 @@
 //! The store evaluates the `Email/query` blorp sends: the `inMailbox`
 //! condition, sorting by `receivedAt` newest first, collapsing threads,
 //! `limit`, and `calculateTotal`. Every get is held to Fastmail's
-//! `maxObjectsInGet`.
+//! `maxObjectsInGet`, and the local test server holds every `Email/set` to
+//! its `maxObjectsInSet`. `Email/set` applies `mailboxIds/<id>` patches.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -15,8 +16,8 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 pub mod api;
 
-use super::{Email, EmailAddress, EmailQuery, Error, Jmap, Limits};
-use super::{Mailbox, Push, PushStream, QueryResult, Reconciled, Thread};
+use super::{Email, EmailAddress, EmailPatch, EmailQuery, EmailUpdate, Error, Jmap, Limits};
+use super::{Mailbox, Push, PushStream, QueryResult, Reconciled, SetResult, Thread};
 
 /// A call made to a [`FakeJmap`], in the order made.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +27,7 @@ pub enum Call {
     GetMailboxes,
     Query(EmailQuery),
     Reconcile(EmailQuery),
+    SetEmails(EmailUpdate),
 }
 
 /// A fake JMAP server: a store, a call log, failure injection, and push
@@ -198,6 +200,13 @@ impl Jmap for FakeJmap {
         });
         Ok(Some(stream.boxed()))
     }
+
+    async fn set_emails(&self, update: &EmailUpdate) -> Result<SetResult, Error> {
+        self.call(Call::SetEmails(update.clone()), |store| {
+            Ok(store.set_emails(update))
+        })
+        .await
+    }
 }
 
 /// Synthetic mailboxes and emails.
@@ -293,6 +302,24 @@ impl Store {
         Ok((ids, total))
     }
 
+    /// `Email/set` with `update`: applies each patch, and lists as not
+    /// updated every unknown id and every patch with a path other than
+    /// `mailboxIds/<id>` or a value other than `true` or `null`. Such a
+    /// patch changes nothing.
+    pub fn set_emails(&mut self, update: &EmailUpdate) -> SetResult {
+        let mut not_updated = Vec::new();
+        for (id, patch) in update {
+            let Some(email) = self.emails.iter_mut().find(|e| &e.id == id) else {
+                not_updated.push(id.clone());
+                continue;
+            };
+            if !apply(email, patch) {
+                not_updated.push(id.clone());
+            }
+        }
+        SetResult { not_updated }
+    }
+
     /// `Mailbox/get`: the mailboxes with `ids`, or every mailbox for `None`,
     /// and the ids not found.
     pub fn get_mailboxes(
@@ -334,6 +361,10 @@ impl Store {
 /// `requestTooLarge`.
 pub const MAX_OBJECTS_IN_GET: usize = Limits::FASTMAIL.max_objects_in_get;
 
+/// Fastmail's `maxObjectsInSet`: an `Email/set` of more updates than this
+/// fails with `requestTooLarge`.
+pub const MAX_OBJECTS_IN_SET: usize = Limits::FASTMAIL.max_objects_in_set;
+
 fn check_size(method: &str, requested: usize) -> Result<(), Error> {
     if requested > MAX_OBJECTS_IN_GET {
         return Err(Error::Method {
@@ -365,6 +396,28 @@ fn get_by_ids<T: Clone>(
         }
     }
     Ok((found, not_found))
+}
+
+/// Applies `patch` to `email` if every entry is one the store supports,
+/// and says whether it did.
+fn apply(email: &mut Email, patch: &EmailPatch) -> bool {
+    let mut patched = email.clone();
+    for (path, value) in patch {
+        let Some(id) = path.strip_prefix("mailboxIds/").filter(|id| !id.is_empty()) else {
+            return false;
+        };
+        match value {
+            Value::Bool(true) => {
+                patched.mailbox_ids.insert(id.to_string(), true);
+            }
+            Value::Null => {
+                patched.mailbox_ids.remove(id);
+            }
+            _ => return false,
+        }
+    }
+    *email = patched;
+    true
 }
 
 /// Whether `email` matches `filter`, an `inMailbox` condition.

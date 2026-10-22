@@ -4,6 +4,7 @@
 //! reqwest adapter [`HttpJmap`] for production and the in-memory
 //! [`fake::FakeJmap`] for tests.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::time::Duration;
@@ -48,6 +49,32 @@ pub trait Jmap: Clone + Send + Sync + 'static {
     /// `None` when the session advertises no push stream. The stream ends,
     /// or ends in an error, when the connection drops.
     fn events(&self) -> impl Future<Output = Result<Option<PushStream>, Error>> + Send;
+
+    /// `update` applied in `Email/set` calls of at most the session's
+    /// `maxObjectsInSet` emails, in requests of at most its
+    /// `maxCallsInRequest` calls, sent one after another; none is sent for
+    /// an empty update. An email the server did not update is listed in the
+    /// result, not reported as an error. A failed request fails the whole
+    /// update, and the calls answered before it stay applied.
+    fn set_emails(
+        &self,
+        update: &EmailUpdate,
+    ) -> impl Future<Output = Result<SetResult, Error>> + Send;
+}
+
+/// An `Email/set` patch: paths such as `mailboxIds/<id>`, each set to
+/// `true` or `null`. Applying one twice leaves the email as applying it
+/// once does.
+pub type EmailPatch = BTreeMap<String, Value>;
+
+/// The `update` argument of an `Email/set`: a patch per email id.
+pub type EmailUpdate = BTreeMap<String, EmailPatch>;
+
+/// The result of a [`Jmap::set_emails`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SetResult {
+    /// The ids in `notUpdated`, in id order.
+    pub not_updated: Vec<String>,
 }
 
 /// An `Email/query` sorted by `receivedAt`, newest first, with threads
@@ -101,7 +128,8 @@ pub enum Error {
     /// Fastmail refused the request as a whole with this JMAP
     /// request-level error type, such as `limit` or `notJSON`.
     Request(String),
-    /// A method call returned a JMAP method error.
+    /// A method call returned a JMAP method error. A `SetError` that
+    /// fails a whole update, such as `rateLimit`, is reported as one too.
     Method { method: String, kind: String },
     /// The response did not parse.
     Parse(String),
@@ -121,8 +149,8 @@ pub enum Class {
     Bug,
 }
 
-/// The JMAP method error types that are transient.
-const TRANSIENT_KINDS: [&str; 2] = ["serverUnavailable", "serverFail"];
+/// The JMAP method and `SetError` types that are transient.
+const TRANSIENT_KINDS: [&str; 3] = ["serverUnavailable", "serverFail", "rateLimit"];
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -169,7 +197,7 @@ impl Error {
 
     /// The class the failure falls into: transient for a request that did
     /// not complete, HTTP 429 and 5xx, the request-level `limit` error, and
-    /// the `serverUnavailable` and `serverFail` method errors; fatal
+    /// the `serverUnavailable`, `serverFail`, and `rateLimit` errors; fatal
     /// as [`Error::fatal`] says; otherwise a bug.
     pub fn class(&self) -> Class {
         if let Some(fatal) = self.fatal() {

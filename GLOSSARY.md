@@ -12,6 +12,14 @@ _Avoid_: List, feed, timeline, mailbox (for the queue)
 A conversation as Fastmail groups it: one row of the queue.
 _Avoid_: Message (when the whole conversation is meant), email, conversation
 
+**Action**:
+A change blorp makes to the account's mail on a key, such as archiving a thread. It shows in the queue at once and is sent through the outbox.
+_Avoid_: Command, operation, mutation
+
+**Outbox**:
+The actions sent to Fastmail and not yet answered, sent one at a time in the order typed.
+_Avoid_: Job queue, send queue
+
 **Setup**:
 The plain-terminal flow that takes an API token, checks it against Fastmail, and stores it. Runs on first launch or on request.
 _Avoid_: Login, onboarding, auth
