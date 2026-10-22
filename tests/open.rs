@@ -8,7 +8,7 @@ use blorp::jmap::fake::{EmailSpec, Store, StoreBuilder};
 
 /// `n` single-email Inbox threads, newest first: t1 holding e1 to tn
 /// holding en.
-fn builder(n: usize) -> StoreBuilder {
+fn inbox(n: usize) -> StoreBuilder {
     let mut store = Store::builder()
         .role_mailbox("mb-inbox", "Inbox", "inbox")
         .role_mailbox("mb-sent", "Sent", "sent");
@@ -31,7 +31,7 @@ fn open(thread: &str, email: &str) -> Effect {
 
 #[test]
 fn o_opens_the_thread_under_the_cursor() {
-    let mut h = Harness::loaded(builder(3).build());
+    let mut h = Harness::loaded(inbox(3).build());
     h.keys("j");
 
     assert_eq!(h.keys("o"), [open("t2", "e2")]);
@@ -40,7 +40,7 @@ fn o_opens_the_thread_under_the_cursor() {
 #[test]
 fn o_opens_a_thread_at_its_newest_email_in_the_queue_mailbox() {
     let mut h = Harness::loaded(
-        builder(0)
+        inbox(0)
             .email(
                 EmailSpec::new("e-old", "t-long", "2026-10-18T09:00:00Z")
                     .in_mailbox("mb-inbox")
@@ -58,7 +58,7 @@ fn o_opens_a_thread_at_its_newest_email_in_the_queue_mailbox() {
 
 #[test]
 fn o_on_an_empty_queue_does_nothing() {
-    let mut h = Harness::loaded(builder(0).build());
+    let mut h = Harness::loaded(inbox(0).build());
 
     assert_eq!(h.keys("o"), []);
     assert_eq!(h.status(), "");
@@ -66,7 +66,7 @@ fn o_on_an_empty_queue_does_nothing() {
 
 #[test]
 fn o_opens_while_disconnected() {
-    let mut h = Harness::loaded(builder(3).build());
+    let mut h = Harness::loaded(inbox(3).build());
     h.app.now = h.app.next_reconcile_at();
     let generation = match h.send(Msg::ReconcileTick).as_slice() {
         [Effect::Reconcile { generation, .. }] => *generation,
@@ -83,7 +83,7 @@ fn o_opens_while_disconnected() {
 
 #[test]
 fn a_failure_to_open_shows_on_the_bottom_line() {
-    let mut h = Harness::loaded(builder(3).build());
+    let mut h = Harness::loaded(inbox(3).build());
 
     assert_eq!(
         h.send(Msg::OpenFailed {
