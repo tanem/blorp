@@ -36,6 +36,7 @@ impl Mailboxes {
         let mut names = vec![mailbox.name.as_str()];
         let mut parent = mailbox.parent_id.as_deref();
         while let Some(m) = parent.and_then(|id| self.by_id(id)) {
+            // A parentId cycle would otherwise never reach the top.
             if names.len() > self.0.len() {
                 break;
             }
@@ -46,22 +47,24 @@ impl Mailboxes {
         names.join("/")
     }
 
-    /// The id and path of every mailbox, the Inbox first and the rest in
-    /// path order.
-    pub fn listed(&self) -> Vec<(String, String)> {
-        let mut listed: Vec<(bool, String, String)> = self
+    /// Each mailbox whose path holds `typed`, ignoring case, the Inbox
+    /// first and the rest in path order.
+    pub fn matching(&self, typed: &str) -> Vec<Listed> {
+        let typed = typed.to_lowercase();
+        let mut listed: Vec<(bool, Listed)> = self
             .0
             .iter()
             .map(|m| {
-                (
-                    m.role.as_deref() != Some("inbox"),
-                    self.path(m),
-                    m.id.clone(),
-                )
+                let listed = Listed {
+                    path: self.path(m),
+                    id: m.id.clone(),
+                };
+                (m.role.as_deref() != Some("inbox"), listed)
             })
+            .filter(|(_, m)| m.path.to_lowercase().contains(&typed))
             .collect();
         listed.sort();
-        listed.into_iter().map(|(_, path, id)| (id, path)).collect()
+        listed.into_iter().map(|(_, m)| m).collect()
     }
 
     /// Whether a move out of mailbox `from` moves `email`: it is in `from`,
@@ -82,6 +85,14 @@ impl Mailboxes {
         };
         email.mailbox_ids.contains(from) && !email.mailbox_ids.iter().any(kept)
     }
+}
+
+/// A mailbox as the mailbox list shows it: its path, and the id a switch
+/// loads.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Listed {
+    pub path: String,
+    pub id: String,
 }
 
 impl From<Vec<jmap::Mailbox>> for Mailboxes {

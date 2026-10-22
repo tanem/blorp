@@ -12,6 +12,10 @@ _Avoid_: List, feed, timeline, mailbox (for the queue)
 The mailbox whose threads the queue holds: the Inbox at launch, and after that the one last switched to with `m`. Its path is on the statusline.
 _Avoid_: Current folder, view
 
+**Mailbox list**:
+The list `m` opens over the queue: every mailbox by path, filtered by the text typed, for switching the mailbox shown.
+_Avoid_: Picker, folder list, menu
+
 **Thread**:
 A conversation as Fastmail groups it: one row of the queue.
 _Avoid_: Message (when the whole conversation is meant), email, conversation

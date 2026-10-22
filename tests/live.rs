@@ -1,6 +1,6 @@
 //! The live smoke tests against Fastmail. Ignored by default; run with
 //! `BLORP_API_TOKEN` set and `cargo test --test live -- --ignored`. They
-//! read nothing beyond the session, the mailbox list, and the Inbox query,
+//! read nothing beyond the session, the mailboxes, and the Inbox query,
 //! write nothing, and assert on shapes only. Failure messages leave out
 //! mail content.
 

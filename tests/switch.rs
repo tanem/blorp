@@ -1,11 +1,11 @@
 //! `m` opens a list of every mailbox and switches the queue to the one
 //! chosen.
 
-use blorp::app::{Effect, MailboxChoices, Msg};
+use blorp::app::{Effect, MailboxChoices, Msg, QUEUE_LIMIT};
 use blorp::harness::Harness;
 use blorp::jmap::fake::{EmailSpec, Store};
 use blorp::jmap::{EmailQuery, Error};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 use serde_json::json;
 
 /// Mailboxes listed out of path order, with Work/Receipts nested, and two
@@ -64,17 +64,13 @@ fn m_lists_every_mailbox_inbox_first_with_the_one_shown_highlighted() {
 
     assert_eq!(h.keys("m"), []);
 
-    assert_eq!(h.app.mailbox_picker(), choices("", &ALL, 0));
-}
-
-fn press(h: &mut Harness, code: KeyCode) -> Vec<Effect> {
-    h.key(KeyEvent::new(code, KeyModifiers::NONE))
+    assert_eq!(h.app.mailbox_list(), choices("", &ALL, 0));
 }
 
 fn query(mailbox: &str) -> EmailQuery {
     EmailQuery {
         filter: json!({"inMailbox": mailbox}),
-        limit: 500,
+        limit: QUEUE_LIMIT,
     }
 }
 
@@ -83,7 +79,7 @@ fn query(mailbox: &str) -> EmailQuery {
 fn switch(h: &mut Harness, typed: &str) -> Vec<Effect> {
     h.keys("m");
     h.keys(typed);
-    press(h, KeyCode::Enter)
+    h.press(KeyCode::Enter)
 }
 
 /// Makes the next reconcile fail transiently, which disconnects blorp.
@@ -108,7 +104,7 @@ fn the_list_highlights_the_mailbox_shown_when_it_opens() {
 
     h.keys("m");
 
-    assert_eq!(h.app.mailbox_picker(), choices("", &ALL, 5));
+    assert_eq!(h.app.mailbox_list(), choices("", &ALL, 5));
 }
 
 #[test]
@@ -118,17 +114,17 @@ fn typing_narrows_the_list_ignoring_case_and_backspace_widens_it() {
 
     h.keys("WoR");
     assert_eq!(
-        h.app.mailbox_picker(),
+        h.app.mailbox_list(),
         choices("WoR", &["Work", "Work/Receipts"], 0)
     );
 
     h.keys("x");
-    assert_eq!(h.app.mailbox_picker(), choices("WoRx", &[], 0));
+    assert_eq!(h.app.mailbox_list(), choices("WoRx", &[], 0));
 
-    press(&mut h, KeyCode::Backspace);
-    press(&mut h, KeyCode::Backspace);
+    h.press(KeyCode::Backspace);
+    h.press(KeyCode::Backspace);
     assert_eq!(
-        h.app.mailbox_picker(),
+        h.app.mailbox_list(),
         choices("Wo", &["Work", "Work/Receipts"], 0)
     );
 }
@@ -140,7 +136,7 @@ fn letters_that_are_keys_elsewhere_are_typed_into_the_filter() {
 
     assert_eq!(h.keys("jkeoqm"), []);
 
-    assert_eq!(h.app.mailbox_picker(), choices("jkeoqm", &[], 0));
+    assert_eq!(h.app.mailbox_list(), choices("jkeoqm", &[], 0));
     assert_eq!(h.cursor(), 0);
 }
 
@@ -149,24 +145,24 @@ fn the_arrows_ctrl_n_and_ctrl_p_move_the_highlight_and_stop_at_the_ends() {
     let mut h = Harness::loaded(store());
     h.keys("m");
 
-    press(&mut h, KeyCode::Up);
-    assert_eq!(h.app.mailbox_picker().unwrap().index, 0);
+    h.press(KeyCode::Up);
+    assert_eq!(h.app.mailbox_list().unwrap().index, 0);
     h.ctrl('p');
-    assert_eq!(h.app.mailbox_picker().unwrap().index, 0);
+    assert_eq!(h.app.mailbox_list().unwrap().index, 0);
 
-    press(&mut h, KeyCode::Down);
+    h.press(KeyCode::Down);
     h.ctrl('n');
-    assert_eq!(h.app.mailbox_picker().unwrap().index, 2);
+    assert_eq!(h.app.mailbox_list().unwrap().index, 2);
     for _ in 0..5 {
         h.ctrl('n');
     }
-    assert_eq!(h.app.mailbox_picker().unwrap().index, 5);
-    press(&mut h, KeyCode::Down);
-    assert_eq!(h.app.mailbox_picker().unwrap().index, 5);
+    assert_eq!(h.app.mailbox_list().unwrap().index, 5);
+    h.press(KeyCode::Down);
+    assert_eq!(h.app.mailbox_list().unwrap().index, 5);
 
-    press(&mut h, KeyCode::Up);
+    h.press(KeyCode::Up);
     h.ctrl('p');
-    assert_eq!(h.app.mailbox_picker().unwrap().index, 3);
+    assert_eq!(h.app.mailbox_list().unwrap().index, 3);
 }
 
 #[test]
@@ -175,9 +171,9 @@ fn enter_switches_to_the_highlighted_mailbox_and_loads_it() {
     h.keys("j");
     h.keys("m");
     h.keys("work");
-    press(&mut h, KeyCode::Down);
+    h.press(KeyCode::Down);
 
-    let effects = press(&mut h, KeyCode::Enter);
+    let effects = h.press(KeyCode::Enter);
 
     assert_eq!(
         effects,
@@ -187,7 +183,7 @@ fn enter_switches_to_the_highlighted_mailbox_and_loads_it() {
             retry: true,
         }]
     );
-    assert_eq!(h.app.mailbox_picker(), None);
+    assert_eq!(h.app.mailbox_list(), None);
     assert!(h.app.loading());
     assert_eq!(h.app.loading_path(), "Work/Receipts");
     // The queue shows the Inbox until the query lands.
@@ -207,9 +203,9 @@ fn enter_with_no_match_does_nothing() {
     let mut h = Harness::loaded(store());
     h.keys("mzz");
 
-    assert_eq!(press(&mut h, KeyCode::Enter), []);
+    assert_eq!(h.press(KeyCode::Enter), []);
 
-    assert_eq!(h.app.mailbox_picker(), choices("zz", &[], 0));
+    assert_eq!(h.app.mailbox_list(), choices("zz", &[], 0));
 }
 
 #[test]
@@ -218,9 +214,9 @@ fn esc_closes_the_list_and_changes_nothing() {
     h.keys("j");
     h.keys("mtrav");
 
-    assert_eq!(press(&mut h, KeyCode::Esc), []);
+    assert_eq!(h.press(KeyCode::Esc), []);
 
-    assert_eq!(h.app.mailbox_picker(), None);
+    assert_eq!(h.app.mailbox_list(), None);
     assert_eq!(h.app.queue_path(), "Inbox");
     assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
     assert_eq!(h.cursor(), 1);
@@ -385,7 +381,7 @@ fn the_highlight_stays_on_a_match_when_a_reconcile_shortens_the_list() {
     assert_eq!(h.resolve(effects), []);
 
     assert_eq!(
-        h.app.mailbox_picker(),
+        h.app.mailbox_list(),
         choices("", &["Inbox", "Archive", "Sent", "Travel", "Work"], 4)
     );
 }

@@ -5,7 +5,7 @@ use blorp::app::{Effect, Msg};
 use blorp::harness::Harness;
 use blorp::jmap::fake::{EmailSpec, Store};
 use blorp::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, SetResult};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyCode;
 use serde_json::{Value, json};
 
 /// Thread t1 spreads over the Inbox, Travel, Sent, and Trash, with one
@@ -512,7 +512,7 @@ fn mailboxes() -> Store {
 fn switch(h: &mut Harness, typed: &str) {
     h.keys("m");
     h.keys(typed);
-    let effects = h.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let effects = h.press(KeyCode::Enter);
     assert_eq!(h.resolve(effects), []);
 }
 
@@ -630,7 +630,7 @@ fn a_switch_that_lands_while_an_archive_from_its_mailbox_is_in_flight_leaves_the
     let mut h = Harness::loaded(store());
     assert_eq!(h.keys("e").len(), 1);
     h.keys("minbox");
-    let effects = h.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let effects = h.press(KeyCode::Enter);
     let [
         Effect::Query {
             generation, query, ..
@@ -654,4 +654,34 @@ fn a_switch_that_lands_while_an_archive_from_its_mailbox_is_in_flight_leaves_the
     });
     assert_eq!(h.subjects(), ["Re: Trip", "Lunch", "Invoice"]);
     assert_eq!(h.app.total(), 3);
+}
+
+#[test]
+fn a_switch_whose_result_predates_a_confirmed_archive_reconciles_once_it_lands() {
+    let mut h = Harness::loaded(store());
+    let archive = h.keys("e");
+    h.keys("minbox");
+    let effects = h.press(KeyCode::Enter);
+    let [
+        Effect::Query {
+            generation, query, ..
+        },
+    ] = &effects[..]
+    else {
+        panic!("{effects:?}");
+    };
+    // The query is answered before the archive reaches the store.
+    let result = h.store_mut().query(query);
+    assert_eq!(h.resolve(archive), []);
+
+    let effects = h.send(Msg::Loaded {
+        generation: *generation,
+        result,
+    });
+    assert_eq!(effects, [reconcile(3)]);
+    assert_eq!(h.subjects(), ["Re: Trip", "Lunch", "Invoice"]);
+    assert_eq!(h.resolve(effects), []);
+
+    // The email in both the Inbox and Sent now stands for t1.
+    assert_eq!(h.subjects(), ["Lunch", "Invoice", ""]);
 }

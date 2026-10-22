@@ -182,7 +182,7 @@ impl HttpJmap {
 
     /// The staged fetch [`Jmap::query`] describes, with `Mailbox/get` for
     /// every mailbox ahead of the query's calls in the first request when
-    /// `mailboxes` is true. The mailbox list is empty when `mailboxes` is
+    /// `mailboxes` is true. The mailboxes are empty when `mailboxes` is
     /// false.
     async fn fetch(
         &self,

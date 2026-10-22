@@ -57,7 +57,7 @@ pub const BINDINGS: &[Binding] = &[
     Binding {
         keys: &[Key::Char('m')],
         help: "Switch mailbox",
-        msg: || Msg::MailboxList,
+        msg: || Msg::OpenMailboxList,
     },
     Binding {
         keys: &[Key::Char('q')],

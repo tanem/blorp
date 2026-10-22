@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, MailboxChoices, Msg, PickerKey};
+use crate::app::{App, ListKey, MailboxChoices, Msg};
 use crate::jmap::retry::RETRIES;
 use crate::keymap;
 use crate::mail::Thread;
@@ -23,14 +23,14 @@ const AGE_WIDTH: usize = 4;
 /// sender and a space, and a space before each of the count and the age.
 const FIXED_WIDTH: usize = 3 + SENDER_WIDTH + 1 + 1 + COUNT_WIDTH + 1 + AGE_WIDTH;
 
-/// The width of the `m` list, borders included.
-const PICKER_WIDTH: u16 = 42;
+/// The width of the mailbox list, borders included.
+const LIST_WIDTH: u16 = 42;
 
-/// The most mailboxes the `m` list shows at once.
-const PICKER_ROWS: usize = 10;
+/// The most mailboxes the mailbox list shows at once.
+const LIST_ROWS: usize = 10;
 
 /// Draws the whole screen: the queue, the statusline, and the bottom line,
-/// with the `m` list over them while it is open.
+/// with the mailbox list over them while it is open.
 pub fn view(app: &App, frame: &mut Frame) {
     let [queue, statusline, bottom] = Layout::vertical([
         Constraint::Fill(1),
@@ -44,16 +44,16 @@ pub fn view(app: &App, frame: &mut Frame) {
         statusline,
     );
     frame.render_widget(Paragraph::new(bottom_line(app)), bottom);
-    if let Some(choices) = app.mailbox_picker() {
-        picker(frame, &choices);
+    if let Some(choices) = app.mailbox_list() {
+        mailbox_list(frame, &choices);
     }
 }
 
-/// The `m` list, centred over the queue: the filter line, then the
+/// The mailbox list, centred over the queue: the filter line, then the
 /// mailboxes it matches, scrolled to keep the highlighted one in view and
 /// reversed.
-fn picker(frame: &mut Frame, choices: &MailboxChoices) {
-    let first = (choices.index + 1).saturating_sub(PICKER_ROWS);
+fn mailbox_list(frame: &mut Frame, choices: &MailboxChoices) {
+    let first = (choices.index + 1).saturating_sub(LIST_ROWS);
     let mut lines = vec![Line::from(vec![
         Span::styled(
             " > ",
@@ -67,14 +67,14 @@ fn picker(frame: &mut Frame, choices: &MailboxChoices) {
             Style::new().fg(Color::DarkGray),
         ));
     }
-    let width = usize::from(PICKER_WIDTH) - 2;
+    let width = usize::from(LIST_WIDTH) - 2;
     lines.extend(
         choices
             .paths
             .iter()
             .enumerate()
             .skip(first)
-            .take(PICKER_ROWS)
+            .take(LIST_ROWS)
             .map(|(i, path)| {
                 let line = Line::raw(fit(&format!("   {path}"), width));
                 if i == choices.index {
@@ -85,7 +85,7 @@ fn picker(frame: &mut Frame, choices: &MailboxChoices) {
             }),
     );
     let height = u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2;
-    let [area] = Layout::horizontal([Constraint::Length(PICKER_WIDTH)])
+    let [area] = Layout::horizontal([Constraint::Length(LIST_WIDTH)])
         .flex(Flex::Center)
         .areas(frame.area());
     let [area] = Layout::vertical([Constraint::Length(height)])
@@ -250,14 +250,14 @@ fn age(now: Timestamp, then: Timestamp) -> String {
     }
 }
 
-/// The message a key press stands for: at the `m` list, a key of the
+/// The message a key press stands for: at the mailbox list, a key of the
 /// list's, and otherwise one in the keymap, if any.
 pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
-    if app.mailbox_picker().is_some() {
-        return picker_key(key);
+    if app.mailbox_list().is_some() {
+        return list_key(key);
     }
     let KeyCode::Char(c) = key.code else {
         return None;
@@ -270,30 +270,30 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
     keymap::msg(key)
 }
 
-/// The message a key press at the `m` list stands for: Ctrl-n, Ctrl-p,
+/// The message a key press at the mailbox list stands for: Ctrl-n, Ctrl-p,
 /// and the arrows move, Enter switches, Esc closes, and characters and
 /// Backspace edit the text the mailboxes are filtered by, with Ctrl-c
 /// still quitting.
-fn picker_key(key: KeyEvent) -> Option<Msg> {
+fn list_key(key: KeyEvent) -> Option<Msg> {
     let key = if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => return Some(Msg::Quit),
-            KeyCode::Char('n') => PickerKey::Down,
-            KeyCode::Char('p') => PickerKey::Up,
+            KeyCode::Char('n') => ListKey::Down,
+            KeyCode::Char('p') => ListKey::Up,
             _ => return None,
         }
     } else {
         match key.code {
-            KeyCode::Down => PickerKey::Down,
-            KeyCode::Up => PickerKey::Up,
-            KeyCode::Enter => PickerKey::Choose,
-            KeyCode::Esc => PickerKey::Cancel,
-            KeyCode::Backspace => PickerKey::Backspace,
-            KeyCode::Char(c) => PickerKey::Char(c),
+            KeyCode::Down => ListKey::Down,
+            KeyCode::Up => ListKey::Up,
+            KeyCode::Enter => ListKey::Choose,
+            KeyCode::Esc => ListKey::Cancel,
+            KeyCode::Backspace => ListKey::Backspace,
+            KeyCode::Char(c) => ListKey::Char(c),
             _ => return None,
         }
     };
-    Some(Msg::Picker(key))
+    Some(Msg::ListKey(key))
 }
 
 #[cfg(test)]
@@ -570,7 +570,7 @@ mod tests {
     fn switching_80x24() {
         let mut h = Harness::loaded(many_mailboxes());
         h.keys("mreports");
-        h.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        h.press(KeyCode::Enter);
 
         let screen = render(&h, 80, 24);
         assert!(screen.contains("Loading Work/Reports"), "{screen}");
@@ -581,7 +581,7 @@ mod tests {
     fn a_mailbox_switched_to_shows_its_path_80x24() {
         let mut h = Harness::loaded(many_mailboxes());
         h.keys("mreports");
-        let effects = h.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let effects = h.press(KeyCode::Enter);
         h.resolve(effects);
 
         insta::assert_snapshot!(render(&h, 80, 24));
@@ -610,7 +610,7 @@ mod tests {
         ));
         assert!(matches!(
             press(KeyCode::Char('m'), KeyModifiers::NONE),
-            Some(Msg::MailboxList)
+            Some(Msg::OpenMailboxList)
         ));
         assert!(matches!(
             press(KeyCode::Char('q'), KeyModifiers::NONE),

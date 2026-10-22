@@ -43,8 +43,10 @@ pub struct App {
     shown: Option<String>,
     /// The id of the mailbox a switch loads, while its query is in flight.
     switching: Option<String>,
-    /// The `m` list, while it is open.
-    picker: Option<Picker>,
+    /// The outbox when the queue query in flight was sent.
+    loading_outbox: OutboxAt,
+    /// The mailbox list, while it is open.
+    mailbox_list: Option<MailboxList>,
     total: usize,
     generation: u64,
     loading: bool,
@@ -88,15 +90,15 @@ struct InFlight {
     from: String,
 }
 
-/// The open `m` list: the text typed to filter the mailboxes, and the
+/// The open mailbox list: the text typed to filter the mailboxes, and the
 /// highlighted match.
-#[derive(Debug, Clone, Default)]
-struct Picker {
+#[derive(Debug, Clone)]
+struct MailboxList {
     typed: String,
     index: usize,
 }
 
-/// What the open `m` list shows.
+/// What the open mailbox list shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MailboxChoices {
     /// The text typed to filter the mailboxes.
@@ -108,15 +110,24 @@ pub struct MailboxChoices {
     pub index: usize,
 }
 
-/// A key at the `m` list.
+/// A key at the mailbox list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PickerKey {
+pub enum ListKey {
     Down,
     Up,
     Choose,
     Cancel,
     Char(char),
     Backspace,
+}
+
+/// The outbox at the time a queue query was sent.
+#[derive(Debug, Clone, Copy, Default)]
+struct OutboxAt {
+    /// The last outbox job number given out.
+    job: u64,
+    /// Whether an archive was in flight.
+    busy: bool,
 }
 
 /// A reconcile in flight.
@@ -158,9 +169,9 @@ pub enum Msg {
     /// `o`: open the thread under the cursor in Fastmail's web UI.
     Open,
     /// `m`: open the list of mailboxes to switch to.
-    MailboxList,
-    /// A key at the `m` list.
-    Picker(PickerKey),
+    OpenMailboxList,
+    /// A key at the mailbox list.
+    ListKey(ListKey),
     /// Opening a thread in the browser failed.
     OpenFailed { error: String },
     /// `q` or `Ctrl-c`: quit, once the outbox drains or after
@@ -243,7 +254,8 @@ impl App {
             queue: Queue::default(),
             shown: None,
             switching: None,
-            picker: None,
+            loading_outbox: OutboxAt::default(),
+            mailbox_list: None,
             total: 0,
             generation: 0,
             loading: false,
@@ -273,7 +285,7 @@ impl App {
         &self.queue
     }
 
-    /// The name of the mailbox shown, as the mailbox list last fetched has
+    /// The name of the mailbox shown, as the mailboxes last fetched have
     /// it.
     pub fn queue_name(&self) -> &str {
         self.shown_mailbox().map_or("", |m| &m.name)
@@ -302,77 +314,62 @@ impl App {
         self.mailboxes.by_id(self.shown.as_deref()?)
     }
 
-    /// The `m` list, while it is open.
-    pub fn mailbox_picker(&self) -> Option<MailboxChoices> {
-        let picker = self.picker.as_ref()?;
+    /// The mailbox list, while it is open.
+    pub fn mailbox_list(&self) -> Option<MailboxChoices> {
+        let list = self.mailbox_list.as_ref()?;
         Some(MailboxChoices {
-            typed: picker.typed.clone(),
+            typed: list.typed.clone(),
             paths: self
-                .matches(&picker.typed)
+                .mailboxes
+                .matching(&list.typed)
                 .into_iter()
-                .map(|(_, path)| path)
+                .map(|m| m.path)
                 .collect(),
-            index: picker.index,
+            index: list.index,
         })
     }
 
-    /// The id and path of each mailbox whose path holds `typed`, ignoring
-    /// case, in the order the `m` list shows them.
-    fn matches(&self, typed: &str) -> Vec<(String, String)> {
-        let typed = typed.to_lowercase();
-        self.mailboxes
-            .listed()
-            .into_iter()
-            .filter(|(_, path)| path.to_lowercase().contains(&typed))
-            .collect()
-    }
-
-    /// Opens the `m` list with every mailbox, the one shown highlighted.
-    fn open_picker(&mut self) {
+    /// Opens the mailbox list with every mailbox, the one shown highlighted.
+    fn open_mailbox_list(&mut self) {
         let index = self
             .mailboxes
-            .listed()
+            .matching("")
             .iter()
-            .position(|(id, _)| Some(id) == self.shown.as_ref())
+            .position(|m| Some(&m.id) == self.shown.as_ref())
             .unwrap_or(0);
-        self.picker = Some(Picker {
+        self.mailbox_list = Some(MailboxList {
             typed: String::new(),
             index,
         });
     }
 
-    /// Handles a key at the `m` list: a character or Backspace changes the
-    /// text the mailboxes are filtered by, highlighting the first match,
-    /// Down and Up move the highlight and stop at the ends, Enter switches
-    /// to the highlighted mailbox, and Esc closes the list.
-    fn picker_key(&mut self, key: PickerKey) -> Vec<Effect> {
-        let Some(typed) = self.picker.as_ref().map(|p| p.typed.clone()) else {
+    /// Handles a key at the mailbox list: a character or Backspace changes
+    /// the text the mailboxes are filtered by, highlighting the first
+    /// match, Down and Up move the highlight and stop at the ends, Enter
+    /// switches to the highlighted mailbox, and Esc closes the list.
+    fn mailbox_list_key(&mut self, key: ListKey) -> Vec<Effect> {
+        let Some(list) = &mut self.mailbox_list else {
             return Vec::new();
         };
-        let matches = self.matches(&typed);
-        let Some(picker) = &mut self.picker else {
-            return Vec::new();
-        };
+        let matches = self.mailboxes.matching(&list.typed);
         match key {
-            PickerKey::Char(c) => {
-                picker.typed.push(c);
-                picker.index = 0;
+            ListKey::Char(c) => {
+                list.typed.push(c);
+                list.index = 0;
             }
-            PickerKey::Backspace => {
-                picker.typed.pop();
-                picker.index = 0;
+            ListKey::Backspace => {
+                list.typed.pop();
+                list.index = 0;
             }
-            PickerKey::Down => {
-                picker.index = (picker.index + 1).min(matches.len().saturating_sub(1));
-            }
-            PickerKey::Up => picker.index = picker.index.saturating_sub(1),
-            PickerKey::Cancel => self.picker = None,
-            PickerKey::Choose => {
-                let Some((id, _)) = matches.into_iter().nth(picker.index) else {
+            ListKey::Down => list.index = (list.index + 1).min(matches.len().saturating_sub(1)),
+            ListKey::Up => list.index = list.index.saturating_sub(1),
+            ListKey::Cancel => self.mailbox_list = None,
+            ListKey::Choose => {
+                let Some(chosen) = matches.into_iter().nth(list.index) else {
                     return Vec::new();
                 };
-                self.picker = None;
-                return self.switch(id);
+                self.mailbox_list = None;
+                return self.switch(chosen.id);
             }
         }
         Vec::new()
@@ -407,6 +404,10 @@ impl App {
     fn load(&mut self, id: String) -> Vec<Effect> {
         self.generation += 1;
         self.loading = true;
+        self.loading_outbox = OutboxAt {
+            job: self.job,
+            busy: !self.in_flight.is_empty(),
+        };
         self.retrying = None;
         vec![Effect::Query {
             generation: self.generation,
@@ -519,7 +520,10 @@ impl App {
     /// A switch that succeeds shows its mailbox with the cursor on the
     /// first row; one that fails leaves the queue on the mailbox it showed.
     /// Threads in the outbox, archived from the mailbox loaded, are left
-    /// out.
+    /// out. A result that may predate an archive, one sent while an
+    /// archive was in flight or before one was sent, is shown and a
+    /// reconcile runs once the outbox drains, so that it never keeps a
+    /// thread an archive took out.
     fn loaded(&mut self, generation: u64, result: Result<QueryResult, Error>) -> Vec<Effect> {
         if let Err(error) = &result
             && let Some(fatal) = error.fatal()
@@ -545,6 +549,9 @@ impl App {
                 threads.retain(|t| !self.in_outbox(t));
                 self.total = self.total.saturating_sub(before - threads.len());
                 self.queue.replace(threads);
+                if self.loading_outbox.busy || self.loading_outbox.job != self.job {
+                    self.pending_reconcile = true;
+                }
             }
             Err(error) => {
                 self.status = match error.class() {
@@ -558,7 +565,7 @@ impl App {
     }
 
     /// Re-runs the shown mailbox's query with `Mailbox/get`, to bring the
-    /// queue and the mailbox list back in line with Fastmail. While a query
+    /// queue and the mailboxes back in line with Fastmail. While a query
     /// or an archive is in flight it waits, and runs once both are done, or
     /// while disconnected as the next probe. None runs while `q` waits for
     /// the outbox.
@@ -790,15 +797,12 @@ impl App {
         self.reconcile()
     }
 
-    /// Keeps the `m` list's highlight on a match after the mailbox list
-    /// changes.
-    fn clamp_picker(&mut self) {
-        let Some(typed) = self.picker.as_ref().map(|p| p.typed.clone()) else {
-            return;
-        };
-        let last = self.matches(&typed).len().saturating_sub(1);
-        if let Some(picker) = &mut self.picker {
-            picker.index = picker.index.min(last);
+    /// Keeps the mailbox list's highlight on a match after the mailboxes
+    /// change.
+    fn clamp_mailbox_list(&mut self) {
+        if let Some(list) = &mut self.mailbox_list {
+            let last = self.mailboxes.matching(&list.typed).len().saturating_sub(1);
+            list.index = list.index.min(last);
         }
     }
 
@@ -812,7 +816,7 @@ impl App {
         self.start()
     }
 
-    /// Handles a reconcile's result: replaces the mailbox list and the
+    /// Handles a reconcile's result: replaces the mailboxes and the
     /// queue's rows with Fastmail's, keeping the cursor on its thread, and
     /// clears the launch query's failure from the bottom line, or says
     /// `Reconnected` when the success reconnects. When the mailbox shown is
@@ -840,7 +844,7 @@ impl App {
             Ok(_) if reconciling.job != self.job => self.pending_reconcile = true,
             Ok(reconciled) => {
                 self.mailboxes = Mailboxes::from(reconciled.mailboxes);
-                self.clamp_picker();
+                self.clamp_mailbox_list();
                 if self.shown_mailbox().is_none() {
                     return self.shown_deleted();
                 }
@@ -896,11 +900,11 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::Archive => app.archive(),
         Msg::Sent { job, result } => app.sent(job, result),
         Msg::Open => app.open(),
-        Msg::MailboxList => {
-            app.open_picker();
+        Msg::OpenMailboxList => {
+            app.open_mailbox_list();
             Vec::new()
         }
-        Msg::Picker(key) => app.picker_key(key),
+        Msg::ListKey(key) => app.mailbox_list_key(key),
         Msg::OpenFailed { error } => {
             app.status = format!("Could not open the browser: {error}");
             Vec::new()
