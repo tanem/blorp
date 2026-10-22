@@ -150,8 +150,8 @@ fn session_url(server: &MockServer) -> String {
 }
 
 const INTRO: &str = "blorp needs a Fastmail API token. Create one in Fastmail under \
-Settings, Privacy & Security, Connected apps & API tokens, with the Email scope \
-only: not read-only, and not Email submission.\n";
+Settings, Privacy & Security, Connected apps & API tokens, with read-only access \
+and the Email scope only.\n";
 
 #[tokio::test]
 async fn setup_checks_the_token_then_stores_it_and_names_the_account() {

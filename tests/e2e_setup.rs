@@ -12,8 +12,8 @@ use e2e::server::LocalJmap;
 use e2e::{REJECTED, Sandbox, TOKEN};
 
 const INTRO: &str = "blorp needs a Fastmail API token. Create one in Fastmail under \
-Settings, Privacy & Security, Connected apps & API tokens, with the Email scope \
-only: not read-only, and not Email submission.";
+Settings, Privacy & Security, Connected apps & API tokens, with read-only access \
+and the Email scope only.";
 
 fn stored() -> String {
     format!("Stored the API token for kim@example.invalid in {KEYRING}.")
