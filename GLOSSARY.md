@@ -17,7 +17,7 @@ A change blorp makes to the account's mail on a key, such as archiving a thread.
 _Avoid_: Command, operation, mutation
 
 **Outbox**:
-The actions sent to Fastmail and not yet answered, sent one at a time in the order typed.
+The actions typed and not yet answered by Fastmail, sent one at a time in the order typed.
 _Avoid_: Job queue, send queue
 
 **Setup**:

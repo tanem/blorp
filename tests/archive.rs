@@ -287,6 +287,38 @@ fn a_transient_failure_puts_back_every_archive_in_the_outbox_and_disconnects() {
         "Disconnected from Fastmail; could not archive 2 threads"
     );
     assert_eq!(h.app.total(), 3);
+
+    h.app.now = h.app.next_reconcile_at();
+    assert_eq!(
+        h.send(Msg::ReconcileTick),
+        [Effect::Reconcile {
+            generation: 2,
+            query: inbox_query(),
+            retry: false,
+        }],
+        "the probe is the reconcile"
+    );
+}
+
+#[test]
+fn a_probe_held_back_by_an_archive_in_flight_is_tried_again_after_the_probe_wait() {
+    let mut h = Harness::loaded(store());
+    h.app.now = h.app.next_reconcile_at();
+    assert_eq!(h.send(Msg::ReconcileTick), [reconcile(2)]);
+    h.keys("e");
+    h.send(Msg::Reconciled {
+        generation: 2,
+        result: Err(Error::Transport("connection refused".into())),
+    });
+    assert!(!h.app.connected());
+
+    h.app.now = h.app.next_reconcile_at();
+    assert_eq!(h.send(Msg::ReconcileTick), []);
+
+    assert_eq!(
+        h.app.next_reconcile_at(),
+        h.app.now + jiff::SignedDuration::from_secs(10)
+    );
 }
 
 #[test]

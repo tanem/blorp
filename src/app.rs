@@ -2,12 +2,11 @@
 //! through (ADR 0001).
 
 use jiff::{SignedDuration, Timestamp};
-use serde_json::json;
+use serde_json::{Value, json};
 
-use serde_json::Value;
-
-use crate::jmap::SetResult;
-use crate::jmap::{Class, EmailQuery, EmailUpdate, Error, Fatal, QueryResult, Reconciled};
+use crate::jmap::{
+    Class, EmailQuery, EmailUpdate, Error, Fatal, QueryResult, Reconciled, SetResult,
+};
 use crate::mail::{self, Mailboxes, Thread};
 use crate::queue::Queue;
 
@@ -54,7 +53,7 @@ pub struct App {
     read_only: bool,
     /// The last outbox job number given out.
     job: u64,
-    /// The archives sent and not yet answered, oldest first.
+    /// The archives typed and not yet answered, oldest first: the outbox.
     in_flight: Vec<InFlight>,
     /// When the next reconcile tick is due.
     next_reconcile_at: Timestamp,
@@ -431,8 +430,10 @@ impl App {
             self.status = "Disconnected, action not sent".into();
             return Vec::new();
         }
-        let (Some(inbox), Some(archive)) = (self.mailboxes.inbox(), self.mailboxes.archive())
-        else {
+        let Some(inbox) = self.mailboxes.inbox() else {
+            return Vec::new();
+        };
+        let Some(archive) = self.mailboxes.archive() else {
             self.status = "No Archive mailbox".into();
             return Vec::new();
         };
@@ -477,6 +478,9 @@ impl App {
     /// back, the bottom line says why, and a reconcile runs once the outbox
     /// drains.
     fn sent(&mut self, job: u64, result: Result<SetResult, Error>) -> Vec<Effect> {
+        let Some(position) = self.in_flight.iter().position(|f| f.job == job) else {
+            return Vec::new();
+        };
         self.record_reply(&result);
         let failure = match result {
             Ok(set) if set.not_updated.is_empty() => None,
@@ -489,9 +493,6 @@ impl App {
                 Class::Transient => return self.lost(),
                 Class::Bug => Some(error.to_string()),
             },
-        };
-        let Some(position) = self.in_flight.iter().position(|f| f.job == job) else {
-            return Vec::new();
         };
         let InFlight { thread, .. } = self.in_flight.remove(position);
         if let Some(reason) = failure {
@@ -642,6 +643,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
     effects
 }
 
+/// Applies `msg` to `app`, without the quit that ends `q`'s wait.
 fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
     match msg {
         Msg::Start => {
@@ -676,7 +678,14 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::StreamRefused(fatal) => vec![Effect::Fatal(fatal)],
         Msg::ReconcileTick => {
             app.next_reconcile_at = app.now + RECONCILE_INTERVAL;
-            app.reconcile()
+            let effects = app.reconcile();
+            // While disconnected, a probe held back only by an archive in
+            // flight is tried again after the probe wait, not a minute
+            // later.
+            if !app.connected && !app.querying() && !app.in_flight.is_empty() {
+                app.next_reconcile_at = app.now + app.probe_wait;
+            }
+            effects
         }
         Msg::Retrying { generation, retry } => {
             if app.awaits(generation) {
