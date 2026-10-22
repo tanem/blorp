@@ -45,6 +45,11 @@ pub const BINDINGS: &[Binding] = &[
         msg: || Msg::Up,
     },
     Binding {
+        keys: &[Key::Char('o')],
+        help: "Open in Fastmail",
+        msg: || Msg::Open,
+    },
+    Binding {
         keys: &[Key::Char('q')],
         help: "Quit",
         msg: || Msg::Quit,

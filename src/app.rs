@@ -5,7 +5,7 @@ use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 
 use crate::jmap::{Class, EmailQuery, Error, Fatal, QueryResult, Reconciled};
-use crate::mail::{Mailboxes, Thread};
+use crate::mail::{self, Mailboxes, Thread};
 use crate::queue::Queue;
 
 /// The most threads the queue holds: the newest this many of the Inbox's
@@ -65,6 +65,10 @@ pub enum Msg {
     Down,
     /// `k`: move the cursor up a row.
     Up,
+    /// `o`: open the thread under the cursor in Fastmail's web UI.
+    Open,
+    /// Opening a thread in the browser failed.
+    OpenFailed { error: String },
     /// `q` or `Ctrl-c`: quit.
     Quit,
     /// The spinner's tick while a request is in flight.
@@ -108,6 +112,11 @@ pub enum Effect {
         generation: u64,
         query: EmailQuery,
         retry: bool,
+    },
+    /// Open `url` in the browser. On failure, report back with
+    /// [`Msg::OpenFailed`].
+    Open {
+        url: String,
     },
     Quit,
     /// Restore the terminal, print the fixed message, and exit 1.
@@ -301,6 +310,17 @@ impl App {
         }]
     }
 
+    /// Opens the thread under the cursor in the browser. Nothing is sent to
+    /// Fastmail, so this works while disconnected.
+    fn open(&self) -> Vec<Effect> {
+        let Some(thread) = self.queue.current() else {
+            return Vec::new();
+        };
+        vec![Effect::Open {
+            url: mail::web_url(self.queue_name(), thread),
+        }]
+    }
+
     /// Whether a queue query or a reconcile is in flight.
     fn busy(&self) -> bool {
         self.loading || self.reconciling.is_some()
@@ -358,6 +378,11 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         }
         Msg::Up => {
             app.queue.up();
+            Vec::new()
+        }
+        Msg::Open => app.open(),
+        Msg::OpenFailed { error } => {
+            app.status = format!("Could not open the browser: {error}");
             Vec::new()
         }
         Msg::Quit => vec![Effect::Quit],
