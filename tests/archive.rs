@@ -5,6 +5,7 @@ use blorp::app::{Effect, Msg};
 use blorp::harness::Harness;
 use blorp::jmap::fake::{EmailSpec, Store};
 use blorp::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, SetResult};
+use crossterm::event::KeyCode;
 use serde_json::{Value, json};
 
 /// Thread t1 spreads over the Inbox, Travel, Sent, and Trash, with one
@@ -473,4 +474,214 @@ fn a_transient_failure_while_q_waits_leaves_every_archive_unconfirmed() {
         effects,
         [Effect::DropJobs { through: 2 }, Effect::QuitUnconfirmed(2)]
     );
+}
+
+/// One thread in each of Travel, Trash, Junk, Archive, Sent, and Drafts.
+/// In Travel, t1 has an email in the Inbox and one also in Sent; in Trash,
+/// t2 has an email also in Junk.
+fn mailboxes() -> Store {
+    Store::builder()
+        .role_mailbox("mb-inbox", "Inbox", "inbox")
+        .role_mailbox("mb-archive", "Archive", "archive")
+        .role_mailbox("mb-sent", "Sent", "sent")
+        .role_mailbox("mb-drafts", "Drafts", "drafts")
+        .role_mailbox("mb-trash", "Trash", "trash")
+        .role_mailbox("mb-junk", "Junk", "junk")
+        .mailbox("mb-travel", "Travel")
+        .email(EmailSpec::new("e1a", "t1", "2026-10-18T08:00:00Z").in_mailbox("mb-travel"))
+        .email(EmailSpec::new("e1b", "t1", "2026-10-18T08:10:00Z").in_mailbox("mb-inbox"))
+        .email(
+            EmailSpec::new("e1c", "t1", "2026-10-18T08:20:00Z")
+                .in_mailbox("mb-travel")
+                .in_mailbox("mb-sent"),
+        )
+        .email(EmailSpec::new("e2a", "t2", "2026-10-18T07:00:00Z").in_mailbox("mb-trash"))
+        .email(
+            EmailSpec::new("e2b", "t2", "2026-10-18T07:10:00Z")
+                .in_mailbox("mb-trash")
+                .in_mailbox("mb-junk"),
+        )
+        .email(EmailSpec::new("e3", "t3", "2026-10-18T06:00:00Z").in_mailbox("mb-junk"))
+        .email(EmailSpec::new("e4", "t4", "2026-10-18T05:00:00Z").in_mailbox("mb-archive"))
+        .email(EmailSpec::new("e5", "t5", "2026-10-18T04:00:00Z").in_mailbox("mb-sent"))
+        .email(EmailSpec::new("e6", "t6", "2026-10-18T03:00:00Z").in_mailbox("mb-drafts"))
+        .build()
+}
+
+/// Switches to the only mailbox whose path holds `typed`.
+fn switch(h: &mut Harness, typed: &str) {
+    h.keys("m");
+    h.keys(typed);
+    let effects = h.press(KeyCode::Enter);
+    assert_eq!(h.resolve(effects), []);
+}
+
+/// The update that archives `ids` from mailbox `from`.
+fn archive_from(from: &str, ids: &[&str]) -> EmailUpdate {
+    let patch: EmailPatch = [
+        (format!("mailboxIds/{from}"), Value::Null),
+        ("mailboxIds/mb-archive".to_string(), Value::Bool(true)),
+    ]
+    .into();
+    ids.iter()
+        .map(|id| (id.to_string(), patch.clone()))
+        .collect()
+}
+
+#[test]
+fn e_in_another_mailbox_moves_the_threads_emails_there_to_archive() {
+    let mut h = Harness::loaded(mailboxes());
+    switch(&mut h, "travel");
+
+    assert_eq!(
+        h.keys("e"),
+        [Effect::SetEmails {
+            job: 1,
+            update: archive_from("mb-travel", &["e1a"]),
+        }]
+    );
+    assert_eq!(h.app.queue().threads().len(), 0);
+    assert_eq!(h.status(), "Archived");
+}
+
+#[test]
+fn e_in_trash_moves_the_emails_there_to_archive() {
+    let mut h = Harness::loaded(mailboxes());
+    switch(&mut h, "trash");
+
+    assert_eq!(
+        h.keys("e"),
+        [Effect::SetEmails {
+            job: 1,
+            update: archive_from("mb-trash", &["e2a"]),
+        }]
+    );
+}
+
+#[test]
+fn e_in_junk_moves_the_emails_there_to_archive() {
+    let mut h = Harness::loaded(mailboxes());
+    switch(&mut h, "junk");
+    // t2's email in Junk is also in Trash, which keeps it.
+    assert_eq!(h.keys("e"), []);
+    assert_eq!(h.status(), "Nothing to archive");
+
+    assert_eq!(
+        h.keys("je"),
+        [Effect::SetEmails {
+            job: 1,
+            update: archive_from("mb-junk", &["e3"]),
+        }]
+    );
+}
+
+#[test]
+fn e_in_archive_does_nothing_and_says_so() {
+    let mut h = Harness::loaded(mailboxes());
+    switch(&mut h, "archive");
+
+    assert_eq!(h.keys("e"), []);
+    assert_eq!(h.app.queue().threads().len(), 1);
+    assert_eq!(h.status(), "Already in Archive");
+}
+
+#[test]
+fn e_in_sent_or_drafts_does_nothing_and_says_so() {
+    for (typed, status) in [
+        ("sent", "Cannot archive from Sent"),
+        ("drafts", "Cannot archive from Drafts"),
+    ] {
+        let mut h = Harness::loaded(mailboxes());
+        switch(&mut h, typed);
+
+        assert_eq!(h.keys("e"), [], "{typed}");
+        assert_eq!(h.status(), status);
+    }
+}
+
+#[test]
+fn a_failed_archive_from_a_mailbox_no_longer_shown_puts_no_row_back() {
+    let mut h = Harness::loaded(mailboxes());
+    let job = h.keys("e");
+    switch(&mut h, "travel");
+
+    h.send(Msg::Sent {
+        job: 1,
+        result: Ok(SetResult {
+            not_updated: vec!["e1b".into()],
+        }),
+    });
+
+    assert!(matches!(job[..], [Effect::SetEmails { .. }]));
+    let ids: Vec<&str> = h
+        .app
+        .queue()
+        .threads()
+        .iter()
+        .map(|t| t.id.as_str())
+        .collect();
+    assert_eq!(ids, ["t1"]);
+    assert_eq!(h.app.total(), 1);
+    assert_eq!(h.status(), "Could not archive: 1 email not updated");
+}
+
+#[test]
+fn a_switch_that_lands_while_an_archive_from_its_mailbox_is_in_flight_leaves_the_row_out() {
+    let mut h = Harness::loaded(store());
+    assert_eq!(h.keys("e").len(), 1);
+    h.keys("minbox");
+    let effects = h.press(KeyCode::Enter);
+    let [
+        Effect::Query {
+            generation, query, ..
+        },
+    ] = &effects[..]
+    else {
+        panic!("{effects:?}");
+    };
+    let result = h.store_mut().query(query);
+    h.send(Msg::Loaded {
+        generation: *generation,
+        result,
+    });
+
+    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
+    assert_eq!(h.app.total(), 2);
+
+    h.send(Msg::Sent {
+        job: 1,
+        result: Err(Error::Status(400)),
+    });
+    assert_eq!(h.subjects(), ["Re: Trip", "Lunch", "Invoice"]);
+    assert_eq!(h.app.total(), 3);
+}
+
+#[test]
+fn a_switch_whose_result_predates_a_confirmed_archive_reconciles_once_it_lands() {
+    let mut h = Harness::loaded(store());
+    let archive = h.keys("e");
+    h.keys("minbox");
+    let effects = h.press(KeyCode::Enter);
+    let [
+        Effect::Query {
+            generation, query, ..
+        },
+    ] = &effects[..]
+    else {
+        panic!("{effects:?}");
+    };
+    // The query is answered before the archive reaches the store.
+    let result = h.store_mut().query(query);
+    assert_eq!(h.resolve(archive), []);
+
+    let effects = h.send(Msg::Loaded {
+        generation: *generation,
+        result,
+    });
+    assert_eq!(effects, [reconcile(3)]);
+    assert_eq!(h.subjects(), ["Re: Trip", "Lunch", "Invoice"]);
+    assert_eq!(h.resolve(effects), []);
+
+    // The email in both the Inbox and Sent now stands for t1.
+    assert_eq!(h.subjects(), ["Lunch", "Invoice", ""]);
 }

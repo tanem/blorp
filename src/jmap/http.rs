@@ -41,7 +41,7 @@ impl Default for Timeouts {
     }
 }
 
-const MAILBOX_PROPERTIES: [&str; 3] = ["id", "name", "role"];
+const MAILBOX_PROPERTIES: [&str; 4] = ["id", "name", "parentId", "role"];
 const EMAIL_PROPERTIES: [&str; 7] = [
     "id",
     "threadId",
@@ -182,7 +182,7 @@ impl HttpJmap {
 
     /// The staged fetch [`Jmap::query`] describes, with `Mailbox/get` for
     /// every mailbox ahead of the query's calls in the first request when
-    /// `mailboxes` is true. The mailbox list is empty when `mailboxes` is
+    /// `mailboxes` is true. The mailboxes are empty when `mailboxes` is
     /// false.
     async fn fetch(
         &self,

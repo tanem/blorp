@@ -154,10 +154,10 @@ async fn q_quits_after_3_s_with_the_archive_in_flight_unconfirmed() {
 fn the_unconfirmed_line_counts_the_actions() {
     assert_eq!(
         unconfirmed(1),
-        "1 action was not confirmed by Fastmail; check the Inbox."
+        "1 action was not confirmed by Fastmail; check the mailbox it came from."
     );
     assert_eq!(
         unconfirmed(2),
-        "2 actions were not confirmed by Fastmail; check the Inbox."
+        "2 actions were not confirmed by Fastmail; check the mailboxes they came from."
     );
 }

@@ -76,7 +76,7 @@ async fn get_mailboxes_sends_mailbox_get_on_the_primary_mail_account() {
             "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
             "methodCalls": [[
                 "Mailbox/get",
-                {"accountId": "u1a2b3c4", "ids": null, "properties": ["id", "name", "role"]},
+                {"accountId": "u1a2b3c4", "ids": null, "properties": ["id", "name", "parentId", "role"]},
                 "0"
             ]]
         })))
@@ -88,7 +88,7 @@ async fn get_mailboxes_sends_mailbox_get_on_the_primary_mail_account() {
                     "state": "1",
                     "list": [
                         {"id": "mb1", "name": "Inbox", "role": "inbox"},
-                        {"id": "mb2", "name": "Travel", "role": null}
+                        {"id": "mb2", "name": "Travel", "parentId": "mb1", "role": null}
                     ],
                     "notFound": []
                 },
@@ -109,11 +109,13 @@ async fn get_mailboxes_sends_mailbox_get_on_the_primary_mail_account() {
             Mailbox {
                 id: "mb1".into(),
                 name: "Inbox".into(),
+                parent_id: None,
                 role: Some("inbox".into()),
             },
             Mailbox {
                 id: "mb2".into(),
                 name: "Travel".into(),
+                parent_id: Some("mb1".into()),
                 role: None,
             },
         ]
@@ -565,7 +567,7 @@ async fn reconcile_puts_mailbox_get_in_the_query_s_first_request() {
         0,
         json!(["Mailbox/get", {
             "accountId": "u1a2b3c4", "ids": null,
-            "properties": ["id", "name", "role"]
+            "properties": ["id", "name", "parentId", "role"]
         }, "m"]),
     );
     Mock::given(method("POST"))

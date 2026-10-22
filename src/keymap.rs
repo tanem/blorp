@@ -55,6 +55,11 @@ pub const BINDINGS: &[Binding] = &[
         msg: || Msg::Open,
     },
     Binding {
+        keys: &[Key::Char('m')],
+        help: "Switch mailbox",
+        msg: || Msg::OpenMailboxList,
+    },
+    Binding {
         keys: &[Key::Char('q')],
         help: "Quit",
         msg: || Msg::Quit,

@@ -1,12 +1,20 @@
 # blorp
 
-A terminal UI for a Fastmail account's Inbox over JMAP. This file is the glossary for the project's language.
+A terminal UI for a Fastmail account's mailboxes over JMAP. This file is the glossary for the project's language.
 
 ## Language
 
 **Queue**:
-The Inbox's threads, newest first, in the order the user works through them. When the Inbox holds more threads than the queue holds, it holds the newest of them.
+The threads of the mailbox shown, newest first, in the order the user works through them. When the mailbox holds more threads than the queue holds, it holds the newest of them.
 _Avoid_: List, feed, timeline, mailbox (for the queue)
+
+**Mailbox shown**:
+The mailbox whose threads the queue holds: the Inbox at launch, and after that the one last switched to with `m`. Its path is on the statusline.
+_Avoid_: Current folder, view
+
+**Mailbox list**:
+The list `m` opens over the queue: every mailbox by path, filtered by the text typed, for switching the mailbox shown.
+_Avoid_: Picker, folder list, menu
 
 **Thread**:
 A conversation as Fastmail groups it: one row of the queue.

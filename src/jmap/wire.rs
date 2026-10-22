@@ -148,6 +148,9 @@ impl<'de> Deserialize<'de> for Invocation {
 pub struct Mailbox {
     pub id: String,
     pub name: String,
+    /// The id of the mailbox this one is inside, or none at the top level.
+    #[serde(default)]
+    pub parent_id: Option<String>,
     pub role: Option<String>,
 }
 
@@ -335,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn mailbox_reads_its_role() {
+    fn mailbox_reads_its_parent_and_role() {
         let mailboxes: Vec<Mailbox> = serde_json::from_str(
             r#"[
                 {"id": "mb1", "name": "Inbox", "parentId": null, "role": "inbox", "sortOrder": 1},
@@ -350,11 +353,13 @@ mod tests {
                 Mailbox {
                     id: "mb1".into(),
                     name: "Inbox".into(),
+                    parent_id: None,
                     role: Some("inbox".into()),
                 },
                 Mailbox {
                     id: "mb2".into(),
                     name: "Receipts".into(),
+                    parent_id: Some("mb3".into()),
                     role: None,
                 },
             ]

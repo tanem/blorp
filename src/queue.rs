@@ -2,7 +2,7 @@
 
 use crate::mail::Thread;
 
-/// The Inbox's threads, newest first, and the cursor row.
+/// The threads of the mailbox shown, newest first, and the cursor row.
 #[derive(Debug, Clone, Default)]
 pub struct Queue {
     threads: Vec<Thread>,

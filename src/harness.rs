@@ -84,13 +84,18 @@ impl Harness {
         effects
     }
 
+    /// Presses a key with no modifier, such as Enter.
+    pub fn press(&mut self, code: KeyCode) -> Vec<Effect> {
+        self.key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
     /// Presses Ctrl and `c`.
     pub fn ctrl(&mut self, c: char) -> Vec<Effect> {
         self.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Vec<Effect> {
-        match ui::key_msg(key) {
+        match ui::key_msg(&self.app, key) {
             Some(msg) => self.send(msg),
             None => Vec::new(),
         }

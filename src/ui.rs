@@ -3,13 +3,13 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use jiff::Timestamp;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Msg};
+use crate::app::{App, ListKey, MailboxChoices, Msg};
 use crate::jmap::retry::RETRIES;
 use crate::keymap;
 use crate::mail::Thread;
@@ -23,7 +23,14 @@ const AGE_WIDTH: usize = 4;
 /// sender and a space, and a space before each of the count and the age.
 const FIXED_WIDTH: usize = 3 + SENDER_WIDTH + 1 + 1 + COUNT_WIDTH + 1 + AGE_WIDTH;
 
-/// Draws the whole screen: the queue, the statusline, and the bottom line.
+/// The width of the mailbox list, borders included.
+const LIST_WIDTH: u16 = 42;
+
+/// The most mailboxes the mailbox list shows at once.
+const LIST_ROWS: usize = 10;
+
+/// Draws the whole screen: the queue, the statusline, and the bottom line,
+/// with the mailbox list over them while it is open.
 pub fn view(app: &App, frame: &mut Frame) {
     let [queue, statusline, bottom] = Layout::vertical([
         Constraint::Fill(1),
@@ -37,6 +44,58 @@ pub fn view(app: &App, frame: &mut Frame) {
         statusline,
     );
     frame.render_widget(Paragraph::new(bottom_line(app)), bottom);
+    if let Some(choices) = app.mailbox_list() {
+        mailbox_list(frame, &choices);
+    }
+}
+
+/// The mailbox list, centred over the queue: the filter line, then the
+/// mailboxes it matches, scrolled to keep the highlighted one in view and
+/// reversed.
+fn mailbox_list(frame: &mut Frame, choices: &MailboxChoices) {
+    let first = (choices.index + 1).saturating_sub(LIST_ROWS);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            " > ",
+            Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(choices.typed.clone()),
+    ])];
+    if choices.paths.is_empty() {
+        lines.push(Line::styled(
+            "   No mailbox matches",
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    let width = usize::from(LIST_WIDTH) - 2;
+    lines.extend(
+        choices
+            .paths
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(LIST_ROWS)
+            .map(|(i, path)| {
+                let line = Line::raw(fit(&format!("   {path}"), width));
+                if i == choices.index {
+                    line.style(Style::new().add_modifier(Modifier::REVERSED))
+                } else {
+                    line
+                }
+            }),
+    );
+    let height = u16::try_from(lines.len()).unwrap_or(u16::MAX) + 2;
+    let [area] = Layout::horizontal([Constraint::Length(LIST_WIDTH)])
+        .flex(Flex::Center)
+        .areas(frame.area());
+    let [area] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" Mailbox ")),
+        area,
+    );
 }
 
 fn rows(app: &App, frame: &mut Frame, area: Rect) {
@@ -99,11 +158,11 @@ fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> 
     }
 }
 
-/// The Inbox's name on the left; the `DISCONNECTED` badge while
-/// disconnected and the cursor's position on the right.
+/// The path of the mailbox shown on the left; the `DISCONNECTED` badge
+/// while disconnected and the cursor's position on the right.
 fn status_bar(app: &App, width: u16) -> Line<'static> {
     let name = Span::styled(
-        format!(" {} ", app.queue_name()),
+        format!(" {} ", app.queue_path()),
         Style::new().fg(Color::White).bg(Color::DarkGray),
     );
     let queue = app.queue();
@@ -142,7 +201,7 @@ fn bottom_line(app: &App) -> Line<'static> {
         return Line::raw(format!("{frame} Retrying Fastmail ({retry}/{RETRIES})"));
     }
     if app.loading() {
-        return Line::raw(format!("{frame} Loading {}", app.queue_name()));
+        return Line::raw(format!("{frame} Loading {}", app.loading_path()));
     }
     Line::raw(app.status().to_string())
 }
@@ -191,10 +250,14 @@ fn age(now: Timestamp, then: Timestamp) -> String {
     }
 }
 
-/// The message a key press stands for in the keymap, if any.
-pub fn key_msg(key: KeyEvent) -> Option<Msg> {
+/// The message a key press stands for: at the mailbox list, a key of the
+/// list's, and otherwise one in the keymap, if any.
+pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
     if key.kind != KeyEventKind::Press {
         return None;
+    }
+    if app.mailbox_list().is_some() {
+        return list_key(key);
     }
     let KeyCode::Char(c) = key.code else {
         return None;
@@ -205,6 +268,32 @@ pub fn key_msg(key: KeyEvent) -> Option<Msg> {
         keymap::Key::Char(c)
     };
     keymap::msg(key)
+}
+
+/// The message a key press at the mailbox list stands for: Ctrl-n, Ctrl-p,
+/// and the arrows move, Enter switches, Esc closes, and characters and
+/// Backspace edit the text the mailboxes are filtered by, with Ctrl-c
+/// still quitting.
+fn list_key(key: KeyEvent) -> Option<Msg> {
+    let key = if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => return Some(Msg::Quit),
+            KeyCode::Char('n') => ListKey::Down,
+            KeyCode::Char('p') => ListKey::Up,
+            _ => return None,
+        }
+    } else {
+        match key.code {
+            KeyCode::Down => ListKey::Down,
+            KeyCode::Up => ListKey::Up,
+            KeyCode::Enter => ListKey::Choose,
+            KeyCode::Esc => ListKey::Cancel,
+            KeyCode::Backspace => ListKey::Backspace,
+            KeyCode::Char(c) => ListKey::Char(c),
+            _ => return None,
+        }
+    };
+    Some(Msg::ListKey(key))
 }
 
 #[cfg(test)]
@@ -392,9 +481,116 @@ mod tests {
         insta::assert_snapshot!(render(&h, 80, 24));
     }
 
+    /// The Inbox and fourteen other mailboxes, two of them nested, with a
+    /// thread in Work/Receipts.
+    fn many_mailboxes() -> Store {
+        let mut store = Store::builder()
+            .role_mailbox("mb-inbox", "Inbox", "inbox")
+            .role_mailbox("mb-archive", "Archive", "archive")
+            .role_mailbox("mb-sent", "Sent", "sent")
+            .role_mailbox("mb-drafts", "Drafts", "drafts")
+            .role_mailbox("mb-trash", "Trash", "trash")
+            .role_mailbox("mb-junk", "Junk", "junk");
+        for name in [
+            "Family",
+            "Clubs",
+            "Newsletters",
+            "Receipts",
+            "Travel",
+            "Work",
+        ] {
+            store = store.mailbox(&format!("mb-{name}"), name);
+        }
+        store
+            .child_mailbox("mb-work-reports", "Reports", "mb-Work")
+            .child_mailbox("mb-work-plans", "Plans", "mb-Work")
+            .email(
+                EmailSpec::new("e1", "t1", "2026-10-18T11:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .from("Ana Lopez", "ana@example.invalid")
+                    .subject("Lunch on Friday?"),
+            )
+            .email(
+                EmailSpec::new("e2", "t2", "2026-10-17T09:00:00Z")
+                    .in_mailbox("mb-work-reports")
+                    .seen()
+                    .from("Kim Park", "kim@example.invalid")
+                    .subject("Quarterly report"),
+            )
+            .build()
+    }
+
     #[test]
-    fn only_j_k_e_o_q_and_ctrl_c_send_a_message() {
-        let press = |code, modifiers| key_msg(KeyEvent::new(code, modifiers));
+    fn mailbox_list_80x24() {
+        let mut h = Harness::loaded(many_mailboxes());
+        h.keys("m");
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains(" Mailbox "), "{screen}");
+        assert!(!screen.contains("Work/Reports"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn mailbox_list_filtered_80x24() {
+        let mut h = Harness::loaded(many_mailboxes());
+        h.keys("mWOR");
+        h.ctrl('n');
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains(" > WOR"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn mailbox_list_scrolled_80x24() {
+        let mut h = Harness::loaded(many_mailboxes());
+        h.keys("m");
+        for _ in 0..13 {
+            h.ctrl('n');
+        }
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains("Work/Reports"), "{screen}");
+        assert!(!screen.contains("   Archive"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn mailbox_list_with_no_match_80x24() {
+        let mut h = Harness::loaded(many_mailboxes());
+        h.keys("mzz");
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains("No mailbox matches"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn switching_80x24() {
+        let mut h = Harness::loaded(many_mailboxes());
+        h.keys("mreports");
+        h.press(KeyCode::Enter);
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains("Loading Work/Reports"), "{screen}");
+        assert!(screen.contains(" Inbox "), "{screen}");
+    }
+
+    #[test]
+    fn a_mailbox_switched_to_shows_its_path_80x24() {
+        let mut h = Harness::loaded(many_mailboxes());
+        h.keys("mreports");
+        let effects = h.press(KeyCode::Enter);
+        h.resolve(effects);
+
+        insta::assert_snapshot!(render(&h, 80, 24));
+    }
+
+    #[test]
+    fn only_j_k_e_o_m_q_and_ctrl_c_send_a_message() {
+        let h = Harness::loaded(empty_inbox());
+        let press = |code, modifiers| key_msg(&h.app, KeyEvent::new(code, modifiers));
 
         assert!(matches!(
             press(KeyCode::Char('j'), KeyModifiers::NONE),
@@ -413,6 +609,10 @@ mod tests {
             Some(Msg::Open)
         ));
         assert!(matches!(
+            press(KeyCode::Char('m'), KeyModifiers::NONE),
+            Some(Msg::OpenMailboxList)
+        ));
+        assert!(matches!(
             press(KeyCode::Char('q'), KeyModifiers::NONE),
             Some(Msg::Quit)
         ));
@@ -420,7 +620,7 @@ mod tests {
             press(KeyCode::Char('c'), KeyModifiers::CONTROL),
             Some(Msg::Quit)
         ));
-        for c in "gGEd!mzfrux XV./tR:D?0123456789Jc".chars() {
+        for c in "gGEd!Mzfrux XV./tR:D?0123456789Jc".chars() {
             assert!(press(KeyCode::Char(c), KeyModifiers::NONE).is_none(), "{c}");
         }
         for code in [

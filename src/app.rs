@@ -5,13 +5,13 @@ use jiff::{SignedDuration, Timestamp};
 use serde_json::{Value, json};
 
 use crate::jmap::{
-    Class, EmailQuery, EmailUpdate, Error, Fatal, QueryResult, Reconciled, SetResult,
+    Class, EmailQuery, EmailUpdate, Error, Fatal, Mailbox, QueryResult, Reconciled, SetResult,
 };
 use crate::mail::{self, Mailboxes, Thread};
 use crate::queue::Queue;
 
-/// The most threads the queue holds: the newest this many of the Inbox's
-/// threads. The query fetches every email of each thread, so the cap
+/// The most threads the queue holds: the newest this many of the mailbox
+/// shown's threads. The query fetches every email of each thread, so the cap
 /// bounds the size and time of the queue fetch.
 pub const QUEUE_LIMIT: usize = 500;
 
@@ -38,8 +38,15 @@ pub struct App {
     pub now: Timestamp,
     mailboxes: Mailboxes,
     queue: Queue,
-    /// The Inbox's `Email/query`, once launch has found the Inbox.
-    query: Option<EmailQuery>,
+    /// The id of the mailbox shown, whose threads the queue holds, once
+    /// launch has found the Inbox.
+    shown: Option<String>,
+    /// The id of the mailbox a switch loads, while its query is in flight.
+    switching: Option<String>,
+    /// The outbox when the queue query in flight was sent.
+    loading_outbox: OutboxAt,
+    /// The mailbox list, while it is open.
+    mailbox_list: Option<MailboxList>,
     total: usize,
     generation: u64,
     loading: bool,
@@ -74,12 +81,53 @@ pub struct App {
     quitting: Option<Quitting>,
 }
 
-/// An archive in the outbox, and the row it took out of the queue, to put
-/// back if it fails.
+/// An archive in the outbox, the row it took out of the queue, to put
+/// back if it fails, and the id of the mailbox it was archived from.
 #[derive(Debug)]
 struct InFlight {
     job: u64,
     thread: Thread,
+    from: String,
+}
+
+/// The open mailbox list: the text typed to filter the mailboxes, and the
+/// highlighted match.
+#[derive(Debug, Clone)]
+struct MailboxList {
+    typed: String,
+    index: usize,
+}
+
+/// What the open mailbox list shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailboxChoices {
+    /// The text typed to filter the mailboxes.
+    pub typed: String,
+    /// The path of each mailbox whose path holds the typed text, the Inbox
+    /// first and the rest in path order.
+    pub paths: Vec<String>,
+    /// The highlighted path, when any matches.
+    pub index: usize,
+}
+
+/// A key at the mailbox list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListKey {
+    Down,
+    Up,
+    Choose,
+    Cancel,
+    Char(char),
+    Backspace,
+}
+
+/// The outbox at the time a queue query was sent.
+#[derive(Debug, Clone, Copy, Default)]
+struct OutboxAt {
+    /// The last outbox job number given out.
+    job: u64,
+    /// Whether an archive was in flight.
+    busy: bool,
 }
 
 /// A reconcile in flight.
@@ -104,7 +152,8 @@ struct Quitting {
 /// Something that happened: a key, a request's result, a timer.
 #[derive(Debug)]
 pub enum Msg {
-    /// Launch: load the Inbox queue and start the reconcile tick.
+    /// Launch: show the Inbox, load its queue, and start the reconcile
+    /// tick.
     Start,
     /// `j`: move the cursor down a row.
     Down,
@@ -119,6 +168,10 @@ pub enum Msg {
     },
     /// `o`: open the thread under the cursor in Fastmail's web UI.
     Open,
+    /// `m`: open the list of mailboxes to switch to.
+    OpenMailboxList,
+    /// A key at the mailbox list.
+    ListKey(ListKey),
     /// Opening a thread in the browser failed.
     OpenFailed { error: String },
     /// `q` or `Ctrl-c`: quit, once the outbox drains or after
@@ -199,7 +252,10 @@ impl App {
             now,
             mailboxes,
             queue: Queue::default(),
-            query: None,
+            shown: None,
+            switching: None,
+            loading_outbox: OutboxAt::default(),
+            mailbox_list: None,
             total: 0,
             generation: 0,
             loading: false,
@@ -229,18 +285,144 @@ impl App {
         &self.queue
     }
 
-    /// The Inbox's name, as the mailbox list last fetched has it.
+    /// The name of the mailbox shown, as the mailboxes last fetched have
+    /// it.
     pub fn queue_name(&self) -> &str {
-        self.mailboxes.inbox().map_or("", |m| &m.name)
+        self.shown_mailbox().map_or("", |m| &m.name)
     }
 
-    /// How many threads are in the Inbox, including any beyond
+    /// The path of the mailbox shown, as in `Work/Receipts`.
+    pub fn queue_path(&self) -> String {
+        self.shown_mailbox()
+            .map_or_else(String::new, |m| self.mailboxes.path(m))
+    }
+
+    /// The path of the mailbox a switch loads while its query is in
+    /// flight, and otherwise of the mailbox shown.
+    pub fn loading_path(&self) -> String {
+        match self
+            .switching
+            .as_deref()
+            .and_then(|id| self.mailboxes.by_id(id))
+        {
+            Some(mailbox) => self.mailboxes.path(mailbox),
+            None => self.queue_path(),
+        }
+    }
+
+    fn shown_mailbox(&self) -> Option<&Mailbox> {
+        self.mailboxes.by_id(self.shown.as_deref()?)
+    }
+
+    /// The mailbox list, while it is open.
+    pub fn mailbox_list(&self) -> Option<MailboxChoices> {
+        let list = self.mailbox_list.as_ref()?;
+        Some(MailboxChoices {
+            typed: list.typed.clone(),
+            paths: self
+                .mailboxes
+                .matching(&list.typed)
+                .into_iter()
+                .map(|m| m.path)
+                .collect(),
+            index: list.index,
+        })
+    }
+
+    /// Opens the mailbox list with every mailbox, the one shown highlighted.
+    fn open_mailbox_list(&mut self) {
+        let index = self
+            .mailboxes
+            .matching("")
+            .iter()
+            .position(|m| Some(&m.id) == self.shown.as_ref())
+            .unwrap_or(0);
+        self.mailbox_list = Some(MailboxList {
+            typed: String::new(),
+            index,
+        });
+    }
+
+    /// Handles a key at the mailbox list: a character or Backspace changes
+    /// the text the mailboxes are filtered by, highlighting the first
+    /// match, Down and Up move the highlight and stop at the ends, Enter
+    /// switches to the highlighted mailbox, and Esc closes the list.
+    fn mailbox_list_key(&mut self, key: ListKey) -> Vec<Effect> {
+        let Some(list) = &mut self.mailbox_list else {
+            return Vec::new();
+        };
+        let matches = self.mailboxes.matching(&list.typed);
+        match key {
+            ListKey::Char(c) => {
+                list.typed.push(c);
+                list.index = 0;
+            }
+            ListKey::Backspace => {
+                list.typed.pop();
+                list.index = 0;
+            }
+            ListKey::Down => list.index = (list.index + 1).min(matches.len().saturating_sub(1)),
+            ListKey::Up => list.index = list.index.saturating_sub(1),
+            ListKey::Cancel => self.mailbox_list = None,
+            ListKey::Choose => {
+                let Some(chosen) = matches.into_iter().nth(list.index) else {
+                    return Vec::new();
+                };
+                self.mailbox_list = None;
+                return self.switch(chosen.id);
+            }
+        }
+        Vec::new()
+    }
+
+    /// Loads the mailbox with `id`. The queue shows the mailbox it showed
+    /// until the query lands. A reconcile in flight is dropped, since the
+    /// query brings the queue up to date.
+    fn switch(&mut self, id: String) -> Vec<Effect> {
+        self.status.clear();
+        self.query_failed = false;
+        self.reconciling = None;
+        self.switching = Some(id.clone());
+        self.load(id)
+    }
+
+    /// The query for the threads of the mailbox with `id`.
+    fn query_for(id: &str) -> EmailQuery {
+        EmailQuery {
+            filter: json!({"inMailbox": id}),
+            limit: QUEUE_LIMIT,
+        }
+    }
+
+    /// The query for the mailbox shown, once there is one.
+    fn query(&self) -> Option<EmailQuery> {
+        self.shown.as_deref().map(App::query_for)
+    }
+
+    /// Runs the query for the mailbox with `id`, retried unless it is a
+    /// probe.
+    fn load(&mut self, id: String) -> Vec<Effect> {
+        self.generation += 1;
+        self.loading = true;
+        self.loading_outbox = OutboxAt {
+            job: self.job,
+            busy: !self.in_flight.is_empty(),
+        };
+        self.retrying = None;
+        vec![Effect::Query {
+            generation: self.generation,
+            query: App::query_for(&id),
+            retry: self.connected,
+        }]
+    }
+
+    /// How many threads are in the mailbox shown, including any beyond
     /// [`QUEUE_LIMIT`].
     pub fn total(&self) -> usize {
         self.total
     }
 
-    /// True while the launch's queue query is in flight.
+    /// True while a queue query, the launch's or a switch's, is in flight.
     pub fn loading(&self) -> bool {
         self.loading
     }
@@ -282,26 +464,15 @@ impl App {
         self.quitting.as_ref().map(|q| q.at)
     }
 
-    /// Builds the Inbox's query from the mailbox list and runs it, or says
-    /// there is no Inbox.
+    /// Shows the Inbox and runs its query, or says there is no Inbox.
     fn start(&mut self) -> Vec<Effect> {
         let Some(inbox) = self.mailboxes.inbox() else {
             self.status = "No Inbox mailbox".into();
             return Vec::new();
         };
-        let query = EmailQuery {
-            filter: json!({"inMailbox": inbox.id}),
-            limit: QUEUE_LIMIT,
-        };
-        self.query = Some(query.clone());
-        self.generation += 1;
-        self.loading = true;
-        self.retrying = None;
-        vec![Effect::Query {
-            generation: self.generation,
-            query,
-            retry: self.connected,
-        }]
+        let id = inbox.id.clone();
+        self.shown = Some(id.clone());
+        self.load(id)
     }
 
     /// Records what a request's reply says about the connection. A success
@@ -344,8 +515,15 @@ impl App {
         generation == self.generation && self.querying()
     }
 
-    /// Handles the launch query's result: the queue on success, or the
+    /// Handles a queue query's result: the queue on success, or the
     /// failure on the bottom line, a transient one as being disconnected.
+    /// A switch that succeeds shows its mailbox with the cursor on the
+    /// first row; one that fails leaves the queue on the mailbox it showed.
+    /// Threads in the outbox, archived from the mailbox loaded, are left
+    /// out. A result that may predate an archive, one sent while an
+    /// archive was in flight or before one was sent, is shown and a
+    /// reconcile runs once the outbox drains, so that it never keeps a
+    /// thread an archive took out.
     fn loaded(&mut self, generation: u64, result: Result<QueryResult, Error>) -> Vec<Effect> {
         if let Err(error) = &result
             && let Some(fatal) = error.fatal()
@@ -358,29 +536,41 @@ impl App {
         self.record_reply(&result);
         self.loading = false;
         self.retrying = None;
+        let switched = self.switching.take();
         match result {
             Ok(result) => {
+                if switched.is_some() {
+                    self.shown = switched;
+                    self.queue = Queue::default();
+                }
                 self.total = result.total;
-                self.queue.replace(Thread::from_query(result));
+                let mut threads = Thread::from_query(result);
+                let before = threads.len();
+                threads.retain(|t| !self.in_outbox(t));
+                self.total = self.total.saturating_sub(before - threads.len());
+                self.queue.replace(threads);
+                if self.loading_outbox.busy || self.loading_outbox.job != self.job {
+                    self.pending_reconcile = true;
+                }
             }
             Err(error) => {
                 self.status = match error.class() {
                     Class::Transient => DISCONNECTED.into(),
                     _ => error.to_string(),
                 };
-                self.query_failed = true;
+                self.query_failed = switched.is_none();
             }
         }
         self.run_pending_reconcile()
     }
 
-    /// Re-runs the Inbox's query with `Mailbox/get`, to bring the queue and
-    /// the mailbox list back in line with Fastmail. While a query or an
-    /// archive is in flight it waits, and runs once both are done, or while
-    /// disconnected as the next probe. None runs while `q` waits for the
-    /// outbox.
+    /// Re-runs the shown mailbox's query with `Mailbox/get`, to bring the
+    /// queue and the mailboxes back in line with Fastmail. While a query
+    /// or an archive is in flight it waits, and runs once both are done, or
+    /// while disconnected as the next probe. None runs while `q` waits for
+    /// the outbox.
     fn reconcile(&mut self) -> Vec<Effect> {
-        let Some(query) = self.query.clone() else {
+        let Some(query) = self.query() else {
             return Vec::new();
         };
         if self.quitting.is_some() {
@@ -415,13 +605,28 @@ impl App {
         }]
     }
 
-    /// Archives the thread under the cursor: its emails in the Inbox that
-    /// a move takes out go to Archive, and the row leaves at once.
-    /// Refused while disconnected and for a read-only account.
+    /// Archives the thread under the cursor: its emails in the mailbox
+    /// shown that a move takes out go to Archive, and the row leaves at
+    /// once. Refused in Archive, Drafts, and Sent, while disconnected, and
+    /// for a read-only account.
     fn archive(&mut self) -> Vec<Effect> {
         let Some(thread) = self.queue.current() else {
             return Vec::new();
         };
+        let Some(from) = self.shown_mailbox() else {
+            return Vec::new();
+        };
+        match from.role.as_deref() {
+            Some("archive") => {
+                self.status = format!("Already in {}", self.mailboxes.path(from));
+                return Vec::new();
+            }
+            Some("drafts" | "sent") => {
+                self.status = format!("Cannot archive from {}", self.mailboxes.path(from));
+                return Vec::new();
+            }
+            _ => {}
+        }
         if self.read_only {
             self.status = "The API token is read-only".into();
             return Vec::new();
@@ -430,27 +635,25 @@ impl App {
             self.status = "Disconnected, action not sent".into();
             return Vec::new();
         }
-        let Some(inbox) = self.mailboxes.inbox() else {
-            return Vec::new();
-        };
         let Some(archive) = self.mailboxes.archive() else {
             self.status = "No Archive mailbox".into();
             return Vec::new();
         };
         let patch = [
-            (format!("mailboxIds/{}", inbox.id), Value::Null),
+            (format!("mailboxIds/{}", from.id), Value::Null),
             (format!("mailboxIds/{}", archive.id), Value::Bool(true)),
         ];
         let update: EmailUpdate = thread
             .emails
             .iter()
-            .filter(|email| self.mailboxes.moves(email, &inbox.id))
+            .filter(|email| self.mailboxes.moves(email, &from.id))
             .map(|email| (email.id.clone(), patch.clone().into()))
             .collect();
         if update.is_empty() {
             self.status = "Nothing to archive".into();
             return Vec::new();
         }
+        let from = from.id.clone();
         let thread = self
             .queue
             .remove_current()
@@ -460,6 +663,7 @@ impl App {
         self.in_flight.push(InFlight {
             job: self.job,
             thread,
+            from,
         });
         self.status = "Archived".into();
         vec![Effect::SetEmails {
@@ -468,10 +672,20 @@ impl App {
         }]
     }
 
-    /// Puts back the row an archive took out of the queue.
-    fn put_back(&mut self, thread: Thread) {
-        self.queue.insert(thread);
-        self.total += 1;
+    /// Whether `thread` is in the outbox, archived from the mailbox shown.
+    fn in_outbox(&self, thread: &Thread) -> bool {
+        self.in_flight
+            .iter()
+            .any(|f| f.thread.id == thread.id && Some(&f.from) == self.shown.as_ref())
+    }
+
+    /// Puts back the row an archive took out of the queue, when the queue
+    /// still shows the mailbox it was archived from.
+    fn put_back(&mut self, InFlight { thread, from, .. }: InFlight) {
+        if Some(&from) == self.shown.as_ref() {
+            self.queue.insert(thread);
+            self.total += 1;
+        }
     }
 
     /// Handles an archive's `Email/set` result. On failure the row goes
@@ -494,9 +708,9 @@ impl App {
                 Class::Bug => Some(error.to_string()),
             },
         };
-        let InFlight { thread, .. } = self.in_flight.remove(position);
+        let archived = self.in_flight.remove(position);
         if let Some(reason) = failure {
-            self.put_back(thread);
+            self.put_back(archived);
             self.status = format!("Could not archive: {reason}");
             self.pending_reconcile = true;
             if let Some(quitting) = &mut self.quitting {
@@ -512,8 +726,8 @@ impl App {
     /// reconcile is sent; the next probe is one.
     fn lost(&mut self) -> Vec<Effect> {
         let n = self.in_flight.len();
-        while let Some(InFlight { thread, .. }) = self.in_flight.pop() {
-            self.put_back(thread);
+        while let Some(archived) = self.in_flight.pop() {
+            self.put_back(archived);
         }
         if let Some(quitting) = &mut self.quitting {
             quitting.failed += n;
@@ -583,13 +797,34 @@ impl App {
         self.reconcile()
     }
 
-    /// Handles a reconcile's result: replaces the mailbox list and the
+    /// Keeps the mailbox list's highlight on a match after the mailboxes
+    /// change.
+    fn clamp_mailbox_list(&mut self) {
+        if let Some(list) = &mut self.mailbox_list {
+            let last = self.mailboxes.matching(&list.typed).len().saturating_sub(1);
+            list.index = list.index.min(last);
+        }
+    }
+
+    /// Goes back to the Inbox after a reconcile finds the mailbox shown was
+    /// deleted, saying so, and loads it.
+    fn shown_deleted(&mut self) -> Vec<Effect> {
+        self.queue = Queue::default();
+        self.total = 0;
+        self.status = "Mailbox no longer exists".into();
+        self.shown = None;
+        self.start()
+    }
+
+    /// Handles a reconcile's result: replaces the mailboxes and the
     /// queue's rows with Fastmail's, keeping the cursor on its thread, and
     /// clears the launch query's failure from the bottom line, or says
-    /// `Reconnected` when the success reconnects. A result from before an
-    /// archive was sent is discarded, so that it never brings back a thread
-    /// the archive took out, and the reconcile runs again once the outbox
-    /// drains. A failure shows only as a change of the connection state.
+    /// `Reconnected` when the success reconnects. When the mailbox shown is
+    /// gone from the list, the queue goes back to the Inbox. A result from
+    /// before an archive was sent is discarded, so that it never brings
+    /// back a thread the archive took out, and the reconcile runs again
+    /// once the outbox drains. A failure shows only as a change of the
+    /// connection state.
     fn reconciled(&mut self, generation: u64, result: Result<Reconciled, Error>) -> Vec<Effect> {
         if let Err(error) = &result
             && let Some(fatal) = error.fatal()
@@ -609,6 +844,10 @@ impl App {
             Ok(_) if reconciling.job != self.job => self.pending_reconcile = true,
             Ok(reconciled) => {
                 self.mailboxes = Mailboxes::from(reconciled.mailboxes);
+                self.clamp_mailbox_list();
+                if self.shown_mailbox().is_none() {
+                    return self.shown_deleted();
+                }
                 self.total = reconciled.result.total;
                 self.queue.replace(Thread::from_query(reconciled.result));
             }
@@ -661,6 +900,11 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::Archive => app.archive(),
         Msg::Sent { job, result } => app.sent(job, result),
         Msg::Open => app.open(),
+        Msg::OpenMailboxList => {
+            app.open_mailbox_list();
+            Vec::new()
+        }
+        Msg::ListKey(key) => app.mailbox_list_key(key),
         Msg::OpenFailed { error } => {
             app.status = format!("Could not open the browser: {error}");
             Vec::new()

@@ -1,4 +1,4 @@
-//! A local JMAP server holding a made-up Inbox, for recording the demo GIF
+//! A local JMAP server holding a made-up account, for recording the demo GIF
 //! with `vhs demo/blorp.tape`. Serves on 127.0.0.1:4848 until it is
 //! stopped, to requests bearing the token `demo-token`.
 
@@ -29,12 +29,40 @@ fn email(id: &str, thread: &str, minutes: i64, name: &str, address: &str) -> Ema
         .from(name, address)
 }
 
-fn inbox() -> Store {
+/// A read email in Archive from `name` at `address`.
+fn archived(id: &str, thread: &str, minutes: i64, name: &str, address: &str) -> EmailSpec {
+    EmailSpec::new(id, thread, &ago(minutes))
+        .in_mailbox("mb-archive")
+        .from(name, address)
+        .seen()
+}
+
+fn account() -> Store {
     const HOUR: i64 = 60;
     const DAY: i64 = 24 * HOUR;
     Store::builder()
         .role_mailbox("mb-inbox", "Inbox", "inbox")
         .role_mailbox("mb-archive", "Archive", "archive")
+        .role_mailbox("mb-drafts", "Drafts", "drafts")
+        .role_mailbox("mb-sent", "Sent", "sent")
+        .role_mailbox("mb-trash", "Trash", "trash")
+        .mailbox("mb-travel", "Travel")
+        .mailbox("mb-work", "Work")
+        .child_mailbox("mb-reports", "Reports", "mb-work")
+        .email(
+            archived(
+                "e10",
+                "t10",
+                4 * DAY,
+                "Air NZ",
+                "bookings@air.example.invalid",
+            )
+            .subject("Your flight to Wellington"),
+        )
+        .email(
+            archived("e11", "t11", 9 * DAY, "Sam Ito", "sam@example.invalid")
+                .subject("Agenda for the planning meeting"),
+        )
         .email(email("e1", "t1", 3, "Ana Lopez", "ana@example.invalid").subject("Lunch on Friday?"))
         .email(
             email("e2", "t2", 40, "Build bot", "ci@example.invalid")
@@ -109,7 +137,7 @@ fn inbox() -> Store {
 #[tokio::main]
 async fn main() {
     let listener = TcpListener::bind(ADDRESS).unwrap_or_else(|e| panic!("bind {ADDRESS}: {e}"));
-    let server = LocalJmap::start_on(listener, inbox(), TOKEN).await;
+    let server = LocalJmap::start_on(listener, account(), TOKEN).await;
     println!("{}", server.session_url());
     std::future::pending::<()>().await;
 }

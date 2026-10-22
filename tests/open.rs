@@ -5,6 +5,7 @@ use blorp::app::{Effect, Msg};
 use blorp::harness::Harness;
 use blorp::jmap::Error;
 use blorp::jmap::fake::{EmailSpec, Store, StoreBuilder};
+use crossterm::event::KeyCode;
 
 /// `n` single-email Inbox threads, newest first: t1 holding e1 to tn
 /// holding en.
@@ -92,4 +93,28 @@ fn a_failure_to_open_shows_on_the_bottom_line() {
         []
     );
     assert_eq!(h.status(), "Could not open the browser: no browser found");
+}
+
+#[test]
+fn o_uses_the_name_of_the_mailbox_shown() {
+    let mut h = Harness::loaded(
+        inbox(1)
+            .mailbox("mb-work", "Work")
+            .child_mailbox("mb-receipts", "Receipts", "mb-work")
+            .email(
+                EmailSpec::new("e-order", "t-order", "2026-10-17T09:00:00Z")
+                    .in_mailbox("mb-receipts"),
+            )
+            .build(),
+    );
+    h.keys("mreceipts");
+    let effects = h.press(KeyCode::Enter);
+    assert_eq!(h.resolve(effects), []);
+
+    assert_eq!(
+        h.keys("o"),
+        [Effect::Open {
+            url: "https://app.fastmail.com/mail/Receipts/t-order.e-order".into(),
+        }]
+    );
 }

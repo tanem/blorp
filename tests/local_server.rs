@@ -85,11 +85,13 @@ async fn mailbox_get_returns_the_stores_mailboxes() {
             Mailbox {
                 id: "mb-inbox".into(),
                 name: "Inbox".into(),
+                parent_id: None,
                 role: Some("inbox".into()),
             },
             Mailbox {
                 id: "mb-travel".into(),
                 name: "Travel".into(),
+                parent_id: None,
                 role: None,
             },
         ]

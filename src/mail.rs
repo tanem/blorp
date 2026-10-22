@@ -25,6 +25,48 @@ impl Mailboxes {
         self.0.iter().find(|m| m.role.as_deref() == Some(role))
     }
 
+    /// The mailbox with `id`, if any.
+    pub fn by_id(&self, id: &str) -> Option<&jmap::Mailbox> {
+        self.0.iter().find(|m| m.id == id)
+    }
+
+    /// The mailbox's name after its parents' names, joined with `/`, as in
+    /// `Work/Receipts`.
+    pub fn path(&self, mailbox: &jmap::Mailbox) -> String {
+        let mut names = vec![mailbox.name.as_str()];
+        let mut parent = mailbox.parent_id.as_deref();
+        while let Some(m) = parent.and_then(|id| self.by_id(id)) {
+            // A parentId cycle would otherwise never reach the top.
+            if names.len() > self.0.len() {
+                break;
+            }
+            names.push(&m.name);
+            parent = m.parent_id.as_deref();
+        }
+        names.reverse();
+        names.join("/")
+    }
+
+    /// Each mailbox whose path holds `typed`, ignoring case, the Inbox
+    /// first and the rest in path order.
+    pub fn matching(&self, typed: &str) -> Vec<Listed> {
+        let typed = typed.to_lowercase();
+        let mut listed: Vec<(bool, Listed)> = self
+            .0
+            .iter()
+            .map(|m| {
+                let listed = Listed {
+                    path: self.path(m),
+                    id: m.id.clone(),
+                };
+                (m.role.as_deref() != Some("inbox"), listed)
+            })
+            .filter(|(_, m)| m.path.to_lowercase().contains(&typed))
+            .collect();
+        listed.sort();
+        listed.into_iter().map(|(_, m)| m).collect()
+    }
+
     /// Whether a move out of mailbox `from` moves `email`: it is in `from`,
     /// in no Drafts or Sent mailbox, and in no Trash or Junk mailbox other
     /// than `from`.
@@ -43,6 +85,14 @@ impl Mailboxes {
         };
         email.mailbox_ids.contains(from) && !email.mailbox_ids.iter().any(kept)
     }
+}
+
+/// A mailbox as the mailbox list shows it: its path, and the id a switch
+/// loads.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Listed {
+    pub path: String,
+    pub id: String,
 }
 
 impl From<Vec<jmap::Mailbox>> for Mailboxes {
