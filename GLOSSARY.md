@@ -28,6 +28,10 @@ _Avoid_: New, unseen
 A setting of the queue, off at launch and toggled with `u`, under which the queue holds only the unread threads of the mailbox shown. It stays on across a switch of the mailbox shown.
 _Avoid_: View, filter, unread mode
 
+**Search**:
+The text typed after `/` that narrows the queue to those of its threads whose row's sender or subject contains it, ignoring case; the mailbox's threads beyond the queue are not searched. Empty at launch, and cleared with Esc or by a switch of the mailbox shown.
+_Avoid_: Filter, find, query
+
 **Action**:
 A change blorp makes to the account's mail on a key, such as archiving a thread. It shows in the queue at once and is sent through the outbox.
 _Avoid_: Command, operation, mutation
