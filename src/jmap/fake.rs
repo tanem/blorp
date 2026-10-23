@@ -550,6 +550,7 @@ impl StoreBuilder {
             name: name.into(),
             parent_id: None,
             role: role.map(Into::into),
+            // Counted from the emails on each `Mailbox/get`.
             unread_threads: 0,
         });
         self

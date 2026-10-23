@@ -48,14 +48,14 @@ impl Mailboxes {
     }
 
     /// Each mailbox whose path holds `text`, ignoring case, and with
-    /// `unread_only` that holds an unread thread, the Inbox first and the
-    /// rest in path order.
-    pub fn matching(&self, text: &str, unread_only: bool) -> Vec<Listed> {
+    /// `unread_mailboxes_only` that holds an unread thread, the Inbox first
+    /// and the rest in path order.
+    pub fn matching(&self, text: &str, unread_mailboxes_only: bool) -> Vec<Listed> {
         let text = text.to_lowercase();
         let mut listed: Vec<(bool, Listed)> = self
             .0
             .iter()
-            .filter(|m| !unread_only || m.unread_threads > 0)
+            .filter(|m| !unread_mailboxes_only || m.unread_threads > 0)
             .map(|m| {
                 let listed = Listed {
                     path: self.path(m),

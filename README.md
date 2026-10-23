@@ -50,7 +50,7 @@ BLORP_API_TOKEN="$(pass show fastmail/blorp)" blorp
 | `q` | Quit |
 | `Ctrl-c` | Quit |
 
-On the mailbox list, which `m` opens in place of the queue with each mailbox's count of unread threads, `j` and `k` move, `u` shows only the mailboxes holding an unread thread, `/` narrows the list by path, Enter switches to the highlighted mailbox, Esc clears the narrowing or else closes the list, and `q` and `Ctrl-c` quit.
+On the mailbox list, which `m` opens in place of the queue with each mailbox's count of unread threads, `j` and `k` move, `u` shows only the mailboxes holding an unread thread, Enter switches to the highlighted mailbox, Esc clears the narrowing or else closes the list, and `q` and `Ctrl-c` quit. `/` narrows the list by path as it searches the queue: Enter at the prompt locks the text in without switching.
 
 ## Files and environment variables
 

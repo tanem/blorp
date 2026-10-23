@@ -146,6 +146,26 @@ struct MailboxList {
     highlight: Option<String>,
 }
 
+impl MailboxList {
+    /// The mailboxes of `mailboxes` the list lists.
+    fn listed(&self, mailboxes: &Mailboxes, unread_mailboxes_only: bool) -> Vec<Listed> {
+        mailboxes.matching(self.narrowing.text(), unread_mailboxes_only)
+    }
+
+    /// The row of the highlighted mailbox in `listed`, if it is listed.
+    fn highlight_row(&self, listed: &[Listed]) -> Option<usize> {
+        let id = self.highlight.as_ref()?;
+        listed.iter().position(|m| &m.id == id)
+    }
+
+    /// Keeps the highlight on its mailbox while that is in `listed`, and
+    /// otherwise moves it to the first row.
+    fn rehighlight(&mut self, listed: &[Listed]) {
+        let row = self.highlight_row(listed).unwrap_or(0);
+        self.highlight = listed.get(row).map(|m| m.id.clone());
+    }
+}
+
 /// What the open mailbox list shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MailboxChoices {
@@ -156,7 +176,7 @@ pub struct MailboxChoices {
     /// The highlighted row; 0 when no mailbox is listed.
     pub highlight: usize,
     /// Whether unread mailboxes only is on.
-    pub unread_only: bool,
+    pub unread_mailboxes_only: bool,
     /// The text that narrows the list; empty when none is set.
     pub text: String,
     /// Whether the prompt is open.
@@ -414,13 +434,9 @@ impl App {
     /// The mailbox list, while it is open.
     pub fn mailbox_list(&self) -> Option<MailboxChoices> {
         let list = self.mailbox_list.as_ref()?;
-        let listed = self.listed(list);
+        let listed = list.listed(&self.mailboxes, self.unread_mailboxes_only);
         Some(MailboxChoices {
-            highlight: list
-                .highlight
-                .as_ref()
-                .and_then(|id| listed.iter().position(|m| &m.id == id))
-                .unwrap_or(0),
+            highlight: list.highlight_row(&listed).unwrap_or(0),
             rows: listed
                 .into_iter()
                 .map(|m| MailboxRow {
@@ -428,16 +444,10 @@ impl App {
                     unread: m.unread,
                 })
                 .collect(),
-            unread_only: self.unread_mailboxes_only,
+            unread_mailboxes_only: self.unread_mailboxes_only,
             text: list.narrowing.text().to_string(),
             typing: list.narrowing.typing().is_some(),
         })
-    }
-
-    /// The mailboxes `list` lists.
-    fn listed(&self, list: &MailboxList) -> Vec<Listed> {
-        self.mailboxes
-            .matching(list.narrowing.text(), self.unread_mailboxes_only)
     }
 
     /// Opens the mailbox list with no text, the mailbox shown highlighted.
@@ -452,17 +462,9 @@ impl App {
     /// Keeps the mailbox list's highlight on its mailbox while that is
     /// listed, and otherwise moves it to the first row.
     fn rehighlight(&mut self) {
-        let Some(list) = &self.mailbox_list else {
-            return;
-        };
-        let listed = self.listed(list);
-        let highlight = list
-            .highlight
-            .clone()
-            .filter(|id| listed.iter().any(|m| &m.id == id))
-            .or_else(|| listed.first().map(|m| m.id.clone()));
         if let Some(list) = &mut self.mailbox_list {
-            list.highlight = highlight;
+            let listed = list.listed(&self.mailboxes, self.unread_mailboxes_only);
+            list.rehighlight(&listed);
         }
     }
 
@@ -472,27 +474,17 @@ impl App {
     /// Enter switches to the highlighted mailbox, and Esc clears the text,
     /// or with none closes the list.
     fn mailbox_list_key(&mut self, key: ListKey) -> Vec<Effect> {
-        let Some(list) = &self.mailbox_list else {
-            return Vec::new();
-        };
-        let listed = self.listed(list);
-        let row = list
-            .highlight
-            .as_ref()
-            .and_then(|id| listed.iter().position(|m| &m.id == id));
         let Some(list) = &mut self.mailbox_list else {
             return Vec::new();
         };
+        let listed = list.listed(&self.mailboxes, self.unread_mailboxes_only);
         match key {
             ListKey::Down | ListKey::Up => {
-                let Some(row) = row else {
-                    return Vec::new();
-                };
-                let row = match key {
+                let row = list.highlight_row(&listed).map_or(0, |row| match key {
                     ListKey::Down => (row + 1).min(listed.len() - 1),
                     _ => row.saturating_sub(1),
-                };
-                list.highlight = Some(listed[row].id.clone());
+                });
+                list.highlight = listed.get(row).map(|m| m.id.clone());
             }
             ListKey::UnreadOnly => self.unread_mailboxes_only = !self.unread_mailboxes_only,
             ListKey::Narrow => list.narrowing.open(),

@@ -113,7 +113,7 @@ fn m_lists_every_mailbox_with_its_unread_count_inbox_first_with_the_one_shown_hi
                 })
                 .collect(),
             highlight: 0,
-            unread_only: false,
+            unread_mailboxes_only: false,
             text: String::new(),
             typing: false,
         })
@@ -217,7 +217,7 @@ fn keys_typed_at_the_prompt_go_into_the_text_and_do_not_act() {
     assert_eq!(h.keys("jkueormq"), []);
 
     assert_eq!(list(&h).text, "jkueormq");
-    assert!(!list(&h).unread_only);
+    assert!(!list(&h).unread_mailboxes_only);
     assert_eq!(list(&h).highlight, 0);
     assert_eq!(h.status(), "");
 }
@@ -385,11 +385,11 @@ fn u_shows_only_the_mailboxes_holding_an_unread_thread_and_again_shows_every_mai
     h.keys("m");
 
     assert_eq!(h.keys("u"), []);
-    assert!(list(&h).unread_only);
+    assert!(list(&h).unread_mailboxes_only);
     assert_eq!(rows(&h), owned(&UNREAD));
 
     assert_eq!(h.keys("u"), []);
-    assert!(!list(&h).unread_only);
+    assert!(!list(&h).unread_mailboxes_only);
     assert_eq!(rows(&h), owned(&ALL));
 }
 
@@ -399,7 +399,7 @@ fn unread_mailboxes_only_starts_off() {
 
     h.keys("m");
 
-    assert!(!list(&h).unread_only);
+    assert!(!list(&h).unread_mailboxes_only);
 }
 
 #[test]
@@ -409,14 +409,14 @@ fn unread_mailboxes_only_stays_on_across_openings_and_switches() {
     h.press(KeyCode::Esc);
 
     h.keys("m");
-    assert!(list(&h).unread_only);
+    assert!(list(&h).unread_mailboxes_only);
     h.keys("j");
     let effects = h.press(KeyCode::Enter);
     h.resolve(effects);
     assert_eq!(h.app.queue_path(), "Travel");
 
     h.keys("m");
-    assert!(list(&h).unread_only);
+    assert!(list(&h).unread_mailboxes_only);
 }
 
 #[test]
@@ -435,7 +435,7 @@ fn unread_mailboxes_only_and_unread_only_leave_each_other_alone() {
     h.resolve(effects);
 
     h.keys("m");
-    assert!(!list(&h).unread_only);
+    assert!(!list(&h).unread_mailboxes_only);
     h.keys("u");
     assert!(h.app.unread_only());
     h.press(KeyCode::Esc);
@@ -444,7 +444,7 @@ fn unread_mailboxes_only_and_unread_only_leave_each_other_alone() {
     h.resolve(effects);
     assert!(!h.app.unread_only());
     h.keys("m");
-    assert!(list(&h).unread_only);
+    assert!(list(&h).unread_mailboxes_only);
 }
 
 #[test]

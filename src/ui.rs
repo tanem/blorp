@@ -60,7 +60,7 @@ pub fn view(app: &App, frame: &mut Frame) {
 /// highlighted row in view and reversed.
 fn mailbox_list(frame: &mut Frame, choices: &MailboxChoices, area: Rect) {
     if choices.rows.is_empty() {
-        let text = match (choices.unread_only, choices.text.as_str()) {
+        let text = match (choices.unread_mailboxes_only, choices.text.as_str()) {
             (true, "") => "No unread mail".to_string(),
             (false, "") => "No mailboxes".to_string(),
             (true, text) => format!("No unread mailboxes match /{text}"),
@@ -184,14 +184,8 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
     } else {
         format!(" {row}/{len} ")
     };
-    statusline(
-        app,
-        "Unread only",
-        app.unread_only(),
-        app.search(),
-        position,
-        width,
-    )
+    let badge = app.unread_only().then_some("Unread only");
+    statusline(app, badge, app.search(), &position, width)
 }
 
 /// The statusline while the mailbox list is open: the path of the mailbox
@@ -201,35 +195,30 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
 fn list_status_bar(app: &App, choices: &MailboxChoices, width: u16) -> Line<'static> {
     let len = choices.rows.len();
     let row = if len == 0 { 0 } else { choices.highlight + 1 };
-    statusline(
-        app,
-        "Unread mailboxes only",
-        choices.unread_only,
-        &choices.text,
-        format!(" {row}/{len} "),
-        width,
-    )
+    let badge = choices
+        .unread_mailboxes_only
+        .then_some("Unread mailboxes only");
+    statusline(app, badge, &choices.text, &format!(" {row}/{len} "), width)
 }
 
-/// The path of the mailbox shown, the `unread` badge while `unread_only`
-/// is on, and `/` and `text` while it is not empty on the left; the
-/// `DISCONNECTED` badge while disconnected and `position` on the right.
+/// The path of the mailbox shown, `badge` when given, and `/` and `text`
+/// while it is not empty on the left; the `DISCONNECTED` badge while
+/// disconnected and `position` on the right.
 fn statusline(
     app: &App,
-    unread: &str,
-    unread_only: bool,
+    badge: Option<&str>,
     text: &str,
-    position: String,
+    position: &str,
     width: u16,
 ) -> Line<'static> {
     let mut left = vec![Span::styled(
         format!(" {} ", app.queue_path()),
         Style::new().fg(Color::White).bg(Color::DarkGray),
     )];
-    if unread_only {
+    if let Some(badge) = badge {
         left.push(Span::raw(" "));
         left.push(Span::styled(
-            format!(" {unread} "),
+            format!(" {badge} "),
             Style::new().fg(Color::Black).bg(Color::Yellow),
         ));
     }
@@ -252,7 +241,7 @@ fn statusline(
         right.push(Span::raw(" "));
     }
     right.push(Span::styled(
-        position,
+        position.to_string(),
         Style::new().fg(Color::Black).bg(Color::Blue),
     ));
     let used = left.iter().chain(&right).map(Span::width).sum::<usize>();
