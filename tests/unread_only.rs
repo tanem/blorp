@@ -391,7 +391,7 @@ fn a_failed_mark_puts_the_row_back_and_reconciles() {
     });
 
     assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
-    assert!(h.app.queue().threads()[0].unread());
+    assert!(h.app.queue().rows()[0].unread());
     assert_eq!(h.app.total(), 2);
     assert_eq!(h.status(), "Could not mark read: Fastmail error: HTTP 400");
     assert_eq!(effects, [reconcile_unread(3)]);
@@ -488,7 +488,7 @@ fn a_mark_typed_under_the_setting_that_fails_after_it_is_turned_off_brings_back_
         result,
     });
     assert_eq!(h.subjects(), ["Lunch", "Trip", "Invoice", "Order"]);
-    assert!(!h.app.queue().threads()[0].unread());
+    assert!(!h.app.queue().rows()[0].unread());
 
     h.send(Msg::Sent {
         job: 1,
@@ -496,7 +496,7 @@ fn a_mark_typed_under_the_setting_that_fails_after_it_is_turned_off_brings_back_
     });
 
     assert_eq!(h.subjects(), ["Lunch", "Trip", "Invoice", "Order"]);
-    assert!(h.app.queue().threads()[0].unread());
+    assert!(h.app.queue().rows()[0].unread());
     assert_eq!(h.app.total(), 4);
 }
 
@@ -584,6 +584,6 @@ fn a_transient_failure_puts_back_a_thread_marked_read_then_archived() {
     });
 
     assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
-    assert!(h.app.queue().threads()[0].unread());
+    assert!(h.app.queue().rows()[0].unread());
     assert_eq!(h.app.total(), 2);
 }

@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, ListKey, MailboxChoices, Msg};
+use crate::app::{App, ListKey, MailboxChoices, Msg, SearchKey};
 use crate::jmap::retry::RETRIES;
 use crate::keymap;
 use crate::mail::Thread;
@@ -30,7 +30,8 @@ const LIST_WIDTH: u16 = 42;
 const LIST_ROWS: usize = 10;
 
 /// Draws the whole screen: the queue, the statusline, and the bottom line,
-/// with the mailbox list over them while it is open.
+/// with the mailbox list over them while it is open, and the terminal
+/// cursor after the search text while the search prompt is open.
 pub fn view(app: &App, frame: &mut Frame) {
     let [queue, statusline, bottom] = Layout::vertical([
         Constraint::Fill(1),
@@ -44,6 +45,10 @@ pub fn view(app: &App, frame: &mut Frame) {
         statusline,
     );
     frame.render_widget(Paragraph::new(bottom_line(app)), bottom);
+    if let Some(typed) = app.prompt() {
+        let x = u16::try_from(1 + typed.width()).unwrap_or(u16::MAX);
+        frame.set_cursor_position((bottom.x + x.min(bottom.width.saturating_sub(1)), bottom.y));
+    }
     if let Some(choices) = app.mailbox_list() {
         mailbox_list(frame, &choices);
     }
@@ -100,13 +105,17 @@ fn mailbox_list(frame: &mut Frame, choices: &MailboxChoices) {
 
 fn rows(app: &App, frame: &mut Frame, area: Rect) {
     let queue = app.queue();
-    if queue.threads().is_empty() {
+    let threads = queue.rows();
+    if threads.is_empty() {
         if !app.loading() {
-            let text = if app.unread_only() {
-                "No unread threads"
+            let mut text = if app.unread_only() {
+                "No unread threads".to_string()
             } else {
-                "No threads"
+                "No threads".to_string()
             };
+            if !app.search().is_empty() {
+                text.push_str(&format!(" match /{}", app.search()));
+            }
             let empty = Line::styled(text, Style::new().fg(Color::DarkGray));
             frame.render_widget(Paragraph::new(empty), area);
         }
@@ -114,9 +123,8 @@ fn rows(app: &App, frame: &mut Frame, area: Rect) {
     }
     let height = usize::from(area.height);
     let first = queue.cursor().saturating_sub(height.saturating_sub(1));
-    let lines: Vec<Line> = queue
-        .threads()
-        .iter()
+    let lines: Vec<Line> = threads
+        .into_iter()
         .enumerate()
         .skip(first)
         .take(height)
@@ -163,9 +171,11 @@ fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> 
     }
 }
 
-/// The path of the mailbox shown and, while it is on, `Unread only` on the
-/// left; the `DISCONNECTED` badge while disconnected and the cursor's
-/// position on the right.
+/// The path of the mailbox shown, `Unread only` while it is on, and `/` and
+/// the search while one is set on the left; the `DISCONNECTED` badge while
+/// disconnected and the cursor's position on the right. The count is of
+/// the rows, and the mailbox's total follows it when the mailbox holds
+/// more threads than the queue and no search is set.
 fn status_bar(app: &App, width: u16) -> Line<'static> {
     let mut left = vec![Span::styled(
         format!(" {} ", app.queue_path()),
@@ -178,10 +188,17 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
             Style::new().fg(Color::Black).bg(Color::Yellow),
         ));
     }
+    if !app.search().is_empty() {
+        left.push(Span::raw(" "));
+        left.push(Span::styled(
+            format!(" /{} ", app.search()),
+            Style::new().fg(Color::Black).bg(Color::Cyan),
+        ));
+    }
     let queue = app.queue();
-    let len = queue.threads().len();
+    let len = queue.rows().len();
     let row = if len == 0 { 0 } else { queue.cursor() + 1 };
-    let position = if app.total() > len {
+    let position = if app.total() > len && app.search().is_empty() {
         format!(" {row}/{len} of {} ", app.total())
     } else {
         format!(" {row}/{len} ")
@@ -209,7 +226,12 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The search prompt while it is open, and otherwise the retry, the
+/// loading spinner, or the status message.
 fn bottom_line(app: &App) -> Line<'static> {
+    if let Some(typed) = app.prompt() {
+        return Line::raw(format!("/{typed}"));
+    }
     let frame = SPINNER[app.spinner() % SPINNER.len()];
     if let Some(retry) = app.retrying() {
         return Line::raw(format!("{frame} Retrying Fastmail ({retry}/{RETRIES})"));
@@ -273,15 +295,33 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
     if app.mailbox_list().is_some() {
         return list_key(key);
     }
-    let KeyCode::Char(c) = key.code else {
-        return None;
-    };
-    let key = if key.modifiers.contains(KeyModifiers::CONTROL) {
-        keymap::Key::Ctrl(c)
-    } else {
-        keymap::Key::Char(c)
+    if app.prompt().is_some() {
+        return search_key(key);
+    }
+    let key = match key.code {
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => keymap::Key::Ctrl(c),
+        KeyCode::Char(c) => keymap::Key::Char(c),
+        KeyCode::Esc => keymap::Key::Esc,
+        _ => return None,
     };
     keymap::msg(key)
+}
+
+/// The message a key press at the search prompt stands for: Enter locks
+/// the search in, Esc puts it back, and characters and Backspace edit it,
+/// with Ctrl-c still quitting.
+fn search_key(key: KeyEvent) -> Option<Msg> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return (key.code == KeyCode::Char('c')).then_some(Msg::Quit);
+    }
+    let key = match key.code {
+        KeyCode::Enter => SearchKey::Accept,
+        KeyCode::Esc => SearchKey::Cancel,
+        KeyCode::Backspace => SearchKey::Backspace,
+        KeyCode::Char(c) => SearchKey::Char(c),
+        _ => return None,
+    };
+    Some(Msg::SearchKey(key))
 }
 
 /// The message a key press at the mailbox list stands for: Ctrl-n, Ctrl-p,
@@ -449,6 +489,88 @@ mod tests {
         let screen = render(&h, 80, 24);
         assert!(screen.contains("No unread threads"), "{screen}");
         insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn the_search_prompt_while_typing_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("/TRIP");
+
+        let screen = render(&h, 80, 24);
+        assert!(
+            screen.lines().nth(23).unwrap().starts_with("\"/TRIP "),
+            "{screen}"
+        );
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn a_search_locked_in_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("/wellington");
+        h.press(KeyCode::Enter);
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains(" Inbox   /wellington "), "{screen}");
+        assert!(screen.contains(" 1/1 "), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn a_search_under_unread_only_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        let effects = h.keys("u");
+        h.resolve(effects);
+        h.keys("/a");
+        h.press(KeyCode::Enter);
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains(" Inbox   Unread only   /a "), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn a_search_that_matches_nothing_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("/acme");
+        h.press(KeyCode::Enter);
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains("No threads match /acme"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn a_search_under_unread_only_that_matches_nothing_says_so() {
+        let mut h = Harness::loaded(busy_inbox());
+        let effects = h.keys("u");
+        h.resolve(effects);
+        h.keys("/trip");
+        h.press(KeyCode::Enter);
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains("No unread threads match /trip"), "{screen}");
+    }
+
+    #[test]
+    fn a_search_counts_only_the_matching_threads_of_a_mailbox_larger_than_the_queue() {
+        let mut store = Store::builder().role_mailbox("mb-inbox", "Inbox", "inbox");
+        for i in 0..503 {
+            let received = jiff::Timestamp::from_second(1_760_000_000 - i * 60).unwrap();
+            store = store.email(
+                EmailSpec::new(&format!("e{i}"), &format!("t{i}"), &received.to_string())
+                    .in_mailbox("mb-inbox")
+                    .seen()
+                    .from("Sender", "sender@example.invalid")
+                    .subject(&format!("Thread {}", i + 1)),
+            );
+        }
+        let mut h = Harness::loaded(store.build());
+        h.keys("/thread 1");
+        h.press(KeyCode::Enter);
+
+        let statusline = render(&h, 80, 24).lines().nth(22).unwrap().to_string();
+        assert!(statusline.ends_with(" 1/111 \""), "{statusline}");
     }
 
     #[test]
@@ -633,7 +755,53 @@ mod tests {
     }
 
     #[test]
-    fn only_j_k_e_r_o_m_u_q_and_ctrl_c_send_a_message() {
+    fn at_the_search_prompt_characters_backspace_enter_esc_and_ctrl_c_send_a_message() {
+        let mut h = Harness::loaded(empty_inbox());
+        h.keys("/");
+        let press = |code, modifiers| key_msg(&h.app, KeyEvent::new(code, modifiers));
+
+        for c in "jkeqrmu/ A".chars() {
+            assert!(
+                matches!(
+                    press(KeyCode::Char(c), KeyModifiers::NONE),
+                    Some(Msg::SearchKey(SearchKey::Char(k))) if k == c
+                ),
+                "{c}"
+            );
+        }
+        assert!(matches!(
+            press(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            Some(Msg::SearchKey(SearchKey::Char('A')))
+        ));
+        assert!(matches!(
+            press(KeyCode::Backspace, KeyModifiers::NONE),
+            Some(Msg::SearchKey(SearchKey::Backspace))
+        ));
+        assert!(matches!(
+            press(KeyCode::Enter, KeyModifiers::NONE),
+            Some(Msg::SearchKey(SearchKey::Accept))
+        ));
+        assert!(matches!(
+            press(KeyCode::Esc, KeyModifiers::NONE),
+            Some(Msg::SearchKey(SearchKey::Cancel))
+        ));
+        assert!(matches!(
+            press(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Some(Msg::Quit)
+        ));
+        for code in [KeyCode::Down, KeyCode::Up, KeyCode::Tab] {
+            assert!(press(code, KeyModifiers::NONE).is_none(), "{code:?}");
+        }
+        for c in ['n', 'p', 'u'] {
+            assert!(
+                press(KeyCode::Char(c), KeyModifiers::CONTROL).is_none(),
+                "Ctrl-{c}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_j_k_e_r_o_m_u_slash_esc_q_and_ctrl_c_send_a_message() {
         let h = Harness::loaded(empty_inbox());
         let press = |code, modifiers| key_msg(&h.app, KeyEvent::new(code, modifiers));
 
@@ -666,6 +834,14 @@ mod tests {
             Some(Msg::UnreadOnly)
         ));
         assert!(matches!(
+            press(KeyCode::Char('/'), KeyModifiers::NONE),
+            Some(Msg::Search)
+        ));
+        assert!(matches!(
+            press(KeyCode::Esc, KeyModifiers::NONE),
+            Some(Msg::ClearSearch)
+        ));
+        assert!(matches!(
             press(KeyCode::Char('q'), KeyModifiers::NONE),
             Some(Msg::Quit)
         ));
@@ -673,13 +849,12 @@ mod tests {
             press(KeyCode::Char('c'), KeyModifiers::CONTROL),
             Some(Msg::Quit)
         ));
-        for c in "gGEd!Mzfx XUV./tR:D?0123456789Jc".chars() {
+        for c in "gGEd!Mzfx XUV.tR:D?0123456789Jc".chars() {
             assert!(press(KeyCode::Char(c), KeyModifiers::NONE).is_none(), "{c}");
         }
         for code in [
             KeyCode::Tab,
             KeyCode::BackTab,
-            KeyCode::Esc,
             KeyCode::Enter,
             KeyCode::Down,
             KeyCode::Up,

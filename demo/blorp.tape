@@ -57,6 +57,14 @@ Type "u"
 Sleep 2s
 Type "u"
 Sleep 1.5s
+Type "/"
+Sleep 700ms
+Type "your"
+Sleep 1s
+Enter
+Sleep 2s
+Escape
+Sleep 1.5s
 Type "m"
 Sleep 1s
 Type "arch"

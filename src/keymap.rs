@@ -12,6 +12,7 @@ pub enum Key {
     Char(char),
     /// A character typed with Ctrl.
     Ctrl(char),
+    Esc,
 }
 
 impl fmt::Display for Key {
@@ -19,6 +20,7 @@ impl fmt::Display for Key {
         match self {
             Key::Char(c) => write!(f, "{c}"),
             Key::Ctrl(c) => write!(f, "Ctrl-{c}"),
+            Key::Esc => write!(f, "Esc"),
         }
     }
 }
@@ -68,6 +70,16 @@ pub const BINDINGS: &[Binding] = &[
         keys: &[Key::Char('u')],
         help: "Unread only",
         msg: || Msg::UnreadOnly,
+    },
+    Binding {
+        keys: &[Key::Char('/')],
+        help: "Search",
+        msg: || Msg::Search,
+    },
+    Binding {
+        keys: &[Key::Esc],
+        help: "Clear search",
+        msg: || Msg::ClearSearch,
     },
     Binding {
         keys: &[Key::Char('q')],
