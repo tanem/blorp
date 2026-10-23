@@ -20,6 +20,10 @@ _Avoid_: Picker, folder list, menu
 A conversation as Fastmail groups it: one row of the queue.
 _Avoid_: Message (when the whole conversation is meant), email, conversation
 
+**Unread**:
+A thread any email of which Fastmail has not marked seen, in whatever mailbox that email is. Shown with a dot on its row. Marking a thread read marks every email of it, in every mailbox.
+_Avoid_: New, unseen
+
 **Action**:
 A change blorp makes to the account's mail on a key, such as archiving a thread. It shows in the queue at once and is sent through the outbox.
 _Avoid_: Command, operation, mutation

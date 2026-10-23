@@ -1,4 +1,4 @@
-//! The outbox sends archives one at a time, in the order typed, and `q`
+//! The outbox sends actions one at a time, in the order typed, and `q`
 //! waits for it.
 
 use std::io;
@@ -64,6 +64,13 @@ fn archive(id: &str) -> EmailUpdate {
     )])
 }
 
+fn read(id: &str) -> EmailUpdate {
+    EmailUpdate::from([(
+        id.to_string(),
+        [("keywords/$seen".to_string(), Value::Bool(true))].into(),
+    )])
+}
+
 fn sets(jmap: &FakeJmap) -> Vec<EmailUpdate> {
     jmap.calls()
         .into_iter()
@@ -90,6 +97,25 @@ async fn the_outbox_sends_one_archive_at_a_time_in_the_order_typed() {
 
     tokio::time::sleep(Duration::from_secs(10)).await;
     assert_eq!(sets(&jmap), [archive("e1"), archive("e2")]);
+    state.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_mark_typed_after_an_archive_is_sent_after_it() {
+    let jmap = FakeJmap::new(inbox());
+    let state = start(&jmap, &[(1, 'e'), (1, 'r')]).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    jmap.delay_next(1, Duration::from_secs(10));
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        sets(&jmap),
+        [archive("e1")],
+        "the mark waits for the archive"
+    );
+
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert_eq!(sets(&jmap), [archive("e1"), read("e2")]);
     state.abort();
 }
 

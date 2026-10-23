@@ -313,8 +313,8 @@ impl Store {
 
     /// `Email/set` with `update`: applies each patch, and lists as not
     /// updated every unknown id and every patch with a path other than
-    /// `mailboxIds/<id>` or a value other than `true` or `null`. Such a
-    /// patch changes nothing.
+    /// `mailboxIds/<id>` or `keywords/<keyword>` or a value other than
+    /// `true` or `null`. Such a patch changes nothing.
     pub fn set_emails(&mut self, update: &EmailUpdate) -> SetResult {
         let mut not_updated = Vec::new();
         for (id, patch) in update {
@@ -412,15 +412,23 @@ fn get_by_ids<T: Clone>(
 fn apply(email: &mut Email, patch: &EmailPatch) -> bool {
     let mut patched = email.clone();
     for (path, value) in patch {
-        let Some(id) = path.strip_prefix("mailboxIds/").filter(|id| !id.is_empty()) else {
+        let Some((set, key)) = path
+            .split_once('/')
+            .filter(|(_, key)| !key.is_empty())
+            .and_then(|(set, key)| match set {
+                "mailboxIds" => Some((&mut patched.mailbox_ids, key)),
+                "keywords" => Some((&mut patched.keywords, key)),
+                _ => None,
+            })
+        else {
             return false;
         };
         match value {
             Value::Bool(true) => {
-                patched.mailbox_ids.insert(id.to_string(), true);
+                set.insert(key.to_string(), true);
             }
             Value::Null => {
-                patched.mailbox_ids.remove(id);
+                set.remove(key);
             }
             _ => return false,
         }

@@ -41,6 +41,7 @@ BLORP_API_TOKEN="$(pass show fastmail/blorp)" blorp
 | `j` | Down |
 | `k` | Up |
 | `e` | Archive |
+| `r` | Mark read |
 | `o` | Open in Fastmail |
 | `m` | Switch mailbox |
 | `q` | Quit |
