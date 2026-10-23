@@ -118,7 +118,7 @@ impl Harness {
     pub fn subjects(&self) -> Vec<String> {
         self.app
             .queue()
-            .threads()
+            .rows()
             .iter()
             .map(|t| t.hit().subject.clone().unwrap_or_default())
             .collect()

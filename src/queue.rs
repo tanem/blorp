@@ -2,16 +2,23 @@
 
 use crate::mail::Thread;
 
-/// The threads of the mailbox shown, newest first, and the cursor row.
+/// The threads of the mailbox shown, newest first, the search, and the
+/// cursor row. The rows are the threads that match the search.
 #[derive(Debug, Clone, Default)]
 pub struct Queue {
     threads: Vec<Thread>,
+    /// The search, as typed; empty when none is set.
+    search: String,
     cursor: usize,
 }
 
 impl Queue {
-    pub fn threads(&self) -> &[Thread] {
-        &self.threads
+    /// The rows: the threads that match the search, newest first.
+    pub fn rows(&self) -> Vec<&Thread> {
+        self.threads
+            .iter()
+            .filter(|t| t.matches(&self.search))
+            .collect()
     }
 
     /// The cursor's row, counting from 0. It is 0 in an empty queue.
@@ -19,38 +26,53 @@ impl Queue {
         self.cursor
     }
 
-    /// Replaces the rows with `threads`, the queue as Fastmail now has it.
-    /// The cursor stays on its thread if that is still in the queue, and
+    /// The search, as typed; empty when none is set.
+    pub fn search(&self) -> &str {
+        &self.search
+    }
+
+    /// Whether the queue holds the thread with `id`, whether or not it
+    /// matches the search.
+    pub fn holds(&self, id: &str) -> bool {
+        self.threads.iter().any(|t| t.id == id)
+    }
+
+    /// Sets the search to `search`. The cursor stays on its thread if that
+    /// still matches, and otherwise goes to the first row.
+    pub fn set_search(&mut self, search: String) {
+        let current = self.current().map(|t| t.id.clone());
+        self.search = search;
+        self.cursor = current.and_then(|id| self.row_of(&id)).unwrap_or(0);
+    }
+
+    /// Replaces the threads with `threads`, the queue as Fastmail now has
+    /// it. The cursor stays on its thread if that is still a row, and
     /// otherwise on the same row number, or the last row if there are
     /// fewer.
     pub fn replace(&mut self, threads: Vec<Thread>) {
         let current = self.current().map(|t| t.id.clone());
         self.threads = threads;
-        if let Some(index) = current.and_then(|id| self.threads.iter().position(|t| t.id == id)) {
-            self.cursor = index;
+        if let Some(row) = current.and_then(|id| self.row_of(&id)) {
+            self.cursor = row;
         }
         self.cursor = self.cursor.min(self.last());
     }
 
-    /// Replaces the rows with a queue query's `threads`. The cursor stays on
-    /// its thread if that is still in the queue, and otherwise goes to the
-    /// first row.
+    /// Replaces the threads with a queue query's `threads`. The cursor
+    /// stays on its thread if that is still a row, and otherwise goes to
+    /// the first row.
     pub fn load(&mut self, threads: Vec<Thread>) {
         let current = self.current().map(|t| t.id.clone());
         self.threads = threads;
-        self.cursor = current
-            .and_then(|id| self.threads.iter().position(|t| t.id == id))
-            .unwrap_or(0);
+        self.cursor = current.and_then(|id| self.row_of(&id)).unwrap_or(0);
     }
 
     /// Removes the thread under the cursor. The cursor stays on the same
-    /// row number, so the next thread slides into place, or on the last row
+    /// row number, so the next row slides into place, or on the last row
     /// if that was the one removed.
     pub fn remove_current(&mut self) -> Option<Thread> {
-        if self.cursor >= self.threads.len() {
-            return None;
-        }
-        let thread = self.threads.remove(self.cursor);
+        let index = self.index(self.cursor)?;
+        let thread = self.threads.remove(index);
         self.cursor = self.cursor.min(self.last());
         Some(thread)
     }
@@ -68,7 +90,7 @@ impl Queue {
     }
 
     /// Sets whether each email with an id in `ids` is seen, in whichever
-    /// row it is.
+    /// thread it is.
     pub fn set_seen(&mut self, ids: &[String], seen: bool) {
         for thread in &mut self.threads {
             thread.set_seen(ids, seen);
@@ -77,7 +99,7 @@ impl Queue {
 
     /// The thread under the cursor.
     pub fn current(&self) -> Option<&Thread> {
-        self.threads.get(self.cursor)
+        self.index(self.cursor).map(|i| &self.threads[i])
     }
 
     /// Moves the cursor down a row, stopping at the last.
@@ -90,7 +112,22 @@ impl Queue {
         self.cursor = self.cursor.saturating_sub(1);
     }
 
+    /// The index in `threads` of row `row`.
+    fn index(&self, row: usize) -> Option<usize> {
+        self.threads
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.matches(&self.search))
+            .nth(row)
+            .map(|(i, _)| i)
+    }
+
+    /// The row of the thread with `id`, if it is one.
+    fn row_of(&self, id: &str) -> Option<usize> {
+        self.rows().iter().position(|t| t.id == id)
+    }
+
     fn last(&self) -> usize {
-        self.threads.len().saturating_sub(1)
+        self.rows().len().saturating_sub(1)
     }
 }

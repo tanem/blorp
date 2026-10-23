@@ -52,6 +52,8 @@ pub struct App {
     loading_outbox: OutboxAt,
     /// The mailbox list, while it is open.
     mailbox_list: Option<MailboxList>,
+    /// The search as it was before `/`, while the search prompt is open.
+    prompt: Option<String>,
     total: usize,
     generation: u64,
     loading: bool,
@@ -165,6 +167,17 @@ pub enum ListKey {
     Backspace,
 }
 
+/// A key at the search prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchKey {
+    Char(char),
+    Backspace,
+    /// Enter: lock the search in.
+    Accept,
+    /// Esc: put the search back as it was before `/`.
+    Cancel,
+}
+
 /// What a switch or a toggle of unread only loads: the mailbox to show,
 /// and whether unread only is on.
 #[derive(Debug, Clone)]
@@ -217,6 +230,12 @@ pub enum Msg {
     MarkRead,
     /// `u`: turn unread only on or off.
     UnreadOnly,
+    /// `/`: open the search prompt.
+    Search,
+    /// A key at the search prompt.
+    SearchKey(SearchKey),
+    /// `Esc`: clear the search.
+    ClearSearch,
     /// An action's `Email/set` result.
     Sent {
         job: u64,
@@ -313,6 +332,7 @@ impl App {
             reloading: None,
             loading_outbox: OutboxAt::default(),
             mailbox_list: None,
+            prompt: None,
             total: 0,
             generation: 0,
             loading: false,
@@ -440,6 +460,54 @@ impl App {
             }
         }
         Vec::new()
+    }
+
+    /// The search text while the search prompt is open.
+    pub fn prompt(&self) -> Option<&str> {
+        self.prompt.as_ref().map(|_| self.queue.search())
+    }
+
+    /// The search, as typed; empty when none is set.
+    pub fn search(&self) -> &str {
+        self.queue.search()
+    }
+
+    /// Opens the search prompt, pre-filled with the current search.
+    fn open_prompt(&mut self) {
+        self.prompt = Some(self.queue.search().to_string());
+    }
+
+    /// Handles a key at the search prompt: a character or Backspace
+    /// changes the search, narrowing the queue at once, Enter closes the
+    /// prompt with the search as typed, and Esc closes it with the search
+    /// as it was before `/`.
+    fn search_key(&mut self, key: SearchKey) {
+        let Some(before) = &self.prompt else {
+            return;
+        };
+        let mut search = self.queue.search().to_string();
+        match key {
+            SearchKey::Char(c) => search.push(c),
+            SearchKey::Backspace => {
+                search.pop();
+            }
+            SearchKey::Accept => {
+                self.prompt = None;
+                return;
+            }
+            SearchKey::Cancel => {
+                search = before.clone();
+                self.prompt = None;
+            }
+        }
+        self.queue.set_search(search);
+    }
+
+    /// Clears the search.
+    fn clear_search(&mut self) {
+        if !self.queue.search().is_empty() {
+            self.queue.set_search(String::new());
+        }
     }
 
     /// What the queue is to show once the queue query in flight lands:
@@ -652,6 +720,7 @@ impl App {
                 if let Some(reload) = &reloaded {
                     if Some(&reload.mailbox) != self.shown.as_ref() {
                         self.queue = Queue::default();
+                        self.prompt = None;
                     }
                     self.shown = Some(reload.mailbox.clone());
                     self.unread_only = reload.unread_only;
@@ -879,7 +948,7 @@ impl App {
     /// mailbox it was taken from, would hold it, and does not hold it
     /// already.
     fn put_back(&mut self, Row { thread, from }: Row) {
-        let held = self.queue.threads().iter().any(|t| t.id == thread.id);
+        let held = self.queue.holds(&thread.id);
         if Some(&from) == self.shown.as_ref() && self.holds(&thread) && !held {
             self.queue.insert(thread);
             self.total += 1;
@@ -1021,6 +1090,7 @@ impl App {
     /// deleted, saying so, and loads it.
     fn shown_deleted(&mut self) -> Vec<Effect> {
         self.queue = Queue::default();
+        self.prompt = None;
         self.total = 0;
         self.status = "Mailbox no longer exists".into();
         self.shown = None;
@@ -1111,6 +1181,18 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::Archive => app.archive(),
         Msg::MarkRead => app.mark_read(),
         Msg::UnreadOnly => app.toggle_unread_only(),
+        Msg::Search => {
+            app.open_prompt();
+            Vec::new()
+        }
+        Msg::SearchKey(key) => {
+            app.search_key(key);
+            Vec::new()
+        }
+        Msg::ClearSearch => {
+            app.clear_search();
+            Vec::new()
+        }
         Msg::Sent { job, result } => app.sent(job, result),
         Msg::Open => app.open(),
         Msg::OpenMailboxList => {

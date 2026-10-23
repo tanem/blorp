@@ -211,6 +211,21 @@ impl Thread {
         }
     }
 
+    /// Whether the sender or the subject of the email that stands for the
+    /// thread holds `search`, ignoring case. Every thread matches an empty
+    /// search.
+    pub fn matches(&self, search: &str) -> bool {
+        if search.is_empty() {
+            return true;
+        }
+        let search = search.to_lowercase();
+        let hit = self.hit();
+        [&hit.sender, &hit.subject]
+            .into_iter()
+            .flatten()
+            .any(|text| text.to_lowercase().contains(&search))
+    }
+
     /// True when any email has `$flagged`.
     pub fn flagged(&self) -> bool {
         self.emails.iter().any(|e| e.flagged)

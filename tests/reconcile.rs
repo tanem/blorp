@@ -88,7 +88,7 @@ fn new_threads_enter_sorted_gone_ones_leave_and_changed_ones_update() {
 
     assert_eq!(h.subjects(), ["One", "Six", "Three", "Four", "Five"]);
     assert_eq!(h.app.total(), 5);
-    assert!(h.app.queue().threads()[3].hit().seen);
+    assert!(h.app.queue().rows()[3].hit().seen);
 }
 
 #[test]

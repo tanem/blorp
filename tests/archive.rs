@@ -120,7 +120,7 @@ fn the_archive_reaches_the_store_and_leaves_the_other_mailboxes_alone() {
 
     // The email in both the Inbox and Sent keeps t1 in the Inbox.
     assert_eq!(h.subjects(), ["Lunch", "Invoice", ""]);
-    let thread = &h.app.queue().threads()[2];
+    let thread = &h.app.queue().rows()[2];
     let mailboxes = |id: &str| {
         let email = thread.emails.iter().find(|e| e.id == id).unwrap();
         email.mailbox_ids.iter().cloned().collect::<Vec<_>>()
@@ -540,7 +540,7 @@ fn e_in_another_mailbox_moves_the_threads_emails_there_to_archive() {
             update: archive_from("mb-travel", &["e1a"]),
         }]
     );
-    assert_eq!(h.app.queue().threads().len(), 0);
+    assert_eq!(h.app.queue().rows().len(), 0);
     assert_eq!(h.status(), "Archived");
 }
 
@@ -581,7 +581,7 @@ fn e_in_archive_does_nothing_and_says_so() {
     switch(&mut h, "archive");
 
     assert_eq!(h.keys("e"), []);
-    assert_eq!(h.app.queue().threads().len(), 1);
+    assert_eq!(h.app.queue().rows().len(), 1);
     assert_eq!(h.status(), "Already in Archive");
 }
 
@@ -613,13 +613,7 @@ fn a_failed_archive_from_a_mailbox_no_longer_shown_puts_no_row_back() {
     });
 
     assert!(matches!(job[..], [Effect::SetEmails { .. }]));
-    let ids: Vec<&str> = h
-        .app
-        .queue()
-        .threads()
-        .iter()
-        .map(|t| t.id.as_str())
-        .collect();
+    let ids: Vec<&str> = h.app.queue().rows().iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, ["t1"]);
     assert_eq!(h.app.total(), 1);
     assert_eq!(h.status(), "Could not archive: 1 email not updated");

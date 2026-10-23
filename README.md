@@ -2,11 +2,11 @@
 
 A terminal UI for a Fastmail account's mailboxes over JMAP.
 
-![blorp showing a made-up Inbox, moving the cursor down and up, marking a thread read, archiving a thread, showing only the unread threads and then every thread again, switching to Archive, then quitting](demo/blorp.gif)
+![blorp showing a made-up Inbox, moving the cursor down and up, marking a thread read, archiving a thread, showing only the unread threads and then every thread again, searching for "your" and clearing the search, switching to Archive, then quitting](demo/blorp.gif)
 
 [![ci](https://github.com/tanem/blorp/actions/workflows/ci.yml/badge.svg)](https://github.com/tanem/blorp/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/github/license/tanem/blorp)](LICENSE)
 
-Status: early. blorp shows one mailbox at a time, starting on the Inbox, and has eight keys, `j`, `k`, `e`, `r`, `o`, `m`, `u`, and `q`, with `Ctrl-c` also quitting; more are added as using blorp shows they are needed ([ADR 0003](docs/adr/0003-every-key-earns-its-place.md)).
+Status: early. blorp shows one mailbox at a time, starting on the Inbox, and has ten keys, `j`, `k`, `e`, `r`, `o`, `m`, `u`, `/`, `Esc`, and `q`, with `Ctrl-c` also quitting; more are added as using blorp shows they are needed ([ADR 0003](docs/adr/0003-every-key-earns-its-place.md)).
 
 ## Requirements
 
@@ -45,6 +45,8 @@ BLORP_API_TOKEN="$(pass show fastmail/blorp)" blorp
 | `o` | Open in Fastmail |
 | `m` | Switch mailbox |
 | `u` | Unread only |
+| `/` | Search |
+| `Esc` | Clear search |
 | `q` | Quit |
 | `Ctrl-c` | Quit |
 

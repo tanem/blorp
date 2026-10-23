@@ -77,7 +77,7 @@ fn read(ids: &[&str]) -> EmailUpdate {
 
 /// Whether each row shows the unread dot, in order.
 fn dots(h: &Harness) -> Vec<bool> {
-    h.app.queue().threads().iter().map(|t| t.unread()).collect()
+    h.app.queue().rows().iter().map(|t| t.unread()).collect()
 }
 
 #[test]
