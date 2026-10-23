@@ -563,12 +563,14 @@ impl App {
     }
 
     /// The query for the threads of the mailbox with `id`, or with
-    /// `unread_only` for those of them with an email in it that lacks
-    /// `$seen`.
+    /// `unread_only` for those of them with an email that lacks `$seen`,
+    /// in whatever mailbox.
     fn query_for(id: &str, unread_only: bool) -> EmailQuery {
         let mailbox = json!({"inMailbox": id});
         let filter = if unread_only {
-            json!({"operator": "AND", "conditions": [mailbox, {"notKeyword": "$seen"}]})
+            let unread =
+                json!({"operator": "NOT", "conditions": [{"allInThreadHaveKeyword": "$seen"}]});
+            json!({"operator": "AND", "conditions": [mailbox, unread]})
         } else {
             mailbox
         };
@@ -585,9 +587,9 @@ impl App {
     }
 
     /// Whether the queue holds `thread`: any thread, or under unread only
-    /// one with an unread email in the mailbox shown.
+    /// an unread one.
     fn holds(&self, thread: &Thread) -> bool {
-        !self.unread_only || self.shown.as_deref().is_some_and(|id| thread.unread_in(id))
+        !self.unread_only || thread.unread()
     }
 
     /// Runs `query` as the queue query, retried unless it is a probe.

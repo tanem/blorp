@@ -199,13 +199,6 @@ impl Thread {
         self.emails.iter().any(|e| !e.seen)
     }
 
-    /// True when any email in the mailbox with id `mailbox` lacks `$seen`.
-    pub fn unread_in(&self, mailbox: &str) -> bool {
-        self.emails
-            .iter()
-            .any(|e| !e.seen && e.mailbox_ids.contains(mailbox))
-    }
-
     /// Sets whether each email with an id in `ids` is seen.
     pub fn set_seen(&mut self, ids: &[String], seen: bool) {
         for email in &mut self.emails {

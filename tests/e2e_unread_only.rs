@@ -14,10 +14,12 @@ fn ago(minutes: i64) -> String {
     (Timestamp::now() - SignedDuration::from_mins(minutes)).to_string()
 }
 
-/// Newest first: Lunch is unread, Trip read, and Invoice unread.
+/// Newest first: Lunch is unread, Trip read, Invoice unread, and Order
+/// read in the Inbox with an unread reply in Archive.
 fn inbox() -> Store {
     Store::builder()
         .role_mailbox("mb-inbox", "Inbox", "inbox")
+        .role_mailbox("mb-archive", "Archive", "archive")
         .email(
             EmailSpec::new("e1", "t1", &ago(10))
                 .in_mailbox("mb-inbox")
@@ -34,6 +36,17 @@ fn inbox() -> Store {
                 .in_mailbox("mb-inbox")
                 .subject("Invoice 1042"),
         )
+        .email(
+            EmailSpec::new("e4a", "t4", &ago(50))
+                .in_mailbox("mb-inbox")
+                .seen()
+                .subject("Order 7731"),
+        )
+        .email(
+            EmailSpec::new("e4b", "t4", &ago(40))
+                .in_mailbox("mb-archive")
+                .subject("Re: Order 7731"),
+        )
         .build()
 }
 
@@ -43,10 +56,10 @@ async fn u_shows_only_the_unread_threads_and_u_again_shows_every_thread() {
     let sandbox = Sandbox::new().session_url(&server.session_url());
     sandbox.store_token(TOKEN);
     let mut blorp = sandbox.spawn(&[], 80, 24);
-    blorp.wait_statusline(" 1/3");
+    blorp.wait_statusline(" 1/4");
 
     blorp.keys("u");
-    blorp.wait_statusline(" 1/2");
+    blorp.wait_statusline(" 1/3");
     assert!(
         blorp.statusline().starts_with(" Inbox   Unread only "),
         "{}",
@@ -55,9 +68,10 @@ async fn u_shows_only_the_unread_threads_and_u_again_shows_every_thread() {
     let rows = blorp.rows();
     assert!(rows[0].contains("Lunch on Friday?"), "{rows:#?}");
     assert!(rows[1].contains("Invoice 1042"), "{rows:#?}");
+    assert!(rows[2].contains("Order 7731"), "{rows:#?}");
 
     blorp.keys("u");
-    blorp.wait_statusline(" 1/3");
+    blorp.wait_statusline(" 1/4");
     assert!(
         !blorp.statusline().contains("Unread only"),
         "{}",

@@ -1,12 +1,13 @@
 //! An in-memory [`Jmap`] adapter over a small mail store, for tests.
 //!
-//! The store evaluates the `Email/query` blorp sends: the `inMailbox` and
-//! `notKeyword` conditions and the `AND` operator, sorting by `receivedAt`
-//! newest first, collapsing threads, `limit`, and `calculateTotal`. Every
-//! get is held to Fastmail's `maxObjectsInGet`, and the local test server
-//! holds every `Email/set` to its `maxObjectsInSet`. `Email/set` applies
-//! `mailboxIds/<id>` and `keywords/<keyword>` patches. `Mailbox/get`
-//! counts each mailbox's `unreadThreads` by RFC 8621's recommended rule.
+//! The store evaluates the `Email/query` blorp sends: the `inMailbox`,
+//! `notKeyword`, and `allInThreadHaveKeyword` conditions and the `AND` and
+//! `NOT` operators, sorting by `receivedAt` newest first, collapsing
+//! threads, `limit`, and `calculateTotal`. Every get is held to Fastmail's
+//! `maxObjectsInGet`, and the local test server holds every `Email/set` to
+//! its `maxObjectsInSet`. `Email/set` applies `mailboxIds/<id>` and
+//! `keywords/<keyword>` patches. `Mailbox/get` counts each mailbox's
+//! `unreadThreads` by RFC 8621's recommended rule.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -340,7 +341,7 @@ impl Store {
     pub fn query_ids(&self, query: &EmailQuery) -> Result<(Vec<String>, usize), Error> {
         let mut matches: Vec<&Email> = Vec::new();
         for email in &self.emails {
-            if matches_filter(email, &query.filter)? {
+            if matches_filter(email, &self.emails, &query.filter)? {
                 matches.push(email);
             }
         }
@@ -482,29 +483,38 @@ fn apply(email: &mut Email, patch: &EmailPatch) -> bool {
     true
 }
 
-/// Whether `email` matches `filter`: an `AND` operator, or a condition of
-/// `inMailbox` and `notKeyword` properties that must all match.
-fn matches_filter(email: &Email, filter: &Value) -> Result<bool, Error> {
+/// Whether `email`, one of `emails`, matches `filter`: an `AND` operator,
+/// which matches when every condition does, a `NOT` operator, which
+/// matches when none does, or a condition of `inMailbox`, `notKeyword`,
+/// and `allInThreadHaveKeyword` properties that must all match. The last
+/// matches when every email of `email`'s thread has the keyword.
+fn matches_filter(email: &Email, emails: &[Email], filter: &Value) -> Result<bool, Error> {
     let Value::Object(filter) = filter else {
         return Err(unsupported_filter());
     };
     if let Some(operator) = filter.get("operator") {
-        let (Some("AND"), Some(Value::Array(conditions))) =
-            (operator.as_str(), filter.get("conditions"))
-        else {
+        let Some(Value::Array(conditions)) = filter.get("conditions") else {
             return Err(unsupported_filter());
         };
-        let mut matched = true;
-        for condition in conditions {
-            matched &= matches_filter(email, condition)?;
-        }
-        return Ok(matched);
+        let matched = conditions
+            .iter()
+            .map(|condition| matches_filter(email, emails, condition))
+            .collect::<Result<Vec<bool>, Error>>()?;
+        return match operator.as_str() {
+            Some("AND") => Ok(matched.iter().all(|m| *m)),
+            Some("NOT") => Ok(!matched.iter().any(|m| *m)),
+            _ => Err(unsupported_filter()),
+        };
     }
     let mut matched = true;
     for (key, value) in filter {
         matched &= match (key.as_str(), value) {
             ("inMailbox", Value::String(id)) => email.mailbox_ids.contains_key(id),
             ("notKeyword", Value::String(keyword)) => !email.keywords.contains_key(keyword),
+            ("allInThreadHaveKeyword", Value::String(keyword)) => emails
+                .iter()
+                .filter(|e| e.thread_id == email.thread_id)
+                .all(|e| e.keywords.contains_key(keyword)),
             _ => return Err(unsupported_filter()),
         };
     }
@@ -720,13 +730,83 @@ mod tests {
     }
 
     #[test]
+    fn a_query_evaluates_all_in_thread_have_keyword_and_the_not_operator() {
+        let store = Store::builder()
+            .role_mailbox("mb-inbox", "Inbox", "inbox")
+            .role_mailbox("mb-archive", "Archive", "archive")
+            // Unread in the Inbox.
+            .email(EmailSpec::new("e1", "t1", "2026-10-05T00:00:00Z").in_mailbox("mb-inbox"))
+            // Read in the Inbox.
+            .email(
+                EmailSpec::new("e2", "t2", "2026-10-04T00:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .seen(),
+            )
+            // Read in the Inbox, with an unread reply in Archive.
+            .email(
+                EmailSpec::new("e3a", "t3", "2026-10-03T00:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .seen(),
+            )
+            .email(EmailSpec::new("e3b", "t3", "2026-10-03T01:00:00Z").in_mailbox("mb-archive"))
+            // Read in the Inbox and in Archive.
+            .email(
+                EmailSpec::new("e4a", "t4", "2026-10-02T00:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .seen(),
+            )
+            .email(
+                EmailSpec::new("e4b", "t4", "2026-10-02T01:00:00Z")
+                    .in_mailbox("mb-archive")
+                    .seen(),
+            )
+            .build();
+        let not_all_seen =
+            json!({"operator": "NOT", "conditions": [{"allInThreadHaveKeyword": "$seen"}]});
+        for (filter, ids) in [
+            (
+                json!({"allInThreadHaveKeyword": "$seen"}),
+                vec!["e2", "e4b"],
+            ),
+            (not_all_seen.clone(), vec!["e1", "e3b"]),
+            (
+                json!({"operator": "AND", "conditions": [{"inMailbox": "mb-inbox"}, not_all_seen]}),
+                vec!["e1", "e3a"],
+            ),
+            (
+                json!({"operator": "NOT", "conditions": [{"inMailbox": "mb-inbox"}]}),
+                vec!["e3b", "e4b"],
+            ),
+            (
+                json!({"operator": "NOT", "conditions": [{"inMailbox": "mb-inbox"}, {"notKeyword": "$seen"}]}),
+                vec!["e4b"],
+            ),
+            (
+                json!({"operator": "NOT", "conditions": []}),
+                vec!["e1", "e2", "e3b", "e4b"],
+            ),
+        ] {
+            let query = EmailQuery {
+                filter: filter.clone(),
+                limit: 500,
+            };
+            let (got, total) = store.query_ids(&query).unwrap();
+            assert_eq!(got, ids, "{filter}");
+            assert_eq!(total, ids.len(), "{filter}");
+        }
+    }
+
+    #[test]
     fn a_query_outside_the_subset_is_unsupported() {
         let store = inbox(1, 1);
         for filter in [
             json!({"hasKeyword": "$seen"}),
             json!({"operator": "OR", "conditions": []}),
-            json!({"operator": "NOT", "conditions": [{"inMailbox": "mb-inbox"}]}),
             json!({"operator": "AND"}),
+            json!({"operator": "NOT"}),
+            json!({"operator": "NOT", "conditions": [{"hasKeyword": "$seen"}]}),
+            json!({"allInThreadHaveKeyword": true}),
+            json!({"someInThreadHaveKeyword": "$seen"}),
             json!({"operator": "AND", "conditions": [{"hasKeyword": "$seen"}]}),
             json!({"notKeyword": true}),
             json!({"inMailbox": 1}),

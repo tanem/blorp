@@ -1,5 +1,6 @@
 //! `u` toggles unread only, under which the queue holds only the unread
-//! threads of the mailbox shown.
+//! threads of the mailbox shown: those with an email in it and an unread
+//! email in any mailbox.
 
 use blorp::app::{Effect, Msg, QUEUE_LIMIT};
 use blorp::harness::Harness;
@@ -67,7 +68,7 @@ fn unread_query(mailbox: &str) -> EmailQuery {
     EmailQuery {
         filter: json!({"operator": "AND", "conditions": [
             {"inMailbox": mailbox},
-            {"notKeyword": "$seen"},
+            {"operator": "NOT", "conditions": [{"allInThreadHaveKeyword": "$seen"}]},
         ]}),
         limit: QUEUE_LIMIT,
     }
@@ -96,9 +97,52 @@ fn u_reloads_the_queue_with_only_the_unread_threads() {
 
     assert_eq!(h.resolve(effects), []);
     assert!(h.app.unread_only());
-    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
-    assert_eq!(h.app.total(), 2);
+    assert_eq!(h.subjects(), ["Lunch", "Trip", "Invoice"]);
+    assert_eq!(h.app.total(), 3);
     assert_eq!(h.app.queue_path(), "Inbox");
+}
+
+#[test]
+fn a_thread_read_in_the_mailbox_shown_and_unread_in_another_is_held_with_its_dot() {
+    let mut h = Harness::loaded(store());
+
+    let effects = h.keys("u");
+    h.resolve(effects);
+
+    assert_eq!(h.subjects()[1], "Trip");
+    assert!(h.app.queue().rows()[1].unread());
+}
+
+#[test]
+fn a_thread_whose_emails_are_all_read_is_not_held() {
+    let store = Store::builder()
+        .role_mailbox("mb-inbox", "Inbox", "inbox")
+        .role_mailbox("mb-archive", "Archive", "archive")
+        .email(
+            EmailSpec::new("e1", "t1", "2026-10-18T11:00:00Z")
+                .in_mailbox("mb-inbox")
+                .subject("Lunch"),
+        )
+        .email(
+            EmailSpec::new("e2a", "t2", "2026-10-18T10:00:00Z")
+                .in_mailbox("mb-inbox")
+                .seen()
+                .subject("Trip"),
+        )
+        .email(
+            EmailSpec::new("e2b", "t2", "2026-10-18T10:30:00Z")
+                .in_mailbox("mb-archive")
+                .seen()
+                .subject("Re: Trip"),
+        )
+        .build();
+    let mut h = Harness::loaded(store);
+
+    let effects = h.keys("u");
+    h.resolve(effects);
+
+    assert_eq!(h.subjects(), ["Lunch"]);
+    assert_eq!(h.app.total(), 1);
 }
 
 #[test]
@@ -150,8 +194,8 @@ fn the_cursor_stays_on_its_thread_when_that_is_still_in_the_queue() {
 
     let effects = h.keys("u");
     h.resolve(effects);
-    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
-    assert_eq!(h.cursor(), 1);
+    assert_eq!(h.subjects(), ["Lunch", "Trip", "Invoice"]);
+    assert_eq!(h.cursor(), 2);
 
     let effects = h.keys("u");
     h.resolve(effects);
@@ -302,9 +346,9 @@ fn reconciles_use_the_setting() {
     );
     assert_eq!(h.resolve(effects), []);
 
-    assert_eq!(h.subjects(), ["Dinner", "Invoice"]);
-    assert_eq!(h.subjects()[h.cursor()], "Invoice");
-    assert_eq!(h.app.total(), 2);
+    assert_eq!(h.subjects(), ["Dinner", "Trip", "Invoice"]);
+    assert_eq!(h.subjects()[h.cursor()], "Trip");
+    assert_eq!(h.app.total(), 3);
 }
 
 #[test]
@@ -320,7 +364,7 @@ fn unread_only() -> Harness {
     let mut h = Harness::loaded(store());
     let effects = h.keys("u");
     h.resolve(effects);
-    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
+    assert_eq!(h.subjects(), ["Lunch", "Trip", "Invoice"]);
     h
 }
 
@@ -345,15 +389,39 @@ fn r_takes_the_row_out_at_once_and_the_cursor_keeps_its_row_number() {
             update: read(&["e1"]),
         }]
     );
-    assert_eq!(h.subjects(), ["Invoice"]);
+    assert_eq!(h.subjects(), ["Trip", "Invoice"]);
     assert_eq!(h.cursor(), 0);
-    assert_eq!(h.app.total(), 1);
+    assert_eq!(h.app.total(), 2);
     assert_eq!(h.status(), "Marked read");
 
     assert_eq!(h.resolve(effects), []);
     let effects = h.send(Msg::Wake);
     assert_eq!(h.resolve(effects), []);
-    assert_eq!(h.subjects(), ["Invoice"]);
+    assert_eq!(h.subjects(), ["Trip", "Invoice"]);
+}
+
+#[test]
+fn r_on_a_thread_whose_unread_email_is_in_another_mailbox_takes_the_row_out() {
+    let mut h = unread_only();
+    h.keys("j");
+
+    let effects = h.keys("r");
+
+    assert_eq!(
+        effects,
+        [Effect::SetEmails {
+            job: 1,
+            update: read(&["e2b"]),
+        }]
+    );
+    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
+    assert_eq!(h.cursor(), 1);
+    assert_eq!(h.app.total(), 2);
+
+    assert_eq!(h.resolve(effects), []);
+    let effects = h.send(Msg::Wake);
+    assert_eq!(h.resolve(effects), []);
+    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
 }
 
 fn reconcile_unread(generation: u64) -> Effect {
@@ -367,12 +435,12 @@ fn reconcile_unread(generation: u64) -> Effect {
 #[test]
 fn r_on_the_last_row_leaves_the_cursor_on_the_new_last_row() {
     let mut h = unread_only();
-    h.keys("j");
+    h.keys("jj");
 
     h.keys("r");
 
-    assert_eq!(h.subjects(), ["Lunch"]);
-    assert_eq!(h.cursor(), 0);
+    assert_eq!(h.subjects(), ["Lunch", "Trip"]);
+    assert_eq!(h.cursor(), 1);
 }
 
 #[test]
@@ -385,9 +453,9 @@ fn a_failed_mark_puts_the_row_back_and_reconciles() {
         result: Err(Error::Status(400)),
     });
 
-    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
+    assert_eq!(h.subjects(), ["Lunch", "Trip", "Invoice"]);
     assert!(h.app.queue().rows()[0].unread());
-    assert_eq!(h.app.total(), 2);
+    assert_eq!(h.app.total(), 3);
     assert_eq!(h.status(), "Could not mark read: Fastmail error: HTTP 400");
     assert_eq!(effects, [reconcile_unread(3)]);
 }
@@ -404,14 +472,14 @@ fn not_updated_puts_the_row_back() {
         }),
     });
 
-    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
+    assert_eq!(h.subjects(), ["Lunch", "Trip", "Invoice"]);
 }
 
 #[test]
 fn a_transient_failure_puts_back_every_row_the_outbox_took_out() {
     let mut h = unread_only();
     h.keys("rr");
-    assert_eq!(h.subjects(), Vec::<String>::new());
+    assert_eq!(h.subjects(), ["Invoice"]);
 
     let effects = h.send(Msg::Sent {
         job: 1,
@@ -419,8 +487,8 @@ fn a_transient_failure_puts_back_every_row_the_outbox_took_out() {
     });
 
     assert_eq!(effects, [Effect::DropJobs { through: 2 }]);
-    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
-    assert_eq!(h.app.total(), 2);
+    assert_eq!(h.subjects(), ["Lunch", "Trip", "Invoice"]);
+    assert_eq!(h.app.total(), 3);
     assert_eq!(
         h.status(),
         "Disconnected from Fastmail; could not mark 2 threads read"
@@ -447,18 +515,18 @@ fn a_reload_under_the_setting_leaves_out_a_thread_a_mark_in_flight_reads() {
         result,
     });
 
-    assert_eq!(h.subjects(), ["Invoice"]);
-    assert_eq!(h.app.total(), 1);
+    assert_eq!(h.subjects(), ["Trip", "Invoice"]);
+    assert_eq!(h.app.total(), 2);
 
     let effects = h.send(Msg::Sent {
         job: 1,
         result: Err(Error::Status(400)),
     });
-    assert_eq!(h.subjects(), ["Invoice"]);
+    assert_eq!(h.subjects(), ["Trip", "Invoice"]);
     assert_eq!(h.resolve(effects), []);
     assert_eq!(
         h.subjects(),
-        ["Lunch", "Invoice"],
+        ["Lunch", "Trip", "Invoice"],
         "the reconcile brings it back"
     );
 }
@@ -520,12 +588,12 @@ fn a_failed_archive_of_a_read_thread_stays_out_once_the_setting_is_on() {
         result: Err(Error::Status(400)),
     });
 
-    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
-    assert_eq!(h.app.total(), 2);
+    assert_eq!(h.subjects(), ["Lunch", "Trip", "Invoice"]);
+    assert_eq!(h.app.total(), 3);
 }
 
 #[test]
-fn a_failed_archive_of_a_thread_unread_only_in_another_mailbox_stays_out() {
+fn a_failed_archive_of_a_thread_whose_unread_email_is_in_another_mailbox_is_put_back() {
     let mut h = Harness::loaded(store());
     h.keys("je");
     assert_eq!(h.subjects(), ["Lunch", "Invoice", "Order"]);
@@ -549,8 +617,9 @@ fn a_failed_archive_of_a_thread_unread_only_in_another_mailbox_stays_out() {
         result: Err(Error::Status(400)),
     });
 
-    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
-    assert_eq!(h.app.total(), 2);
+    assert_eq!(h.subjects(), ["Lunch", "Trip", "Invoice"]);
+    assert!(h.app.queue().rows()[1].unread());
+    assert_eq!(h.app.total(), 3);
 }
 
 #[test]
@@ -571,14 +640,14 @@ fn a_transient_failure_puts_back_a_thread_marked_read_then_archived() {
         generation: *generation,
         result,
     });
-    assert_eq!(h.subjects(), ["Invoice"]);
+    assert_eq!(h.subjects(), ["Trip", "Invoice"]);
 
     h.send(Msg::Sent {
         job: 1,
         result: Err(Error::Transport("connection reset".into())),
     });
 
-    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
+    assert_eq!(h.subjects(), ["Lunch", "Trip", "Invoice"]);
     assert!(h.app.queue().rows()[0].unread());
-    assert_eq!(h.app.total(), 2);
+    assert_eq!(h.app.total(), 3);
 }
