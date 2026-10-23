@@ -328,16 +328,14 @@ fn a_switch_with_m_clears_the_search() {
     let mut h = Harness::loaded(store());
     search(&mut h, "acme");
 
-    h.keys("mtravel");
-    let effects = h.press(KeyCode::Enter);
+    let effects = h.switch_to("travel");
     assert_eq!(h.app.search(), "acme", "until the switch lands");
     h.resolve(effects);
 
     assert_eq!(h.app.search(), "");
     assert_eq!(h.subjects(), ["Flight"]);
 
-    h.keys("minbox");
-    let effects = h.press(KeyCode::Enter);
+    let effects = h.switch_to("inbox");
     h.resolve(effects);
     assert_eq!(
         h.subjects(),
@@ -348,8 +346,7 @@ fn a_switch_with_m_clears_the_search() {
 #[test]
 fn a_switch_landing_while_the_prompt_is_open_closes_it() {
     let mut h = Harness::loaded(store());
-    h.keys("mtravel");
-    let effects = h.press(KeyCode::Enter);
+    let effects = h.switch_to("travel");
     h.keys("/acme");
 
     h.resolve(effects);
@@ -452,8 +449,7 @@ fn a_switch_with_m_to_the_mailbox_shown_clears_the_search() {
     let mut h = Harness::loaded(store());
     search(&mut h, "acme");
 
-    h.keys("minbox");
-    let effects = h.press(KeyCode::Enter);
+    let effects = h.switch_to("inbox");
     h.resolve(effects);
 
     assert_eq!(h.app.search(), "");
@@ -467,8 +463,7 @@ fn a_switch_with_m_to_the_mailbox_shown_clears_the_search() {
 fn u_after_a_switch_before_it_lands_still_clears_the_search() {
     let mut h = Harness::loaded(store());
     search(&mut h, "acme");
-    h.keys("minbox");
-    h.press(KeyCode::Enter);
+    h.switch_to("inbox");
 
     let effects = h.keys("u");
     h.resolve(effects);
@@ -482,8 +477,7 @@ fn u_after_a_switch_before_it_lands_still_clears_the_search() {
 fn a_failed_switch_leaves_the_search_as_it_was() {
     let mut h = Harness::loaded(store());
     search(&mut h, "acme");
-    h.keys("mtravel");
-    let generation = match h.press(KeyCode::Enter)[..] {
+    let generation = match h.switch_to("travel")[..] {
         [Effect::Query { generation, .. }] => generation,
         ref other => panic!("{other:?}"),
     };

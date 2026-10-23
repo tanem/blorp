@@ -8,7 +8,8 @@ use crate::jmap::{
     Class, EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, Mailbox, QueryResult, Reconciled,
     SetResult,
 };
-use crate::mail::{self, Mailboxes, Thread};
+use crate::mail::{self, Listed, Mailboxes, Thread};
+use crate::prompt::{Prompt, PromptKey};
 use crate::queue::Queue;
 
 /// The most threads the queue holds: the newest this many of the mailbox
@@ -52,8 +53,9 @@ pub struct App {
     loading_outbox: OutboxAt,
     /// The mailbox list, while it is open.
     mailbox_list: Option<MailboxList>,
-    /// The search as it was before `/`, while the search prompt is open.
-    search_before: Option<String>,
+    /// Whether the mailbox list shows only the mailboxes holding an unread
+    /// thread.
+    unread_mailboxes_only: bool,
     total: usize,
     generation: u64,
     loading: bool,
@@ -136,46 +138,76 @@ impl Action {
     }
 }
 
-/// The open mailbox list: the text typed to filter the mailboxes, and the
-/// highlighted match.
+/// The open mailbox list: the text that narrows it, and the id of the
+/// highlighted mailbox, none when no mailbox is listed.
 #[derive(Debug, Clone)]
 struct MailboxList {
-    typed: String,
-    index: usize,
+    narrowing: Prompt,
+    highlight: Option<String>,
+}
+
+impl MailboxList {
+    /// The mailboxes of `mailboxes` the list lists.
+    fn listed(&self, mailboxes: &Mailboxes, unread_mailboxes_only: bool) -> Vec<Listed> {
+        mailboxes.matching(self.narrowing.text(), unread_mailboxes_only)
+    }
+
+    /// The row of the highlighted mailbox in `listed`, if it is listed.
+    fn highlight_row(&self, listed: &[Listed]) -> Option<usize> {
+        let id = self.highlight.as_ref()?;
+        listed.iter().position(|m| &m.id == id)
+    }
+
+    /// Keeps the highlight on its mailbox while that is in `listed`, and
+    /// otherwise moves it to the first row.
+    fn rehighlight(&mut self, listed: &[Listed]) {
+        let row = self.highlight_row(listed).unwrap_or(0);
+        self.highlight = listed.get(row).map(|m| m.id.clone());
+    }
 }
 
 /// What the open mailbox list shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MailboxChoices {
-    /// The text typed to filter the mailboxes.
-    pub typed: String,
-    /// The path of each mailbox whose path holds the typed text, the Inbox
+    /// The mailboxes listed: those whose path holds the text, and under
+    /// unread mailboxes only those holding an unread thread, the Inbox
     /// first and the rest in path order.
-    pub paths: Vec<String>,
-    /// The highlighted path, when any matches.
-    pub index: usize,
+    pub rows: Vec<MailboxRow>,
+    /// The highlighted row; 0 when no mailbox is listed.
+    pub highlight: usize,
+    /// Whether unread mailboxes only is on.
+    pub unread_mailboxes_only: bool,
+    /// The text that narrows the list; empty when none is set.
+    pub text: String,
+    /// Whether the prompt is open.
+    pub typing: bool,
+}
+
+/// A row of the mailbox list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailboxRow {
+    pub path: String,
+    /// The mailbox's unread thread count as Fastmail last reported it.
+    pub unread: usize,
 }
 
 /// A key at the mailbox list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListKey {
+    /// `j`: move the highlight down a row.
     Down,
+    /// `k`: move the highlight up a row.
     Up,
+    /// `u`: turn unread mailboxes only on or off.
+    UnreadOnly,
+    /// `/`: open the prompt.
+    Narrow,
+    /// Enter: switch to the highlighted mailbox.
     Choose,
-    Cancel,
-    Char(char),
-    Backspace,
-}
-
-/// A key at the search prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchKey {
-    Char(char),
-    Backspace,
-    /// Enter: lock the search in.
-    Accept,
-    /// Esc: put the search back as it was before `/`.
-    Cancel,
+    /// Esc: clear the text, or with none close the list.
+    Back,
+    /// A key at the prompt.
+    Prompt(PromptKey),
 }
 
 /// What a switch or a toggle of unread only loads: the mailbox to show,
@@ -235,7 +267,7 @@ pub enum Msg {
     /// `/`: open the search prompt.
     Search,
     /// A key at the search prompt.
-    SearchKey(SearchKey),
+    SearchKey(PromptKey),
     /// `Esc`: clear the search.
     ClearSearch,
     /// An action's `Email/set` result.
@@ -334,7 +366,7 @@ impl App {
             reloading: None,
             loading_outbox: OutboxAt::default(),
             mailbox_list: None,
-            search_before: None,
+            unread_mailboxes_only: false,
             total: 0,
             generation: 0,
             loading: false,
@@ -402,115 +434,95 @@ impl App {
     /// The mailbox list, while it is open.
     pub fn mailbox_list(&self) -> Option<MailboxChoices> {
         let list = self.mailbox_list.as_ref()?;
+        let listed = list.listed(&self.mailboxes, self.unread_mailboxes_only);
         Some(MailboxChoices {
-            typed: list.typed.clone(),
-            paths: self
-                .mailboxes
-                .matching(&list.typed)
+            highlight: list.highlight_row(&listed).unwrap_or(0),
+            rows: listed
                 .into_iter()
-                .map(|m| m.path)
+                .map(|m| MailboxRow {
+                    path: m.path,
+                    unread: m.unread,
+                })
                 .collect(),
-            index: list.index,
+            unread_mailboxes_only: self.unread_mailboxes_only,
+            text: list.narrowing.text().to_string(),
+            typing: list.narrowing.typing().is_some(),
         })
     }
 
-    /// Opens the mailbox list with every mailbox, the one shown highlighted.
+    /// Opens the mailbox list with no text, the mailbox shown highlighted.
     fn open_mailbox_list(&mut self) {
-        let index = self
-            .mailboxes
-            .matching("")
-            .iter()
-            .position(|m| Some(&m.id) == self.shown.as_ref())
-            .unwrap_or(0);
         self.mailbox_list = Some(MailboxList {
-            typed: String::new(),
-            index,
+            narrowing: Prompt::default(),
+            highlight: self.shown.clone(),
         });
+        self.rehighlight();
     }
 
-    /// Handles a key at the mailbox list: a character or Backspace changes
-    /// the text the mailboxes are filtered by, highlighting the first
-    /// match, Down and Up move the highlight and stop at the ends, Enter
-    /// switches to the highlighted mailbox, and Esc closes the list.
+    /// Keeps the mailbox list's highlight on its mailbox while that is
+    /// listed, and otherwise moves it to the first row.
+    fn rehighlight(&mut self) {
+        if let Some(list) = &mut self.mailbox_list {
+            let listed = list.listed(&self.mailboxes, self.unread_mailboxes_only);
+            list.rehighlight(&listed);
+        }
+    }
+
+    /// Handles a key at the mailbox list: `j` and `k` move the highlight
+    /// and stop at the ends, `u` turns unread mailboxes only on or off,
+    /// `/` and the keys at its prompt narrow the list as they do the queue,
+    /// Enter switches to the highlighted mailbox, and Esc clears the text,
+    /// or with none closes the list.
     fn mailbox_list_key(&mut self, key: ListKey) -> Vec<Effect> {
         let Some(list) = &mut self.mailbox_list else {
             return Vec::new();
         };
-        let matches = self.mailboxes.matching(&list.typed);
+        let listed = list.listed(&self.mailboxes, self.unread_mailboxes_only);
         match key {
-            ListKey::Char(c) => {
-                list.typed.push(c);
-                list.index = 0;
+            ListKey::Down | ListKey::Up => {
+                let row = list.highlight_row(&listed).map_or(0, |row| match key {
+                    ListKey::Down => (row + 1).min(listed.len() - 1),
+                    _ => row.saturating_sub(1),
+                });
+                list.highlight = listed.get(row).map(|m| m.id.clone());
             }
-            ListKey::Backspace => {
-                list.typed.pop();
-                list.index = 0;
+            ListKey::UnreadOnly => self.unread_mailboxes_only = !self.unread_mailboxes_only,
+            ListKey::Narrow => list.narrowing.open(),
+            ListKey::Prompt(key) => list.narrowing.key(key),
+            ListKey::Back => {
+                if !list.narrowing.clear() {
+                    self.mailbox_list = None;
+                }
             }
-            ListKey::Down => list.index = (list.index + 1).min(matches.len().saturating_sub(1)),
-            ListKey::Up => list.index = list.index.saturating_sub(1),
-            ListKey::Cancel => self.mailbox_list = None,
             ListKey::Choose => {
-                let Some(chosen) = matches.into_iter().nth(list.index) else {
+                let Some(chosen) = list.highlight.clone() else {
                     return Vec::new();
                 };
                 self.mailbox_list = None;
                 let unread_only = self.to_show().map_or(self.unread_only, |r| r.unread_only);
                 return self.reload(Reload {
-                    mailbox: chosen.id,
+                    mailbox: chosen,
                     unread_only,
                     switch: true,
                 });
             }
         }
+        self.rehighlight();
         Vec::new()
     }
 
-    /// The search text while the search prompt is open.
+    /// The text while the prompt of the page shown is open: the mailbox
+    /// list's while it is open, and otherwise the queue's search.
     pub fn prompt(&self) -> Option<&str> {
-        self.search_before.as_ref().map(|_| self.queue.search())
+        match &self.mailbox_list {
+            Some(list) => list.narrowing.typing(),
+            None => self.queue.prompt(),
+        }
     }
 
     /// The search, as typed; empty when none is set.
     pub fn search(&self) -> &str {
         self.queue.search()
-    }
-
-    /// Opens the search prompt, pre-filled with the current search.
-    fn open_prompt(&mut self) {
-        self.search_before = Some(self.queue.search().to_string());
-    }
-
-    /// Handles a key at the search prompt: a character or Backspace
-    /// changes the search, narrowing the queue at once, Enter closes the
-    /// prompt with the search as typed, and Esc closes it with the search
-    /// as it was before `/`.
-    fn search_key(&mut self, key: SearchKey) {
-        let Some(before) = &self.search_before else {
-            return;
-        };
-        let mut search = self.queue.search().to_string();
-        match key {
-            SearchKey::Char(c) => search.push(c),
-            SearchKey::Backspace => {
-                search.pop();
-            }
-            SearchKey::Accept => {
-                self.search_before = None;
-                return;
-            }
-            SearchKey::Cancel => {
-                search = before.clone();
-                self.search_before = None;
-            }
-        }
-        self.queue.set_search(search);
-    }
-
-    /// Clears the search.
-    fn clear_search(&mut self) {
-        if !self.queue.search().is_empty() {
-            self.queue.set_search(String::new());
-        }
     }
 
     /// What the queue is to show once the queue query in flight lands:
@@ -728,8 +740,7 @@ impl App {
                         self.queue = Queue::default();
                     }
                     if reload.switch {
-                        self.queue.set_search(String::new());
-                        self.search_before = None;
+                        self.queue.reset_search();
                     }
                     self.shown = Some(reload.mailbox.clone());
                     self.unread_only = reload.unread_only;
@@ -1086,20 +1097,10 @@ impl App {
         self.reconcile()
     }
 
-    /// Keeps the mailbox list's highlight on a match after the mailboxes
-    /// change.
-    fn clamp_mailbox_list(&mut self) {
-        if let Some(list) = &mut self.mailbox_list {
-            let last = self.mailboxes.matching(&list.typed).len().saturating_sub(1);
-            list.index = list.index.min(last);
-        }
-    }
-
     /// Goes back to the Inbox after a reconcile finds the mailbox shown was
     /// deleted, saying so, and loads it.
     fn shown_deleted(&mut self) -> Vec<Effect> {
         self.queue = Queue::default();
-        self.search_before = None;
         self.total = 0;
         self.status = "Mailbox no longer exists".into();
         self.shown = None;
@@ -1134,7 +1135,7 @@ impl App {
             Ok(_) if reconciling.job != self.job => self.pending_reconcile = true,
             Ok(reconciled) => {
                 self.mailboxes = Mailboxes::from(reconciled.mailboxes);
-                self.clamp_mailbox_list();
+                self.rehighlight();
                 if self.shown_mailbox().is_none() {
                     return self.shown_deleted();
                 }
@@ -1191,15 +1192,15 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::MarkRead => app.mark_read(),
         Msg::UnreadOnly => app.toggle_unread_only(),
         Msg::Search => {
-            app.open_prompt();
+            app.queue.open_search();
             Vec::new()
         }
         Msg::SearchKey(key) => {
-            app.search_key(key);
+            app.queue.search_key(key);
             Vec::new()
         }
         Msg::ClearSearch => {
-            app.clear_search();
+            app.queue.clear_search();
             Vec::new()
         }
         Msg::Sent { job, result } => app.sent(job, result),

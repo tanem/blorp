@@ -41,7 +41,7 @@ impl Default for Timeouts {
     }
 }
 
-const MAILBOX_PROPERTIES: [&str; 4] = ["id", "name", "parentId", "role"];
+const MAILBOX_PROPERTIES: [&str; 5] = ["id", "name", "parentId", "role", "unreadThreads"];
 const EMAIL_PROPERTIES: [&str; 7] = [
     "id",
     "threadId",

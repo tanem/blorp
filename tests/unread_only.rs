@@ -5,7 +5,6 @@ use blorp::app::{Effect, Msg, QUEUE_LIMIT};
 use blorp::harness::Harness;
 use blorp::jmap::fake::{EmailSpec, Store};
 use blorp::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, SetResult};
-use crossterm::event::KeyCode;
 use serde_json::{Value, json};
 
 /// Newest first, the Inbox holds Lunch (unread), Trip (read in the Inbox,
@@ -176,9 +175,7 @@ fn the_setting_stays_on_across_a_switch() {
     let mut h = Harness::loaded(store());
     let effects = h.keys("u");
     h.resolve(effects);
-    h.keys("mtravel");
-
-    let effects = h.press(KeyCode::Enter);
+    let effects = h.switch_to("travel");
 
     assert_eq!(
         effects,
@@ -198,9 +195,7 @@ fn the_setting_stays_on_across_a_switch() {
 fn a_switch_typed_after_u_before_it_lands_keeps_the_setting_typed() {
     let mut h = Harness::loaded(store());
     h.keys("u");
-    h.keys("mtravel");
-
-    let effects = h.press(KeyCode::Enter);
+    let effects = h.switch_to("travel");
 
     assert_eq!(
         effects,

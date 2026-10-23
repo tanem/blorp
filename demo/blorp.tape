@@ -66,9 +66,15 @@ Sleep 2s
 Escape
 Sleep 1.5s
 Type "m"
-Sleep 1s
-Type "arch"
+Sleep 2s
+Type "u"
+Sleep 2s
+Type "/"
 Sleep 700ms
+Type "rep"
+Sleep 1s
+Enter
+Sleep 1.5s
 Enter
 Sleep 2s
 Type "q"

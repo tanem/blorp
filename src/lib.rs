@@ -18,6 +18,7 @@ pub mod keymap;
 pub mod log;
 pub mod mail;
 pub mod private_file;
+pub mod prompt;
 pub mod queue;
 pub mod run;
 pub mod sync;

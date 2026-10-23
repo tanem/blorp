@@ -5,7 +5,6 @@ use blorp::app::{Effect, Msg};
 use blorp::harness::Harness;
 use blorp::jmap::fake::{EmailSpec, Store};
 use blorp::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, SetResult};
-use crossterm::event::KeyCode;
 use serde_json::{Value, json};
 
 /// Thread t1 spreads over the Inbox, Travel, Sent, Trash, and Junk, with
@@ -283,8 +282,7 @@ fn a_reconcile_result_from_before_a_mark_was_sent_is_discarded() {
 fn a_switch_that_lands_while_a_mark_is_in_flight_shows_the_thread_read() {
     let mut h = Harness::loaded(store());
     assert_eq!(h.keys("r").len(), 1);
-    h.keys("mtravel");
-    let effects = h.press(KeyCode::Enter);
+    let effects = h.switch_to("travel");
     let [
         Effect::Query {
             generation, query, ..

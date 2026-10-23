@@ -5,7 +5,8 @@
 //! newest first, collapsing threads, `limit`, and `calculateTotal`. Every
 //! get is held to Fastmail's `maxObjectsInGet`, and the local test server
 //! holds every `Email/set` to its `maxObjectsInSet`. `Email/set` applies
-//! `mailboxIds/<id>` and `keywords/<keyword>` patches.
+//! `mailboxIds/<id>` and `keywords/<keyword>` patches. `Mailbox/get`
+//! counts each mailbox's `unreadThreads` by RFC 8621's recommended rule.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -222,8 +223,51 @@ impl Store {
         StoreBuilder::default()
     }
 
+    /// Every mailbox, with its unread thread count.
     pub fn mailboxes(&self) -> Vec<Mailbox> {
-        self.mailboxes.clone()
+        self.mailboxes
+            .iter()
+            .map(|m| Mailbox {
+                unread_threads: self.unread_threads(m),
+                ..m.clone()
+            })
+            .collect()
+    }
+
+    /// `unreadThreads` by RFC 8621's recommended rule: the threads with an
+    /// email in `mailbox` and an email without `$seen` or `$draft`. For
+    /// the Trash only its emails count, and for any other mailbox emails
+    /// only in the Trash do not count.
+    fn unread_threads(&self, mailbox: &Mailbox) -> usize {
+        let trash = self
+            .mailboxes
+            .iter()
+            .find(|m| m.role.as_deref() == Some("trash"))
+            .map(|m| &m.id);
+        let in_trash = |e: &Email| trash.is_some_and(|id| e.mailbox_ids.contains_key(id));
+        let counted: Vec<&Email> = self
+            .emails
+            .iter()
+            .filter(|e| {
+                if trash == Some(&mailbox.id) {
+                    in_trash(e)
+                } else {
+                    !(in_trash(e) && e.mailbox_ids.len() == 1)
+                }
+            })
+            .collect();
+        let in_mailbox: HashSet<&String> = counted
+            .iter()
+            .filter(|e| e.mailbox_ids.contains_key(&mailbox.id))
+            .map(|e| &e.thread_id)
+            .collect();
+        counted
+            .iter()
+            .filter(|e| !e.keywords.contains_key("$seen") && !e.keywords.contains_key("$draft"))
+            .map(|e| &e.thread_id)
+            .filter(|t| in_mailbox.contains(t))
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     /// Adds `email`, as a delivery or a filing rule would.
@@ -331,12 +375,12 @@ impl Store {
     }
 
     /// `Mailbox/get`: the mailboxes with `ids`, or every mailbox for `None`,
-    /// and the ids not found.
+    /// with their unread thread counts, and the ids not found.
     pub fn get_mailboxes(
         &self,
         ids: Option<&[String]>,
     ) -> Result<(Vec<Mailbox>, Vec<String>), Error> {
-        get_by_ids("Mailbox/get", &self.mailboxes, ids, |m| &m.id)
+        get_by_ids("Mailbox/get", &self.mailboxes(), ids, |m| &m.id)
     }
 
     /// `Email/get`: the emails with `ids`, and the ids not found.
@@ -506,6 +550,8 @@ impl StoreBuilder {
             name: name.into(),
             parent_id: None,
             role: role.map(Into::into),
+            // Counted from the emails on each `Mailbox/get`.
+            unread_threads: 0,
         });
         self
     }
@@ -567,6 +613,11 @@ impl EmailSpec {
 
     pub fn flagged(mut self) -> Self {
         self.email.keywords.insert("$flagged".into(), true);
+        self
+    }
+
+    pub fn draft(mut self) -> Self {
+        self.email.keywords.insert("$draft".into(), true);
         self
     }
 }
@@ -730,6 +781,75 @@ mod tests {
         assert_eq!(result.threads[0].email_ids, oldest_first);
         let emails: Vec<&str> = result.emails.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(emails, oldest_first);
+    }
+
+    #[test]
+    fn a_mailbox_counts_the_threads_with_an_email_in_it_and_an_unread_email_anywhere() {
+        let store = Store::builder()
+            .role_mailbox("mb-inbox", "Inbox", "inbox")
+            .role_mailbox("mb-archive", "Archive", "archive")
+            .role_mailbox("mb-drafts", "Drafts", "drafts")
+            .role_mailbox("mb-trash", "Trash", "trash")
+            .mailbox("mb-travel", "Travel")
+            // Unread in the Inbox.
+            .email(EmailSpec::new("e1", "t1", "2026-10-01T00:00:00Z").in_mailbox("mb-inbox"))
+            // Read in the Inbox, with its unread email in Archive.
+            .email(
+                EmailSpec::new("e2a", "t2", "2026-10-02T00:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .seen(),
+            )
+            .email(EmailSpec::new("e2b", "t2", "2026-10-02T01:00:00Z").in_mailbox("mb-archive"))
+            // Read in the Inbox.
+            .email(
+                EmailSpec::new("e3", "t3", "2026-10-03T00:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .seen(),
+            )
+            // Read in the Inbox, with an unseen draft.
+            .email(
+                EmailSpec::new("e4a", "t4", "2026-10-04T00:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .seen(),
+            )
+            .email(
+                EmailSpec::new("e4b", "t4", "2026-10-04T01:00:00Z")
+                    .in_mailbox("mb-drafts")
+                    .draft(),
+            )
+            // Read in the Inbox, with its unread email only in the Trash.
+            .email(
+                EmailSpec::new("e5a", "t5", "2026-10-05T00:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .seen(),
+            )
+            .email(EmailSpec::new("e5b", "t5", "2026-10-05T01:00:00Z").in_mailbox("mb-trash"))
+            // Unread in the Inbox, with a read email in the Trash.
+            .email(EmailSpec::new("e6a", "t6", "2026-10-06T00:00:00Z").in_mailbox("mb-inbox"))
+            .email(
+                EmailSpec::new("e6b", "t6", "2026-10-06T01:00:00Z")
+                    .in_mailbox("mb-trash")
+                    .seen(),
+            )
+            .build();
+
+        let (mailboxes, _) = store.get_mailboxes(None).unwrap();
+
+        let counts: Vec<(&str, usize)> = mailboxes
+            .iter()
+            .map(|m| (m.id.as_str(), m.unread_threads))
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                ("mb-inbox", 3),
+                ("mb-archive", 1),
+                ("mb-drafts", 0),
+                ("mb-trash", 1),
+                ("mb-travel", 0),
+            ]
+        );
+        assert_eq!(store.mailboxes(), mailboxes);
     }
 
     #[test]

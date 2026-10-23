@@ -5,7 +5,6 @@ use blorp::app::{Effect, Msg};
 use blorp::harness::Harness;
 use blorp::jmap::fake::{EmailSpec, Store};
 use blorp::jmap::{EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, SetResult};
-use crossterm::event::KeyCode;
 use serde_json::{Value, json};
 
 /// Thread t1 spreads over the Inbox, Travel, Sent, and Trash, with one
@@ -510,9 +509,7 @@ fn mailboxes() -> Store {
 
 /// Switches to the only mailbox whose path holds `typed`.
 fn switch(h: &mut Harness, typed: &str) {
-    h.keys("m");
-    h.keys(typed);
-    let effects = h.press(KeyCode::Enter);
+    let effects = h.switch_to(typed);
     assert_eq!(h.resolve(effects), []);
 }
 
@@ -623,8 +620,7 @@ fn a_failed_archive_from_a_mailbox_no_longer_shown_puts_no_row_back() {
 fn a_switch_that_lands_while_an_archive_from_its_mailbox_is_in_flight_leaves_the_row_out() {
     let mut h = Harness::loaded(store());
     assert_eq!(h.keys("e").len(), 1);
-    h.keys("minbox");
-    let effects = h.press(KeyCode::Enter);
+    let effects = h.switch_to("inbox");
     let [
         Effect::Query {
             generation, query, ..
@@ -654,8 +650,7 @@ fn a_switch_that_lands_while_an_archive_from_its_mailbox_is_in_flight_leaves_the
 fn a_switch_whose_result_predates_a_confirmed_archive_reconciles_once_it_lands() {
     let mut h = Harness::loaded(store());
     let archive = h.keys("e");
-    h.keys("minbox");
-    let effects = h.press(KeyCode::Enter);
+    let effects = h.switch_to("inbox");
     let [
         Effect::Query {
             generation, query, ..

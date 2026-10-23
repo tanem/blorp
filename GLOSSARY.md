@@ -13,8 +13,12 @@ The mailbox whose threads the queue holds: the Inbox at launch, and after that t
 _Avoid_: Current folder, view
 
 **Mailbox list**:
-The list `m` opens over the queue: every mailbox by path, filtered by the text typed, for switching the mailbox shown.
+The page `m` opens in place of the queue: every mailbox by path with its count of unread threads, narrowed by the text typed after `/`, for switching the mailbox shown.
 _Avoid_: Picker, folder list, menu
+
+**Unread mailboxes only**:
+A setting of the mailbox list, off at launch and toggled with `u` there, under which it shows only the mailboxes Fastmail counts as holding an unread thread: a thread with an email in the mailbox and an unread email in any mailbox, with the Trash counted apart. It stays on across openings of the mailbox list and switches of the mailbox shown, and does not change what the queue holds.
+_Avoid_: Unread only (for the mailbox list), filter, unread folders
 
 **Thread**:
 A conversation as Fastmail groups it: one row of the queue.

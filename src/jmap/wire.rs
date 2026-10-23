@@ -152,6 +152,8 @@ pub struct Mailbox {
     #[serde(default)]
     pub parent_id: Option<String>,
     pub role: Option<String>,
+    /// How many threads Fastmail counts as unread in the mailbox.
+    pub unread_threads: usize,
 }
 
 /// A thread: its id and its emails' ids, oldest first.
@@ -338,11 +340,11 @@ mod tests {
     }
 
     #[test]
-    fn mailbox_reads_its_parent_and_role() {
+    fn mailbox_reads_its_parent_role_and_unread_threads() {
         let mailboxes: Vec<Mailbox> = serde_json::from_str(
             r#"[
-                {"id": "mb1", "name": "Inbox", "parentId": null, "role": "inbox", "sortOrder": 1},
-                {"id": "mb2", "name": "Receipts", "parentId": "mb3", "role": null, "sortOrder": 10}
+                {"id": "mb1", "name": "Inbox", "parentId": null, "role": "inbox", "unreadThreads": 4, "sortOrder": 1},
+                {"id": "mb2", "name": "Receipts", "parentId": "mb3", "role": null, "unreadThreads": 0, "sortOrder": 10}
             ]"#,
         )
         .unwrap();
@@ -355,12 +357,14 @@ mod tests {
                     name: "Inbox".into(),
                     parent_id: None,
                     role: Some("inbox".into()),
+                    unread_threads: 4,
                 },
                 Mailbox {
                     id: "mb2".into(),
                     name: "Receipts".into(),
                     parent_id: Some("mb3".into()),
                     role: None,
+                    unread_threads: 0,
                 },
             ]
         );

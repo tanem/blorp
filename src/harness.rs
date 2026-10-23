@@ -84,6 +84,16 @@ impl Harness {
         effects
     }
 
+    /// Switches with the mailbox list: opens it, narrows it to `text`, and
+    /// presses Enter twice, once to lock the text in and once to switch to
+    /// the highlighted mailbox, returning the switch's effects unanswered.
+    pub fn switch_to(&mut self, text: &str) -> Vec<Effect> {
+        self.keys("m/");
+        self.keys(text);
+        self.press(KeyCode::Enter);
+        self.press(KeyCode::Enter)
+    }
+
     /// Presses a key with no modifier, such as Enter.
     pub fn press(&mut self, code: KeyCode) -> Vec<Effect> {
         self.key(KeyEvent::new(code, KeyModifiers::NONE))

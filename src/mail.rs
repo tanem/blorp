@@ -47,21 +47,24 @@ impl Mailboxes {
         names.join("/")
     }
 
-    /// Each mailbox whose path holds `typed`, ignoring case, the Inbox
-    /// first and the rest in path order.
-    pub fn matching(&self, typed: &str) -> Vec<Listed> {
-        let typed = typed.to_lowercase();
+    /// Each mailbox whose path holds `text`, ignoring case, and with
+    /// `unread_mailboxes_only` that holds an unread thread, the Inbox first
+    /// and the rest in path order.
+    pub fn matching(&self, text: &str, unread_mailboxes_only: bool) -> Vec<Listed> {
+        let text = text.to_lowercase();
         let mut listed: Vec<(bool, Listed)> = self
             .0
             .iter()
+            .filter(|m| !unread_mailboxes_only || m.unread_threads > 0)
             .map(|m| {
                 let listed = Listed {
                     path: self.path(m),
                     id: m.id.clone(),
+                    unread: m.unread_threads,
                 };
                 (m.role.as_deref() != Some("inbox"), listed)
             })
-            .filter(|(_, m)| m.path.to_lowercase().contains(&typed))
+            .filter(|(_, m)| m.path.to_lowercase().contains(&text))
             .collect();
         listed.sort();
         listed.into_iter().map(|(_, m)| m).collect()
@@ -87,12 +90,13 @@ impl Mailboxes {
     }
 }
 
-/// A mailbox as the mailbox list shows it: its path, and the id a switch
-/// loads.
+/// A mailbox as the mailbox list shows it: its path, the id a switch
+/// loads, and its unread thread count as Fastmail last reported it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Listed {
     pub path: String,
     pub id: String,
+    pub unread: usize,
 }
 
 impl From<Vec<jmap::Mailbox>> for Mailboxes {
