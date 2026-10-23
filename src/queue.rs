@@ -56,6 +56,14 @@ impl Queue {
         self.threads.insert(index, thread);
     }
 
+    /// Sets whether each email with an id in `ids` is seen, in whichever
+    /// row it is.
+    pub fn set_seen(&mut self, ids: &[String], seen: bool) {
+        for thread in &mut self.threads {
+            thread.set_seen(ids, seen);
+        }
+    }
+
     /// The thread under the cursor.
     pub fn current(&self) -> Option<&Thread> {
         self.threads.get(self.cursor)

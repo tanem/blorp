@@ -407,6 +407,14 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_marked_read_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("r");
+
+        insta::assert_snapshot!(render(&h, 80, 24));
+    }
+
+    #[test]
     fn loaded_queue_120x40() {
         let mut h = Harness::loaded(busy_inbox());
         h.keys("jj");
@@ -588,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn only_j_k_e_o_m_q_and_ctrl_c_send_a_message() {
+    fn only_j_k_e_r_o_m_q_and_ctrl_c_send_a_message() {
         let h = Harness::loaded(empty_inbox());
         let press = |code, modifiers| key_msg(&h.app, KeyEvent::new(code, modifiers));
 
@@ -603,6 +611,10 @@ mod tests {
         assert!(matches!(
             press(KeyCode::Char('e'), KeyModifiers::NONE),
             Some(Msg::Archive)
+        ));
+        assert!(matches!(
+            press(KeyCode::Char('r'), KeyModifiers::NONE),
+            Some(Msg::MarkRead)
         ));
         assert!(matches!(
             press(KeyCode::Char('o'), KeyModifiers::NONE),
@@ -620,7 +632,7 @@ mod tests {
             press(KeyCode::Char('c'), KeyModifiers::CONTROL),
             Some(Msg::Quit)
         ));
-        for c in "gGEd!Mzfrux XV./tR:D?0123456789Jc".chars() {
+        for c in "gGEd!Mzfux XV./tR:D?0123456789Jc".chars() {
             assert!(press(KeyCode::Char(c), KeyModifiers::NONE).is_none(), "{c}");
         }
         for code in [

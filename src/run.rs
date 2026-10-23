@@ -192,11 +192,11 @@ where
     }
 }
 
-/// Starts the outbox task: it sends each archive's `Email/set` once the one
+/// Starts the outbox task: it sends each action's `Email/set` once the one
 /// before it has been answered, retrying a transient failure on the usual
 /// schedule, reports it back as [`Msg::Sent`], and stops when the sender
-/// is dropped. After an archive fails transiently despite its retries it
-/// sends nothing more until `dropped` reaches that archive's job number,
+/// is dropped. After an action fails transiently despite its retries it
+/// sends nothing more until `dropped` reaches that action's job number,
 /// and skips every job numbered up to `dropped`.
 fn outbox<J: Jmap>(
     jmap: J,
@@ -266,7 +266,7 @@ struct Executor<J> {
 impl<J: Jmap> Executor<J> {
     /// Sets the time, runs `update`, and carries out its effects. A queue
     /// query or reconcile runs in its own task and sends its result back;
-    /// an archive goes to the outbox.
+    /// an action goes to the outbox.
     fn dispatch(&self, app: &mut App, clock: &impl Clock, msg: Msg) -> ControlFlow<Exit> {
         app.now = clock.now();
         for effect in update(app, msg) {

@@ -50,6 +50,11 @@ pub const BINDINGS: &[Binding] = &[
         msg: || Msg::Archive,
     },
     Binding {
+        keys: &[Key::Char('r')],
+        help: "Mark read",
+        msg: || Msg::MarkRead,
+    },
+    Binding {
         keys: &[Key::Char('o')],
         help: "Open in Fastmail",
         msg: || Msg::Open,

@@ -5,7 +5,8 @@ use jiff::{SignedDuration, Timestamp};
 use serde_json::{Value, json};
 
 use crate::jmap::{
-    Class, EmailQuery, EmailUpdate, Error, Fatal, Mailbox, QueryResult, Reconciled, SetResult,
+    Class, EmailPatch, EmailQuery, EmailUpdate, Error, Fatal, Mailbox, QueryResult, Reconciled,
+    SetResult,
 };
 use crate::mail::{self, Mailboxes, Thread};
 use crate::queue::Queue;
@@ -60,7 +61,7 @@ pub struct App {
     read_only: bool,
     /// The last outbox job number given out.
     job: u64,
-    /// The archives typed and not yet answered, oldest first: the outbox.
+    /// The actions typed and not yet answered, oldest first: the outbox.
     in_flight: Vec<InFlight>,
     /// When the next reconcile tick is due.
     next_reconcile_at: Timestamp,
@@ -81,13 +82,32 @@ pub struct App {
     quitting: Option<Quitting>,
 }
 
-/// An archive in the outbox, the row it took out of the queue, to put
-/// back if it fails, and the id of the mailbox it was archived from.
+/// An action in the outbox.
 #[derive(Debug)]
 struct InFlight {
     job: u64,
-    thread: Thread,
-    from: String,
+    action: Action,
+}
+
+/// What an action in the outbox does, with what undoing it in the queue
+/// needs if it fails.
+#[derive(Debug)]
+enum Action {
+    /// An archive: the row it took out of the queue, to put back, and the
+    /// id of the mailbox it was archived from.
+    Archive { thread: Thread, from: String },
+    /// A mark read: the ids of the emails it marks, whose dot comes back.
+    Read { emails: Vec<String> },
+}
+
+impl Action {
+    /// What the action does, as in `Could not archive`.
+    fn verb(&self) -> &'static str {
+        match self {
+            Action::Archive { .. } => "archive",
+            Action::Read { .. } => "mark read",
+        }
+    }
 }
 
 /// The open mailbox list: the text typed to filter the mailboxes, and the
@@ -126,7 +146,7 @@ pub enum ListKey {
 struct OutboxAt {
     /// The last outbox job number given out.
     job: u64,
-    /// Whether an archive was in flight.
+    /// Whether an action was in flight.
     busy: bool,
 }
 
@@ -135,7 +155,7 @@ struct OutboxAt {
 struct Reconciling {
     generation: u64,
     /// The last outbox job number given out when it was sent. The outbox
-    /// was idle then, so a later number means an archive was sent
+    /// was idle then, so a later number means an action was sent
     /// meanwhile.
     job: u64,
 }
@@ -145,7 +165,7 @@ struct Reconciling {
 struct Quitting {
     /// When it stops waiting.
     at: Timestamp,
-    /// The archives that failed while it waited.
+    /// The actions that failed while it waited.
     failed: usize,
 }
 
@@ -161,7 +181,9 @@ pub enum Msg {
     Up,
     /// `e`: archive the thread under the cursor.
     Archive,
-    /// An archive's `Email/set` result.
+    /// `r`: mark the thread under the cursor read.
+    MarkRead,
+    /// An action's `Email/set` result.
     Sent {
         job: u64,
         result: Result<SetResult, Error>,
@@ -221,7 +243,7 @@ pub enum Effect {
         query: EmailQuery,
         retry: bool,
     },
-    /// Send an archive's `Email/set` through the outbox, after every job
+    /// Send an action's `Email/set` through the outbox, after every job
     /// before it, and report it back as [`Msg::Sent`].
     SetEmails {
         job: u64,
@@ -275,8 +297,8 @@ impl App {
         }
     }
 
-    /// Marks the account read-only, as the session says, so that `e` sends
-    /// nothing.
+    /// Marks the account read-only, as the session says, so that no
+    /// action is sent.
     pub fn set_read_only(&mut self, read_only: bool) {
         self.read_only = read_only;
     }
@@ -520,10 +542,11 @@ impl App {
     /// A switch that succeeds shows its mailbox with the cursor on the
     /// first row; one that fails leaves the queue on the mailbox it showed.
     /// Threads in the outbox, archived from the mailbox loaded, are left
-    /// out. A result that may predate an archive, one sent while an
-    /// archive was in flight or before one was sent, is shown and a
-    /// reconcile runs once the outbox drains, so that it never keeps a
-    /// thread an archive took out.
+    /// out, and emails a mark in the outbox marks read are shown read. A
+    /// result that may predate an action, one sent while an action was in
+    /// flight or before one was sent, is shown and a reconcile runs once
+    /// the outbox drains, so that it never keeps a thread an archive took
+    /// out or a dot a mark cleared.
     fn loaded(&mut self, generation: u64, result: Result<QueryResult, Error>) -> Vec<Effect> {
         if let Err(error) = &result
             && let Some(fatal) = error.fatal()
@@ -549,6 +572,11 @@ impl App {
                 threads.retain(|t| !self.in_outbox(t));
                 self.total = self.total.saturating_sub(before - threads.len());
                 self.queue.replace(threads);
+                for f in &self.in_flight {
+                    if let Action::Read { emails } = &f.action {
+                        self.queue.set_seen(emails, true);
+                    }
+                }
                 if self.loading_outbox.busy || self.loading_outbox.job != self.job {
                     self.pending_reconcile = true;
                 }
@@ -566,7 +594,7 @@ impl App {
 
     /// Re-runs the shown mailbox's query with `Mailbox/get`, to bring the
     /// queue and the mailboxes back in line with Fastmail. While a query
-    /// or an archive is in flight it waits, and runs once both are done, or
+    /// or an action is in flight it waits, and runs once both are done, or
     /// while disconnected as the next probe. None runs while `q` waits for
     /// the outbox.
     fn reconcile(&mut self) -> Vec<Effect> {
@@ -659,13 +687,52 @@ impl App {
             .remove_current()
             .expect("a thread under the cursor");
         self.total = self.total.saturating_sub(1);
+        self.status = "Archived".into();
+        self.send(Action::Archive { thread, from }, update)
+    }
+
+    /// Marks the thread under the cursor read: every email of it that
+    /// lacks `$seen`, in whatever mailbox, gets it, and the dot clears at
+    /// once. Refused while disconnected and for a read-only account.
+    fn mark_read(&mut self) -> Vec<Effect> {
+        let Some(thread) = self.queue.current() else {
+            return Vec::new();
+        };
+        let emails: Vec<String> = thread
+            .emails
+            .iter()
+            .filter(|email| !email.seen)
+            .map(|email| email.id.clone())
+            .collect();
+        if emails.is_empty() {
+            self.status = "Already read".into();
+            return Vec::new();
+        }
+        if self.read_only {
+            self.status = "The API token is read-only".into();
+            return Vec::new();
+        }
+        if !self.connected {
+            self.status = "Disconnected, action not sent".into();
+            return Vec::new();
+        }
+        let patch: EmailPatch = [("keywords/$seen".to_string(), Value::Bool(true))].into();
+        let update: EmailUpdate = emails
+            .iter()
+            .map(|id| (id.clone(), patch.clone()))
+            .collect();
+        self.queue.set_seen(&emails, true);
+        self.status = "Marked read".into();
+        self.send(Action::Read { emails }, update)
+    }
+
+    /// Puts an action in the outbox and sends its `update`.
+    fn send(&mut self, action: Action, update: EmailUpdate) -> Vec<Effect> {
         self.job += 1;
         self.in_flight.push(InFlight {
             job: self.job,
-            thread,
-            from,
+            action,
         });
-        self.status = "Archived".into();
         vec![Effect::SetEmails {
             job: self.job,
             update,
@@ -674,23 +741,40 @@ impl App {
 
     /// Whether `thread` is in the outbox, archived from the mailbox shown.
     fn in_outbox(&self, thread: &Thread) -> bool {
-        self.in_flight
-            .iter()
-            .any(|f| f.thread.id == thread.id && Some(&f.from) == self.shown.as_ref())
+        self.in_flight.iter().any(|f| match &f.action {
+            Action::Archive { thread: t, from } => {
+                t.id == thread.id && Some(from) == self.shown.as_ref()
+            }
+            Action::Read { .. } => false,
+        })
     }
 
-    /// Puts back the row an archive took out of the queue, when the queue
-    /// still shows the mailbox it was archived from.
-    fn put_back(&mut self, InFlight { thread, from, .. }: InFlight) {
-        if Some(&from) == self.shown.as_ref() {
-            self.queue.insert(thread);
-            self.total += 1;
+    /// Undoes a failed action in the queue: puts back the row an archive
+    /// took out, when the queue still shows the mailbox it was archived
+    /// from, or brings back the dot of a mark's emails, in whichever row
+    /// they are and in the rows archives in the outbox took out.
+    fn undo(&mut self, InFlight { action, .. }: InFlight) {
+        match action {
+            Action::Archive { thread, from } => {
+                if Some(&from) == self.shown.as_ref() {
+                    self.queue.insert(thread);
+                    self.total += 1;
+                }
+            }
+            Action::Read { emails } => {
+                self.queue.set_seen(&emails, false);
+                for f in &mut self.in_flight {
+                    if let Action::Archive { thread, .. } = &mut f.action {
+                        thread.set_seen(&emails, false);
+                    }
+                }
+            }
         }
     }
 
-    /// Handles an archive's `Email/set` result. On failure the row goes
-    /// back, the bottom line says why, and a reconcile runs once the outbox
-    /// drains.
+    /// Handles an action's `Email/set` result. On failure the action is
+    /// undone in the queue, the bottom line says why, and a reconcile runs
+    /// once the outbox drains.
     fn sent(&mut self, job: u64, result: Result<SetResult, Error>) -> Vec<Effect> {
         let Some(position) = self.in_flight.iter().position(|f| f.job == job) else {
             return Vec::new();
@@ -708,10 +792,10 @@ impl App {
                 Class::Bug => Some(error.to_string()),
             },
         };
-        let archived = self.in_flight.remove(position);
+        let done = self.in_flight.remove(position);
         if let Some(reason) = failure {
-            self.put_back(archived);
-            self.status = format!("Could not archive: {reason}");
+            self.status = format!("Could not {}: {reason}", done.action.verb());
+            self.undo(done);
             self.pending_reconcile = true;
             if let Some(quitting) = &mut self.quitting {
                 quitting.failed += 1;
@@ -720,22 +804,32 @@ impl App {
         self.run_pending_reconcile()
     }
 
-    /// Handles an archive failing despite its retries, which has
-    /// disconnected blorp. The outbox holds back the archives behind it,
-    /// and they are dropped: every row in the outbox goes back. No
-    /// reconcile is sent; the next probe is one.
+    /// Handles an action failing despite its retries, which has
+    /// disconnected blorp. The outbox holds back the actions behind it,
+    /// and they are dropped: every action in the outbox is undone in the
+    /// queue. No reconcile is sent; the next probe is one.
     fn lost(&mut self) -> Vec<Effect> {
         let n = self.in_flight.len();
-        while let Some(archived) = self.in_flight.pop() {
-            self.put_back(archived);
+        let archives = self
+            .in_flight
+            .iter()
+            .filter(|f| matches!(f.action, Action::Archive { .. }))
+            .count();
+        self.status = match (n, archives) {
+            (1, _) => format!(
+                "{DISCONNECTED}; could not {}",
+                self.in_flight[0].action.verb()
+            ),
+            (n, 0) => format!("{DISCONNECTED}; could not mark {n} threads read"),
+            (n, a) if a == n => format!("{DISCONNECTED}; could not archive {n} threads"),
+            (n, _) => format!("{DISCONNECTED}; could not send {n} actions"),
+        };
+        while let Some(lost) = self.in_flight.pop() {
+            self.undo(lost);
         }
         if let Some(quitting) = &mut self.quitting {
             quitting.failed += n;
         }
-        self.status = match n {
-            1 => format!("{DISCONNECTED}; could not archive"),
-            n => format!("{DISCONNECTED}; could not archive {n} threads"),
-        };
         vec![Effect::DropJobs { through: self.job }]
     }
 
@@ -767,7 +861,7 @@ impl App {
         Some(quit_with(quitting.failed))
     }
 
-    /// `q` has waited long enough: quits, with every archive still in the
+    /// `q` has waited long enough: quits, with every action still in the
     /// outbox and every one that failed meanwhile unconfirmed.
     fn quit_timeout(&self) -> Vec<Effect> {
         let Some(quitting) = &self.quitting else {
@@ -782,7 +876,7 @@ impl App {
     }
 
     /// Whether a queue query or a reconcile is in flight, or the outbox
-    /// holds an archive.
+    /// holds an action.
     fn busy(&self) -> bool {
         self.querying() || !self.in_flight.is_empty()
     }
@@ -821,10 +915,10 @@ impl App {
     /// clears the launch query's failure from the bottom line, or says
     /// `Reconnected` when the success reconnects. When the mailbox shown is
     /// gone from the list, the queue goes back to the Inbox. A result from
-    /// before an archive was sent is discarded, so that it never brings
-    /// back a thread the archive took out, and the reconcile runs again
-    /// once the outbox drains. A failure shows only as a change of the
-    /// connection state.
+    /// before an action was sent is discarded, so that it never brings
+    /// back a thread an archive took out or a dot a mark cleared, and the
+    /// reconcile runs again once the outbox drains. A failure shows only
+    /// as a change of the connection state.
     fn reconciled(&mut self, generation: u64, result: Result<Reconciled, Error>) -> Vec<Effect> {
         if let Err(error) = &result
             && let Some(fatal) = error.fatal()
@@ -898,6 +992,7 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
             Vec::new()
         }
         Msg::Archive => app.archive(),
+        Msg::MarkRead => app.mark_read(),
         Msg::Sent { job, result } => app.sent(job, result),
         Msg::Open => app.open(),
         Msg::OpenMailboxList => {
@@ -923,7 +1018,7 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::ReconcileTick => {
             app.next_reconcile_at = app.now + RECONCILE_INTERVAL;
             let effects = app.reconcile();
-            // While disconnected, a probe held back only by an archive in
+            // While disconnected, a probe held back only by an action in
             // flight is tried again after the probe wait, not a minute
             // later.
             if !app.connected && !app.querying() && !app.in_flight.is_empty() {
