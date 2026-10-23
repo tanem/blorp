@@ -2,12 +2,12 @@
 //!
 //! The store evaluates the `Email/query` blorp sends: the `inMailbox`,
 //! `notKeyword`, and `allInThreadHaveKeyword` conditions and the `AND` and
-//! `NOT` operators, sorting by `receivedAt`
-//! newest first, collapsing threads, `limit`, and `calculateTotal`. Every
-//! get is held to Fastmail's `maxObjectsInGet`, and the local test server
-//! holds every `Email/set` to its `maxObjectsInSet`. `Email/set` applies
-//! `mailboxIds/<id>` and `keywords/<keyword>` patches. `Mailbox/get`
-//! counts each mailbox's `unreadThreads` by RFC 8621's recommended rule.
+//! `NOT` operators, sorting by `receivedAt` newest first, collapsing
+//! threads, `limit`, and `calculateTotal`. Every get is held to Fastmail's
+//! `maxObjectsInGet`, and the local test server holds every `Email/set` to
+//! its `maxObjectsInSet`. `Email/set` applies `mailboxIds/<id>` and
+//! `keywords/<keyword>` patches. `Mailbox/get` counts each mailbox's
+//! `unreadThreads` by RFC 8621's recommended rule.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -496,10 +496,10 @@ fn matches_filter(email: &Email, emails: &[Email], filter: &Value) -> Result<boo
         let Some(Value::Array(conditions)) = filter.get("conditions") else {
             return Err(unsupported_filter());
         };
-        let mut matched = Vec::new();
-        for condition in conditions {
-            matched.push(matches_filter(email, emails, condition)?);
-        }
+        let matched = conditions
+            .iter()
+            .map(|condition| matches_filter(email, emails, condition))
+            .collect::<Result<Vec<bool>, Error>>()?;
         return match operator.as_str() {
             Some("AND") => Ok(matched.iter().all(|m| *m)),
             Some("NOT") => Ok(!matched.iter().any(|m| *m)),

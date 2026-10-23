@@ -401,7 +401,7 @@ fn r_takes_the_row_out_at_once_and_the_cursor_keeps_its_row_number() {
 }
 
 #[test]
-fn r_on_a_thread_unread_only_in_another_mailbox_takes_the_row_out() {
+fn r_on_a_thread_whose_unread_email_is_in_another_mailbox_takes_the_row_out() {
     let mut h = unread_only();
     h.keys("j");
 
@@ -593,7 +593,7 @@ fn a_failed_archive_of_a_read_thread_stays_out_once_the_setting_is_on() {
 }
 
 #[test]
-fn a_failed_archive_of_a_thread_unread_only_in_another_mailbox_is_put_back() {
+fn a_failed_archive_of_a_thread_whose_unread_email_is_in_another_mailbox_is_put_back() {
     let mut h = Harness::loaded(store());
     h.keys("je");
     assert_eq!(h.subjects(), ["Lunch", "Invoice", "Order"]);
