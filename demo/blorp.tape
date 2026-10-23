@@ -53,6 +53,10 @@ Type "j"
 Sleep 1s
 Type "e"
 Sleep 1.5s
+Type "u"
+Sleep 2s
+Type "u"
+Sleep 1.5s
 Type "m"
 Sleep 1s
 Type "arch"

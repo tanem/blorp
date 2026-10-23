@@ -32,6 +32,17 @@ impl Queue {
         self.cursor = self.cursor.min(self.last());
     }
 
+    /// Replaces the rows with a queue query's `threads`. The cursor stays on
+    /// its thread if that is still in the queue, and otherwise goes to the
+    /// first row.
+    pub fn load(&mut self, threads: Vec<Thread>) {
+        let current = self.current().map(|t| t.id.clone());
+        self.threads = threads;
+        self.cursor = current
+            .and_then(|id| self.threads.iter().position(|t| t.id == id))
+            .unwrap_or(0);
+    }
+
     /// Removes the thread under the cursor. The cursor stays on the same
     /// row number, so the next thread slides into place, or on the last row
     /// if that was the one removed.

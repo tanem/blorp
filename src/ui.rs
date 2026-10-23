@@ -102,7 +102,12 @@ fn rows(app: &App, frame: &mut Frame, area: Rect) {
     let queue = app.queue();
     if queue.threads().is_empty() {
         if !app.loading() {
-            let empty = Line::styled("No threads", Style::new().fg(Color::DarkGray));
+            let text = if app.unread_only() {
+                "No unread threads"
+            } else {
+                "No threads"
+            };
+            let empty = Line::styled(text, Style::new().fg(Color::DarkGray));
             frame.render_widget(Paragraph::new(empty), area);
         }
         return;
@@ -158,13 +163,21 @@ fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> 
     }
 }
 
-/// The path of the mailbox shown on the left; the `DISCONNECTED` badge
-/// while disconnected and the cursor's position on the right.
+/// The path of the mailbox shown and, while it is on, `Unread only` on the
+/// left; the `DISCONNECTED` badge while disconnected and the cursor's
+/// position on the right.
 fn status_bar(app: &App, width: u16) -> Line<'static> {
-    let name = Span::styled(
+    let mut left = vec![Span::styled(
         format!(" {} ", app.queue_path()),
         Style::new().fg(Color::White).bg(Color::DarkGray),
-    );
+    )];
+    if app.unread_only() {
+        left.push(Span::raw(" "));
+        left.push(Span::styled(
+            " Unread only ",
+            Style::new().fg(Color::Black).bg(Color::Yellow),
+        ));
+    }
     let queue = app.queue();
     let len = queue.threads().len();
     let row = if len == 0 { 0 } else { queue.cursor() + 1 };
@@ -188,9 +201,10 @@ fn status_bar(app: &App, width: u16) -> Line<'static> {
         position,
         Style::new().fg(Color::Black).bg(Color::Blue),
     ));
-    let used = name.width() + right.iter().map(Span::width).sum::<usize>();
+    let used = left.iter().chain(&right).map(Span::width).sum::<usize>();
     let gap = " ".repeat(usize::from(width).saturating_sub(used));
-    let mut spans = vec![name, Span::raw(gap)];
+    let mut spans = left;
+    spans.push(Span::raw(gap));
     spans.extend(right);
     Line::from(spans)
 }
@@ -415,6 +429,29 @@ mod tests {
     }
 
     #[test]
+    fn unread_only_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        let effects = h.keys("u");
+        h.resolve(effects);
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains(" Inbox   Unread only "), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn an_empty_unread_only_queue_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        let effects = h.keys("u");
+        h.resolve(effects);
+        h.keys("rr");
+
+        let screen = render(&h, 80, 24);
+        assert!(screen.contains("No unread threads"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
     fn loaded_queue_120x40() {
         let mut h = Harness::loaded(busy_inbox());
         h.keys("jj");
@@ -596,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn only_j_k_e_r_o_m_q_and_ctrl_c_send_a_message() {
+    fn only_j_k_e_r_o_m_u_q_and_ctrl_c_send_a_message() {
         let h = Harness::loaded(empty_inbox());
         let press = |code, modifiers| key_msg(&h.app, KeyEvent::new(code, modifiers));
 
@@ -625,6 +662,10 @@ mod tests {
             Some(Msg::OpenMailboxList)
         ));
         assert!(matches!(
+            press(KeyCode::Char('u'), KeyModifiers::NONE),
+            Some(Msg::UnreadOnly)
+        ));
+        assert!(matches!(
             press(KeyCode::Char('q'), KeyModifiers::NONE),
             Some(Msg::Quit)
         ));
@@ -632,7 +673,7 @@ mod tests {
             press(KeyCode::Char('c'), KeyModifiers::CONTROL),
             Some(Msg::Quit)
         ));
-        for c in "gGEd!Mzfux XV./tR:D?0123456789Jc".chars() {
+        for c in "gGEd!Mzfx XUV./tR:D?0123456789Jc".chars() {
             assert!(press(KeyCode::Char(c), KeyModifiers::NONE).is_none(), "{c}");
         }
         for code in [

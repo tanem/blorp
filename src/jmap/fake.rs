@@ -1,10 +1,11 @@
 //! An in-memory [`Jmap`] adapter over a small mail store, for tests.
 //!
-//! The store evaluates the `Email/query` blorp sends: the `inMailbox`
-//! condition, sorting by `receivedAt` newest first, collapsing threads,
-//! `limit`, and `calculateTotal`. Every get is held to Fastmail's
-//! `maxObjectsInGet`, and the local test server holds every `Email/set` to
-//! its `maxObjectsInSet`. `Email/set` applies `mailboxIds/<id>` patches.
+//! The store evaluates the `Email/query` blorp sends: the `inMailbox` and
+//! `notKeyword` conditions and the `AND` operator, sorting by `receivedAt`
+//! newest first, collapsing threads, `limit`, and `calculateTotal`. Every
+//! get is held to Fastmail's `maxObjectsInGet`, and the local test server
+//! holds every `Email/set` to its `maxObjectsInSet`. `Email/set` applies
+//! `mailboxIds/<id>` and `keywords/<keyword>` patches.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -437,15 +438,29 @@ fn apply(email: &mut Email, patch: &EmailPatch) -> bool {
     true
 }
 
-/// Whether `email` matches `filter`, an `inMailbox` condition.
+/// Whether `email` matches `filter`: an `AND` operator, or a condition of
+/// `inMailbox` and `notKeyword` properties that must all match.
 fn matches_filter(email: &Email, filter: &Value) -> Result<bool, Error> {
     let Value::Object(filter) = filter else {
         return Err(unsupported_filter());
     };
+    if let Some(operator) = filter.get("operator") {
+        let (Some("AND"), Some(Value::Array(conditions))) =
+            (operator.as_str(), filter.get("conditions"))
+        else {
+            return Err(unsupported_filter());
+        };
+        let mut matched = true;
+        for condition in conditions {
+            matched &= matches_filter(email, condition)?;
+        }
+        return Ok(matched);
+    }
     let mut matched = true;
     for (key, value) in filter {
         matched &= match (key.as_str(), value) {
             ("inMailbox", Value::String(id)) => email.mailbox_ids.contains_key(id),
+            ("notKeyword", Value::String(keyword)) => !email.keywords.contains_key(keyword),
             _ => return Err(unsupported_filter()),
         };
     }
@@ -606,11 +621,63 @@ mod tests {
     }
 
     #[test]
+    fn a_query_evaluates_not_keyword_and_the_and_operator() {
+        let store = Store::builder()
+            .role_mailbox("mb-inbox", "Inbox", "inbox")
+            .mailbox("mb-travel", "Travel")
+            .email(EmailSpec::new("e1", "t1", "2026-10-05T00:00:00Z").in_mailbox("mb-inbox"))
+            .email(
+                EmailSpec::new("e2", "t2", "2026-10-04T00:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .seen(),
+            )
+            .email(EmailSpec::new("e3", "t3", "2026-10-03T00:00:00Z").in_mailbox("mb-travel"))
+            .email(
+                EmailSpec::new("e4a", "t4", "2026-10-01T00:00:00Z")
+                    .in_mailbox("mb-inbox")
+                    .seen(),
+            )
+            .email(EmailSpec::new("e4b", "t4", "2026-10-02T00:00:00Z").in_mailbox("mb-travel"))
+            .build();
+        for (filter, ids) in [
+            (json!({"notKeyword": "$seen"}), vec!["e1", "e3", "e4b"]),
+            (
+                json!({"operator": "AND", "conditions": [{"inMailbox": "mb-inbox"}, {"notKeyword": "$seen"}]}),
+                vec!["e1"],
+            ),
+            (
+                json!({"operator": "AND", "conditions": [{"inMailbox": "mb-travel"}, {"notKeyword": "$seen"}]}),
+                vec!["e3", "e4b"],
+            ),
+            (
+                json!({"inMailbox": "mb-inbox", "notKeyword": "$seen"}),
+                vec!["e1"],
+            ),
+            (
+                json!({"operator": "AND", "conditions": []}),
+                vec!["e1", "e2", "e3", "e4b"],
+            ),
+        ] {
+            let query = EmailQuery {
+                filter: filter.clone(),
+                limit: 500,
+            };
+            let (got, total) = store.query_ids(&query).unwrap();
+            assert_eq!(got, ids, "{filter}");
+            assert_eq!(total, ids.len(), "{filter}");
+        }
+    }
+
+    #[test]
     fn a_query_outside_the_subset_is_unsupported() {
         let store = inbox(1, 1);
         for filter in [
             json!({"hasKeyword": "$seen"}),
-            json!({"operator": "AND", "conditions": []}),
+            json!({"operator": "OR", "conditions": []}),
+            json!({"operator": "NOT", "conditions": [{"inMailbox": "mb-inbox"}]}),
+            json!({"operator": "AND"}),
+            json!({"operator": "AND", "conditions": [{"hasKeyword": "$seen"}]}),
+            json!({"notKeyword": true}),
             json!({"inMailbox": 1}),
         ] {
             let query = EmailQuery {
