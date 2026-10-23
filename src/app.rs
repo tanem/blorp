@@ -86,13 +86,13 @@ pub struct App {
 #[derive(Debug)]
 struct InFlight {
     job: u64,
-    kind: Kind,
+    action: Action,
 }
 
 /// What an action in the outbox does, with what undoing it in the queue
 /// needs if it fails.
 #[derive(Debug)]
-enum Kind {
+enum Action {
     /// An archive: the row it took out of the queue, to put back, and the
     /// id of the mailbox it was archived from.
     Archive { thread: Thread, from: String },
@@ -100,12 +100,12 @@ enum Kind {
     Read { emails: Vec<String> },
 }
 
-impl Kind {
+impl Action {
     /// What the action does, as in `Could not archive`.
     fn verb(&self) -> &'static str {
         match self {
-            Kind::Archive { .. } => "archive",
-            Kind::Read { .. } => "mark read",
+            Action::Archive { .. } => "archive",
+            Action::Read { .. } => "mark read",
         }
     }
 }
@@ -573,7 +573,7 @@ impl App {
                 self.total = self.total.saturating_sub(before - threads.len());
                 self.queue.replace(threads);
                 for f in &self.in_flight {
-                    if let Kind::Read { emails } = &f.kind {
+                    if let Action::Read { emails } = &f.action {
                         self.queue.set_seen(emails, true);
                     }
                 }
@@ -688,7 +688,7 @@ impl App {
             .expect("a thread under the cursor");
         self.total = self.total.saturating_sub(1);
         self.status = "Archived".into();
-        self.send(Kind::Archive { thread, from }, update)
+        self.send(Action::Archive { thread, from }, update)
     }
 
     /// Marks the thread under the cursor read: every email of it that
@@ -723,15 +723,15 @@ impl App {
             .collect();
         self.queue.set_seen(&emails, true);
         self.status = "Marked read".into();
-        self.send(Kind::Read { emails }, update)
+        self.send(Action::Read { emails }, update)
     }
 
     /// Puts an action in the outbox and sends its `update`.
-    fn send(&mut self, kind: Kind, update: EmailUpdate) -> Vec<Effect> {
+    fn send(&mut self, action: Action, update: EmailUpdate) -> Vec<Effect> {
         self.job += 1;
         self.in_flight.push(InFlight {
             job: self.job,
-            kind,
+            action,
         });
         vec![Effect::SetEmails {
             job: self.job,
@@ -741,27 +741,34 @@ impl App {
 
     /// Whether `thread` is in the outbox, archived from the mailbox shown.
     fn in_outbox(&self, thread: &Thread) -> bool {
-        self.in_flight.iter().any(|f| match &f.kind {
-            Kind::Archive { thread: t, from } => {
+        self.in_flight.iter().any(|f| match &f.action {
+            Action::Archive { thread: t, from } => {
                 t.id == thread.id && Some(from) == self.shown.as_ref()
             }
-            Kind::Read { .. } => false,
+            Action::Read { .. } => false,
         })
     }
 
     /// Undoes a failed action in the queue: puts back the row an archive
     /// took out, when the queue still shows the mailbox it was archived
     /// from, or brings back the dot of a mark's emails, in whichever row
-    /// they are.
-    fn undo(&mut self, InFlight { kind, .. }: InFlight) {
-        match kind {
-            Kind::Archive { thread, from } => {
+    /// they are and in the rows archives in the outbox took out.
+    fn undo(&mut self, InFlight { action, .. }: InFlight) {
+        match action {
+            Action::Archive { thread, from } => {
                 if Some(&from) == self.shown.as_ref() {
                     self.queue.insert(thread);
                     self.total += 1;
                 }
             }
-            Kind::Read { emails } => self.queue.set_seen(&emails, false),
+            Action::Read { emails } => {
+                self.queue.set_seen(&emails, false);
+                for f in &mut self.in_flight {
+                    if let Action::Archive { thread, .. } = &mut f.action {
+                        thread.set_seen(&emails, false);
+                    }
+                }
+            }
         }
     }
 
@@ -787,7 +794,7 @@ impl App {
         };
         let done = self.in_flight.remove(position);
         if let Some(reason) = failure {
-            self.status = format!("Could not {}: {reason}", done.kind.verb());
+            self.status = format!("Could not {}: {reason}", done.action.verb());
             self.undo(done);
             self.pending_reconcile = true;
             if let Some(quitting) = &mut self.quitting {
@@ -806,12 +813,12 @@ impl App {
         let archives = self
             .in_flight
             .iter()
-            .filter(|f| matches!(f.kind, Kind::Archive { .. }))
+            .filter(|f| matches!(f.action, Action::Archive { .. }))
             .count();
         self.status = match (n, archives) {
             (1, _) => format!(
                 "{DISCONNECTED}; could not {}",
-                self.in_flight[0].kind.verb()
+                self.in_flight[0].action.verb()
             ),
             (n, 0) => format!("{DISCONNECTED}; could not mark {n} threads read"),
             (n, a) if a == n => format!("{DISCONNECTED}; could not archive {n} threads"),
@@ -910,8 +917,8 @@ impl App {
     /// gone from the list, the queue goes back to the Inbox. A result from
     /// before an action was sent is discarded, so that it never brings
     /// back a thread an archive took out or a dot a mark cleared, and the
-    /// reconcile runs again once the outbox drains. A failure shows only as a change of the
-    /// connection state.
+    /// reconcile runs again once the outbox drains. A failure shows only
+    /// as a change of the connection state.
     fn reconciled(&mut self, generation: u64, result: Result<Reconciled, Error>) -> Vec<Effect> {
         if let Err(error) = &result
             && let Some(fatal) = error.fatal()

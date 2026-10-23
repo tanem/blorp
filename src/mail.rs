@@ -195,6 +195,15 @@ impl Thread {
         self.emails.iter().any(|e| !e.seen)
     }
 
+    /// Sets whether each email with an id in `ids` is seen.
+    pub fn set_seen(&mut self, ids: &[String], seen: bool) {
+        for email in &mut self.emails {
+            if ids.contains(&email.id) {
+                email.seen = seen;
+            }
+        }
+    }
+
     /// True when any email has `$flagged`.
     pub fn flagged(&self) -> bool {
         self.emails.iter().any(|e| e.flagged)

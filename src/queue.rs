@@ -59,10 +59,8 @@ impl Queue {
     /// Sets whether each email with an id in `ids` is seen, in whichever
     /// row it is.
     pub fn set_seen(&mut self, ids: &[String], seen: bool) {
-        for email in self.threads.iter_mut().flat_map(|t| t.emails.iter_mut()) {
-            if ids.contains(&email.id) {
-                email.seen = seen;
-            }
+        for thread in &mut self.threads {
+            thread.set_seen(ids, seen);
         }
     }
 

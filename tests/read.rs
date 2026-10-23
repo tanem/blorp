@@ -332,3 +332,22 @@ fn q_quits_once_the_mark_in_flight_is_confirmed() {
 
     assert_eq!(effects, [Effect::Quit]);
 }
+
+#[test]
+fn a_failed_mark_brings_the_dot_back_on_a_row_an_archive_in_flight_puts_back() {
+    let mut h = Harness::loaded(store());
+    h.keys("re");
+    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
+
+    h.send(Msg::Sent {
+        job: 1,
+        result: Err(Error::Status(400)),
+    });
+    h.send(Msg::Sent {
+        job: 2,
+        result: Err(Error::Status(400)),
+    });
+
+    assert_eq!(h.subjects(), ["Re: Trip", "Lunch", "Invoice"]);
+    assert_eq!(dots(&h), [true, false, true]);
+}
