@@ -65,6 +65,11 @@ pub const BINDINGS: &[Binding] = &[
         msg: || Msg::OpenMailboxList,
     },
     Binding {
+        keys: &[Key::Char('u')],
+        help: "Unread only",
+        msg: || Msg::UnreadOnly,
+    },
+    Binding {
         keys: &[Key::Char('q')],
         help: "Quit",
         msg: || Msg::Quit,

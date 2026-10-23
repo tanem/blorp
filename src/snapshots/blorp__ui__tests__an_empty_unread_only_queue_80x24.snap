@@ -1,0 +1,29 @@
+---
+source: src/ui.rs
+assertion_line: 451
+expression: screen
+---
+"No unread threads                                                               "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+" Inbox   Unread only                                                        0/0 "
+"Marked read                                                                     "

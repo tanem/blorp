@@ -42,8 +42,12 @@ pub struct App {
     /// The id of the mailbox shown, whose threads the queue holds, once
     /// launch has found the Inbox.
     shown: Option<String>,
-    /// The id of the mailbox a switch loads, while its query is in flight.
-    switching: Option<String>,
+    /// Whether the queue holds only the unread threads of the mailbox
+    /// shown.
+    unread_only: bool,
+    /// The mailbox and setting a switch or a toggle of unread only loads,
+    /// while its query is in flight.
+    reloading: Option<Reload>,
     /// The outbox when the queue query in flight was sent.
     loading_outbox: OutboxAt,
     /// The mailbox list, while it is open.
@@ -93,18 +97,38 @@ struct InFlight {
 /// needs if it fails.
 #[derive(Debug)]
 enum Action {
-    /// An archive: the row it took out of the queue, to put back, and the
-    /// id of the mailbox it was archived from.
-    Archive { thread: Thread, from: String },
-    /// A mark read: the ids of the emails it marks, whose dot comes back.
-    Read { emails: Vec<String> },
+    /// An archive: the row it took out of the queue, to put back.
+    Archive(Row),
+    /// A mark read: the ids of the emails it marks, whose dot comes back,
+    /// and under unread only the row it took out of the queue, to put
+    /// back.
+    Read {
+        emails: Vec<String>,
+        row: Option<Row>,
+    },
+}
+
+/// A row an action took out of the queue: its thread, and the id of the
+/// mailbox shown it was taken from.
+#[derive(Debug)]
+struct Row {
+    thread: Thread,
+    from: String,
 }
 
 impl Action {
+    /// The row the action took out of the queue, if it took one.
+    fn row_mut(&mut self) -> Option<&mut Row> {
+        match self {
+            Action::Archive(row) => Some(row),
+            Action::Read { row, .. } => row.as_mut(),
+        }
+    }
+
     /// What the action does, as in `Could not archive`.
     fn verb(&self) -> &'static str {
         match self {
-            Action::Archive { .. } => "archive",
+            Action::Archive(_) => "archive",
             Action::Read { .. } => "mark read",
         }
     }
@@ -139,6 +163,14 @@ pub enum ListKey {
     Cancel,
     Char(char),
     Backspace,
+}
+
+/// What a switch or a toggle of unread only loads: the mailbox to show,
+/// and whether unread only is on.
+#[derive(Debug, Clone)]
+struct Reload {
+    mailbox: String,
+    unread_only: bool,
 }
 
 /// The outbox at the time a queue query was sent.
@@ -183,6 +215,8 @@ pub enum Msg {
     Archive,
     /// `r`: mark the thread under the cursor read.
     MarkRead,
+    /// `u`: turn unread only on or off.
+    UnreadOnly,
     /// An action's `Email/set` result.
     Sent {
         job: u64,
@@ -275,7 +309,8 @@ impl App {
             mailboxes,
             queue: Queue::default(),
             shown: None,
-            switching: None,
+            unread_only: false,
+            reloading: None,
             loading_outbox: OutboxAt::default(),
             mailbox_list: None,
             total: 0,
@@ -319,13 +354,19 @@ impl App {
             .map_or_else(String::new, |m| self.mailboxes.path(m))
     }
 
-    /// The path of the mailbox a switch loads while its query is in
-    /// flight, and otherwise of the mailbox shown.
+    /// Whether the queue holds only the unread threads of the mailbox
+    /// shown.
+    pub fn unread_only(&self) -> bool {
+        self.unread_only
+    }
+
+    /// The path of the mailbox a switch or a toggle loads while its query
+    /// is in flight, and otherwise of the mailbox shown.
     pub fn loading_path(&self) -> String {
         match self
-            .switching
-            .as_deref()
-            .and_then(|id| self.mailboxes.by_id(id))
+            .reloading
+            .as_ref()
+            .and_then(|r| self.mailboxes.by_id(&r.mailbox))
         {
             Some(mailbox) => self.mailboxes.path(mailbox),
             None => self.queue_path(),
@@ -391,39 +432,82 @@ impl App {
                     return Vec::new();
                 };
                 self.mailbox_list = None;
-                return self.switch(chosen.id);
+                let unread_only = self.to_show().map_or(self.unread_only, |r| r.unread_only);
+                return self.reload(Reload {
+                    mailbox: chosen.id,
+                    unread_only,
+                });
             }
         }
         Vec::new()
     }
 
-    /// Loads the mailbox with `id`. The queue shows the mailbox it showed
-    /// until the query lands. A reconcile in flight is dropped, since the
-    /// query brings the queue up to date.
-    fn switch(&mut self, id: String) -> Vec<Effect> {
+    /// What the queue is to show once the queue query in flight lands:
+    /// the mailbox and setting of the switch or toggle in flight, or else
+    /// those shown.
+    fn to_show(&self) -> Option<Reload> {
+        self.reloading.clone().or_else(|| {
+            Some(Reload {
+                mailbox: self.shown.clone()?,
+                unread_only: self.unread_only,
+            })
+        })
+    }
+
+    /// Turns unread only on or off, from what the queue is to show next,
+    /// and reloads the queue.
+    fn toggle_unread_only(&mut self) -> Vec<Effect> {
+        let Some(next) = self.to_show() else {
+            return Vec::new();
+        };
+        self.reload(Reload {
+            mailbox: next.mailbox,
+            unread_only: !next.unread_only,
+        })
+    }
+
+    /// Loads `reload`'s mailbox with its setting. The queue shows what it
+    /// showed until the query lands. A reconcile in flight is dropped,
+    /// since the query brings the queue up to date.
+    fn reload(&mut self, reload: Reload) -> Vec<Effect> {
         self.status.clear();
         self.query_failed = false;
         self.reconciling = None;
-        self.switching = Some(id.clone());
-        self.load(id)
+        let query = App::query_for(&reload.mailbox, reload.unread_only);
+        self.reloading = Some(reload);
+        self.load(query)
     }
 
-    /// The query for the threads of the mailbox with `id`.
-    fn query_for(id: &str) -> EmailQuery {
+    /// The query for the threads of the mailbox with `id`, or with
+    /// `unread_only` for those of them with an email in it that lacks
+    /// `$seen`.
+    fn query_for(id: &str, unread_only: bool) -> EmailQuery {
+        let mailbox = json!({"inMailbox": id});
+        let filter = if unread_only {
+            json!({"operator": "AND", "conditions": [mailbox, {"notKeyword": "$seen"}]})
+        } else {
+            mailbox
+        };
         EmailQuery {
-            filter: json!({"inMailbox": id}),
+            filter,
             limit: QUEUE_LIMIT,
         }
     }
 
     /// The query for the mailbox shown, once there is one.
     fn query(&self) -> Option<EmailQuery> {
-        self.shown.as_deref().map(App::query_for)
+        let id = self.shown.as_deref()?;
+        Some(App::query_for(id, self.unread_only))
     }
 
-    /// Runs the query for the mailbox with `id`, retried unless it is a
-    /// probe.
-    fn load(&mut self, id: String) -> Vec<Effect> {
+    /// Whether the queue holds `thread`: any thread, or under unread only
+    /// one with an unread email in the mailbox shown.
+    fn holds(&self, thread: &Thread) -> bool {
+        !self.unread_only || self.shown.as_deref().is_some_and(|id| thread.unread_in(id))
+    }
+
+    /// Runs `query` as the queue query, retried unless it is a probe.
+    fn load(&mut self, query: EmailQuery) -> Vec<Effect> {
         self.generation += 1;
         self.loading = true;
         self.loading_outbox = OutboxAt {
@@ -433,7 +517,7 @@ impl App {
         self.retrying = None;
         vec![Effect::Query {
             generation: self.generation,
-            query: App::query_for(&id),
+            query,
             retry: self.connected,
         }]
     }
@@ -492,9 +576,9 @@ impl App {
             self.status = "No Inbox mailbox".into();
             return Vec::new();
         };
-        let id = inbox.id.clone();
-        self.shown = Some(id.clone());
-        self.load(id)
+        let query = App::query_for(&inbox.id, self.unread_only);
+        self.shown = Some(inbox.id.clone());
+        self.load(query)
     }
 
     /// Records what a request's reply says about the connection. A success
@@ -539,14 +623,17 @@ impl App {
 
     /// Handles a queue query's result: the queue on success, or the
     /// failure on the bottom line, a transient one as being disconnected.
-    /// A switch that succeeds shows its mailbox with the cursor on the
-    /// first row; one that fails leaves the queue on the mailbox it showed.
-    /// Threads in the outbox, archived from the mailbox loaded, are left
-    /// out, and emails a mark in the outbox marks read are shown read. A
-    /// result that may predate an action, one sent while an action was in
-    /// flight or before one was sent, is shown and a reconcile runs once
-    /// the outbox drains, so that it never keeps a thread an archive took
-    /// out or a dot a mark cleared.
+    /// The cursor stays on its thread when that is still in the queue, and
+    /// otherwise goes to the first row. A switch or a toggle that succeeds
+    /// shows its mailbox with its setting, a switch to another mailbox with
+    /// the cursor on the first row; one that fails leaves the queue as it
+    /// was. Threads in the outbox, archived from the mailbox loaded, are
+    /// left out, and emails a mark in the outbox marks read are shown read,
+    /// or under unread only left out when that leaves no email of their
+    /// thread in the mailbox unread. A result that may predate an action,
+    /// one sent while an action was in flight or before one was sent, is
+    /// shown and a reconcile runs once the outbox drains, so that it never
+    /// keeps a thread an archive took out or a dot a mark cleared.
     fn loaded(&mut self, generation: u64, result: Result<QueryResult, Error>) -> Vec<Effect> {
         if let Err(error) = &result
             && let Some(fatal) = error.fatal()
@@ -559,24 +646,29 @@ impl App {
         self.record_reply(&result);
         self.loading = false;
         self.retrying = None;
-        let switched = self.switching.take();
+        let reloaded = self.reloading.take();
         match result {
             Ok(result) => {
-                if switched.is_some() {
-                    self.shown = switched;
-                    self.queue = Queue::default();
+                if let Some(reload) = &reloaded {
+                    if Some(&reload.mailbox) != self.shown.as_ref() {
+                        self.queue = Queue::default();
+                    }
+                    self.shown = Some(reload.mailbox.clone());
+                    self.unread_only = reload.unread_only;
                 }
                 self.total = result.total;
                 let mut threads = Thread::from_query(result);
-                let before = threads.len();
-                threads.retain(|t| !self.in_outbox(t));
-                self.total = self.total.saturating_sub(before - threads.len());
-                self.queue.replace(threads);
                 for f in &self.in_flight {
-                    if let Action::Read { emails } = &f.action {
-                        self.queue.set_seen(emails, true);
+                    if let Action::Read { emails, .. } = &f.action {
+                        for thread in &mut threads {
+                            thread.set_seen(emails, true);
+                        }
                     }
                 }
+                let before = threads.len();
+                threads.retain(|t| !self.in_outbox(t) && self.holds(t));
+                self.total = self.total.saturating_sub(before - threads.len());
+                self.queue.load(threads);
                 if self.loading_outbox.busy || self.loading_outbox.job != self.job {
                     self.pending_reconcile = true;
                 }
@@ -586,7 +678,7 @@ impl App {
                     Class::Transient => DISCONNECTED.into(),
                     _ => error.to_string(),
                 };
-                self.query_failed = switched.is_none();
+                self.query_failed = reloaded.is_none();
             }
         }
         self.run_pending_reconcile()
@@ -681,19 +773,27 @@ impl App {
             self.status = "Nothing to archive".into();
             return Vec::new();
         }
-        let from = from.id.clone();
+        let row = self.take_current();
+        self.status = "Archived".into();
+        self.send(Action::Archive(row), update)
+    }
+
+    /// Takes the thread under the cursor out of the queue, the cursor
+    /// staying on its row number.
+    fn take_current(&mut self) -> Row {
+        let from = self.shown.clone().expect("a mailbox shown");
         let thread = self
             .queue
             .remove_current()
             .expect("a thread under the cursor");
         self.total = self.total.saturating_sub(1);
-        self.status = "Archived".into();
-        self.send(Action::Archive { thread, from }, update)
+        Row { thread, from }
     }
 
     /// Marks the thread under the cursor read: every email of it that
     /// lacks `$seen`, in whatever mailbox, gets it, and the dot clears at
-    /// once. Refused while disconnected and for a read-only account.
+    /// once, or under unread only the row leaves at once. Refused while
+    /// disconnected and for a read-only account.
     fn mark_read(&mut self) -> Vec<Effect> {
         let Some(thread) = self.queue.current() else {
             return Vec::new();
@@ -721,9 +821,14 @@ impl App {
             .iter()
             .map(|id| (id.clone(), patch.clone()))
             .collect();
-        self.queue.set_seen(&emails, true);
+        let row = if self.unread_only {
+            Some(self.take_current())
+        } else {
+            self.queue.set_seen(&emails, true);
+            None
+        };
         self.status = "Marked read".into();
-        self.send(Action::Read { emails }, update)
+        self.send(Action::Read { emails, row }, update)
     }
 
     /// Puts an action in the outbox and sends its `update`.
@@ -742,33 +847,42 @@ impl App {
     /// Whether `thread` is in the outbox, archived from the mailbox shown.
     fn in_outbox(&self, thread: &Thread) -> bool {
         self.in_flight.iter().any(|f| match &f.action {
-            Action::Archive { thread: t, from } => {
-                t.id == thread.id && Some(from) == self.shown.as_ref()
+            Action::Archive(row) => {
+                row.thread.id == thread.id && Some(&row.from) == self.shown.as_ref()
             }
             Action::Read { .. } => false,
         })
     }
 
-    /// Undoes a failed action in the queue: puts back the row an archive
-    /// took out, when the queue still shows the mailbox it was archived
-    /// from, or brings back the dot of a mark's emails, in whichever row
-    /// they are and in the rows archives in the outbox took out.
+    /// Undoes a failed action in the queue: brings back the dot of a
+    /// mark's emails, in whichever row they are and in the rows actions in
+    /// the outbox took out, and puts back the row the action took out.
     fn undo(&mut self, InFlight { action, .. }: InFlight) {
-        match action {
-            Action::Archive { thread, from } => {
-                if Some(&from) == self.shown.as_ref() {
-                    self.queue.insert(thread);
-                    self.total += 1;
-                }
-            }
-            Action::Read { emails } => {
+        let row = match action {
+            Action::Archive(row) => Some(row),
+            Action::Read { emails, row } => {
                 self.queue.set_seen(&emails, false);
                 for f in &mut self.in_flight {
-                    if let Action::Archive { thread, .. } = &mut f.action {
-                        thread.set_seen(&emails, false);
+                    if let Some(taken) = f.action.row_mut() {
+                        taken.thread.set_seen(&emails, false);
                     }
                 }
+                row
             }
+        };
+        if let Some(row) = row {
+            self.put_back(row);
+        }
+    }
+
+    /// Puts back a row an action took out, when the queue still shows the
+    /// mailbox it was taken from, would hold it, and does not hold it
+    /// already.
+    fn put_back(&mut self, Row { thread, from }: Row) {
+        let held = self.queue.threads().iter().any(|t| t.id == thread.id);
+        if Some(&from) == self.shown.as_ref() && self.holds(&thread) && !held {
+            self.queue.insert(thread);
+            self.total += 1;
         }
     }
 
@@ -813,7 +927,7 @@ impl App {
         let archives = self
             .in_flight
             .iter()
-            .filter(|f| matches!(f.action, Action::Archive { .. }))
+            .filter(|f| matches!(f.action, Action::Archive(_)))
             .count();
         self.status = match (n, archives) {
             (1, _) => format!(
@@ -824,7 +938,10 @@ impl App {
             (n, a) if a == n => format!("{DISCONNECTED}; could not archive {n} threads"),
             (n, _) => format!("{DISCONNECTED}; could not send {n} actions"),
         };
-        while let Some(lost) = self.in_flight.pop() {
+        // Oldest first, so that a mark brings back the dot on the row of a
+        // later archive before that row is put back.
+        while !self.in_flight.is_empty() {
+            let lost = self.in_flight.remove(0);
             self.undo(lost);
         }
         if let Some(quitting) = &mut self.quitting {
@@ -993,6 +1110,7 @@ fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
         }
         Msg::Archive => app.archive(),
         Msg::MarkRead => app.mark_read(),
+        Msg::UnreadOnly => app.toggle_unread_only(),
         Msg::Sent { job, result } => app.sent(job, result),
         Msg::Open => app.open(),
         Msg::OpenMailboxList => {
