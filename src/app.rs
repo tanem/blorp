@@ -53,7 +53,7 @@ pub struct App {
     /// The mailbox list, while it is open.
     mailbox_list: Option<MailboxList>,
     /// The search as it was before `/`, while the search prompt is open.
-    prompt: Option<String>,
+    search_before: Option<String>,
     total: usize,
     generation: u64,
     loading: bool,
@@ -179,11 +179,13 @@ pub enum SearchKey {
 }
 
 /// What a switch or a toggle of unread only loads: the mailbox to show,
-/// and whether unread only is on.
+/// whether unread only is on, and whether it comes from a switch, which
+/// clears the search.
 #[derive(Debug, Clone)]
 struct Reload {
     mailbox: String,
     unread_only: bool,
+    switch: bool,
 }
 
 /// The outbox at the time a queue query was sent.
@@ -332,7 +334,7 @@ impl App {
             reloading: None,
             loading_outbox: OutboxAt::default(),
             mailbox_list: None,
-            prompt: None,
+            search_before: None,
             total: 0,
             generation: 0,
             loading: false,
@@ -456,6 +458,7 @@ impl App {
                 return self.reload(Reload {
                     mailbox: chosen.id,
                     unread_only,
+                    switch: true,
                 });
             }
         }
@@ -464,7 +467,7 @@ impl App {
 
     /// The search text while the search prompt is open.
     pub fn prompt(&self) -> Option<&str> {
-        self.prompt.as_ref().map(|_| self.queue.search())
+        self.search_before.as_ref().map(|_| self.queue.search())
     }
 
     /// The search, as typed; empty when none is set.
@@ -474,7 +477,7 @@ impl App {
 
     /// Opens the search prompt, pre-filled with the current search.
     fn open_prompt(&mut self) {
-        self.prompt = Some(self.queue.search().to_string());
+        self.search_before = Some(self.queue.search().to_string());
     }
 
     /// Handles a key at the search prompt: a character or Backspace
@@ -482,7 +485,7 @@ impl App {
     /// prompt with the search as typed, and Esc closes it with the search
     /// as it was before `/`.
     fn search_key(&mut self, key: SearchKey) {
-        let Some(before) = &self.prompt else {
+        let Some(before) = &self.search_before else {
             return;
         };
         let mut search = self.queue.search().to_string();
@@ -492,12 +495,12 @@ impl App {
                 search.pop();
             }
             SearchKey::Accept => {
-                self.prompt = None;
+                self.search_before = None;
                 return;
             }
             SearchKey::Cancel => {
                 search = before.clone();
-                self.prompt = None;
+                self.search_before = None;
             }
         }
         self.queue.set_search(search);
@@ -518,6 +521,7 @@ impl App {
             Some(Reload {
                 mailbox: self.shown.clone()?,
                 unread_only: self.unread_only,
+                switch: false,
             })
         })
     }
@@ -529,8 +533,8 @@ impl App {
             return Vec::new();
         };
         self.reload(Reload {
-            mailbox: next.mailbox,
             unread_only: !next.unread_only,
+            ..next
         })
     }
 
@@ -694,14 +698,16 @@ impl App {
     /// The cursor stays on its thread when that is still in the queue, and
     /// otherwise goes to the first row. A switch or a toggle that succeeds
     /// shows its mailbox with its setting, a switch to another mailbox with
-    /// the cursor on the first row; one that fails leaves the queue as it
-    /// was. Threads in the outbox, archived from the mailbox loaded, are
-    /// left out, and emails a mark in the outbox marks read are shown read,
-    /// or under unread only left out when that leaves no email of their
-    /// thread in the mailbox unread. A result that may predate an action,
-    /// one sent while an action was in flight or before one was sent, is
-    /// shown and a reconcile runs once the outbox drains, so that it never
-    /// keeps a thread an archive took out or a dot a mark cleared.
+    /// the cursor on the first row, and a switch clears the search and
+    /// closes the search prompt; one that fails leaves the queue and the
+    /// search as they were. Threads in the outbox, archived from the
+    /// mailbox loaded, are left out, and emails a mark in the outbox marks
+    /// read are shown read, or under unread only left out when that leaves
+    /// no email of their thread in the mailbox unread. A result that may
+    /// predate an action, one sent while an action was in flight or before
+    /// one was sent, is shown and a reconcile runs once the outbox drains,
+    /// so that it never keeps a thread an archive took out or a dot a mark
+    /// cleared.
     fn loaded(&mut self, generation: u64, result: Result<QueryResult, Error>) -> Vec<Effect> {
         if let Err(error) = &result
             && let Some(fatal) = error.fatal()
@@ -720,7 +726,10 @@ impl App {
                 if let Some(reload) = &reloaded {
                     if Some(&reload.mailbox) != self.shown.as_ref() {
                         self.queue = Queue::default();
-                        self.prompt = None;
+                    }
+                    if reload.switch {
+                        self.queue.set_search(String::new());
+                        self.search_before = None;
                     }
                     self.shown = Some(reload.mailbox.clone());
                     self.unread_only = reload.unread_only;
@@ -1090,7 +1099,7 @@ impl App {
     /// deleted, saying so, and loads it.
     fn shown_deleted(&mut self) -> Vec<Effect> {
         self.queue = Queue::default();
-        self.prompt = None;
+        self.search_before = None;
         self.total = 0;
         self.status = "Mailbox no longer exists".into();
         self.shown = None;

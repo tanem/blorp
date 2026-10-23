@@ -3,8 +3,8 @@
 
 use blorp::app::{Effect, Msg};
 use blorp::harness::Harness;
-use blorp::jmap::SetResult;
 use blorp::jmap::fake::{EmailSpec, Store};
+use blorp::jmap::{Error, SetResult};
 use crossterm::event::KeyCode;
 
 /// Newest first, the Inbox holds Lunch from Ana (unread, with an older
@@ -445,4 +445,55 @@ fn r_under_unread_only_takes_the_row_out() {
     assert_eq!(h.subjects(), Vec::<String>::new());
     h.press(KeyCode::Esc);
     assert_eq!(h.subjects(), ["Lunch"]);
+}
+
+#[test]
+fn a_switch_with_m_to_the_mailbox_shown_clears_the_search() {
+    let mut h = Harness::loaded(store());
+    search(&mut h, "acme");
+
+    h.keys("minbox");
+    let effects = h.press(KeyCode::Enter);
+    h.resolve(effects);
+
+    assert_eq!(h.app.search(), "");
+    assert_eq!(
+        h.subjects(),
+        ["Lunch", "Invoice", "News", "Re: ACME offsite"]
+    );
+}
+
+#[test]
+fn u_after_a_switch_before_it_lands_still_clears_the_search() {
+    let mut h = Harness::loaded(store());
+    search(&mut h, "acme");
+    h.keys("minbox");
+    h.press(KeyCode::Enter);
+
+    let effects = h.keys("u");
+    h.resolve(effects);
+
+    assert!(h.app.unread_only());
+    assert_eq!(h.app.search(), "");
+    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
+}
+
+#[test]
+fn a_failed_switch_leaves_the_search_as_it_was() {
+    let mut h = Harness::loaded(store());
+    search(&mut h, "acme");
+    h.keys("mtravel");
+    let generation = match h.press(KeyCode::Enter)[..] {
+        [Effect::Query { generation, .. }] => generation,
+        ref other => panic!("{other:?}"),
+    };
+
+    h.send(Msg::Loaded {
+        generation,
+        result: Err(Error::Status(400)),
+    });
+
+    assert_eq!(h.app.search(), "acme");
+    assert_eq!(h.app.queue_path(), "Inbox");
+    assert_eq!(h.subjects(), ["Invoice", "News", "Re: ACME offsite"]);
 }
