@@ -29,6 +29,21 @@ fn email(id: &str, thread: &str, minutes: i64, name: &str, address: &str) -> Ema
         .from(name, address)
 }
 
+/// An unread email in the mailbox with id `mailbox` from `name` at
+/// `address`.
+fn filed(
+    id: &str,
+    thread: &str,
+    minutes: i64,
+    mailbox: &str,
+    name: &str,
+    address: &str,
+) -> EmailSpec {
+    EmailSpec::new(id, thread, &ago(minutes))
+        .in_mailbox(mailbox)
+        .from(name, address)
+}
+
 /// A read email in Archive from `name` at `address`.
 fn archived(id: &str, thread: &str, minutes: i64, name: &str, address: &str) -> EmailSpec {
     EmailSpec::new(id, thread, &ago(minutes))
@@ -62,6 +77,39 @@ fn account() -> Store {
         .email(
             archived("e11", "t11", 9 * DAY, "Sam Ito", "sam@example.invalid")
                 .subject("Agenda for the planning meeting"),
+        )
+        .email(
+            filed(
+                "e12",
+                "t12",
+                5 * HOUR,
+                "mb-travel",
+                "Harbour Hotel",
+                "stay@hotel.example.invalid",
+            )
+            .subject("Your booking is confirmed"),
+        )
+        .email(
+            filed(
+                "e13",
+                "t13",
+                2 * HOUR,
+                "mb-reports",
+                "Sam Ito",
+                "sam@example.invalid",
+            )
+            .subject("Weekly report"),
+        )
+        .email(
+            filed(
+                "e14",
+                "t14",
+                DAY,
+                "mb-reports",
+                "Lee Chen",
+                "lee@example.invalid",
+            )
+            .subject("Numbers for the third quarter"),
         )
         .email(email("e1", "t1", 3, "Ana Lopez", "ana@example.invalid").subject("Lunch on Friday?"))
         .email(

@@ -91,8 +91,8 @@ async fn the_token_appears_nowhere_after_a_failed_request_and_a_fatal_401() {
         .and(path("/api/"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "methodResponses": [["Mailbox/get", {"list": [
-                {"id": "mb-inbox", "name": "Inbox", "role": "inbox"},
-                {"id": "mb-archive", "name": "Archive", "role": "archive"}
+                {"id": "mb-inbox", "name": "Inbox", "role": "inbox", "unreadThreads": 0},
+                {"id": "mb-archive", "name": "Archive", "role": "archive", "unreadThreads": 0}
             ]}, "0"]],
             "sessionState": "0"
         })))

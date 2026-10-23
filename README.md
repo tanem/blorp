@@ -2,7 +2,7 @@
 
 A terminal UI for a Fastmail account's mailboxes over JMAP.
 
-![blorp showing a made-up Inbox, moving the cursor down and up, marking a thread read, archiving a thread, showing only the unread threads and then every thread again, searching for "your" and clearing the search, switching to Archive, then quitting](demo/blorp.gif)
+![blorp showing a made-up Inbox, moving the cursor down and up, marking a thread read, archiving a thread, showing only the unread threads and then every thread again, searching for "your" and clearing the search, opening the mailbox list with its unread counts, showing only the mailboxes with unread mail, narrowing it to "rep" and switching to Work/Reports, then quitting](demo/blorp.gif)
 
 [![ci](https://github.com/tanem/blorp/actions/workflows/ci.yml/badge.svg)](https://github.com/tanem/blorp/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/github/license/tanem/blorp)](LICENSE)
 
@@ -49,6 +49,8 @@ BLORP_API_TOKEN="$(pass show fastmail/blorp)" blorp
 | `Esc` | Clear search |
 | `q` | Quit |
 | `Ctrl-c` | Quit |
+
+On the mailbox list, which `m` opens in place of the queue with each mailbox's count of unread threads, `j` and `k` move, `u` shows only the mailboxes holding an unread thread, `/` narrows the list by path, Enter switches to the highlighted mailbox, Esc clears the narrowing or else closes the list, and `q` and `Ctrl-c` quit.
 
 ## Files and environment variables
 

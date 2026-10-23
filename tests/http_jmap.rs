@@ -76,7 +76,7 @@ async fn get_mailboxes_sends_mailbox_get_on_the_primary_mail_account() {
             "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
             "methodCalls": [[
                 "Mailbox/get",
-                {"accountId": "u1a2b3c4", "ids": null, "properties": ["id", "name", "parentId", "role"]},
+                {"accountId": "u1a2b3c4", "ids": null, "properties": ["id", "name", "parentId", "role", "unreadThreads"]},
                 "0"
             ]]
         })))
@@ -87,8 +87,8 @@ async fn get_mailboxes_sends_mailbox_get_on_the_primary_mail_account() {
                     "accountId": "u1a2b3c4",
                     "state": "1",
                     "list": [
-                        {"id": "mb1", "name": "Inbox", "role": "inbox"},
-                        {"id": "mb2", "name": "Travel", "parentId": "mb1", "role": null}
+                        {"id": "mb1", "name": "Inbox", "role": "inbox", "unreadThreads": 2},
+                        {"id": "mb2", "name": "Travel", "parentId": "mb1", "role": null, "unreadThreads": 0}
                     ],
                     "notFound": []
                 },
@@ -111,12 +111,14 @@ async fn get_mailboxes_sends_mailbox_get_on_the_primary_mail_account() {
                 name: "Inbox".into(),
                 parent_id: None,
                 role: Some("inbox".into()),
+                unread_threads: 2,
             },
             Mailbox {
                 id: "mb2".into(),
                 name: "Travel".into(),
                 parent_id: Some("mb1".into()),
                 role: None,
+                unread_threads: 0,
             },
         ]
     );
@@ -567,7 +569,7 @@ async fn reconcile_puts_mailbox_get_in_the_query_s_first_request() {
         0,
         json!(["Mailbox/get", {
             "accountId": "u1a2b3c4", "ids": null,
-            "properties": ["id", "name", "parentId", "role"]
+            "properties": ["id", "name", "parentId", "role", "unreadThreads"]
         }, "m"]),
     );
     Mock::given(method("POST"))
@@ -576,7 +578,7 @@ async fn reconcile_puts_mailbox_get_in_the_query_s_first_request() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "methodResponses": [
                 ["Mailbox/get", {"accountId": "u1a2b3c4", "state": "1", "list": [
-                    {"id": "mb1", "name": "Inbox", "role": "inbox"}
+                    {"id": "mb1", "name": "Inbox", "role": "inbox", "unreadThreads": 1}
                 ], "notFound": []}, "m"],
                 ["Email/query", {"accountId": "u1a2b3c4", "ids": ["Me2"], "position": 0, "total": 1}, "0"],
                 ["Email/get", {"accountId": "u1a2b3c4", "list": [{"id": "Me2", "threadId": "Tt1"}], "notFound": []}, "1"],
@@ -614,6 +616,7 @@ async fn reconcile_puts_mailbox_get_in_the_query_s_first_request() {
 
     assert_eq!(reconciled.mailboxes.len(), 1);
     assert_eq!(reconciled.mailboxes[0].role.as_deref(), Some("inbox"));
+    assert_eq!(reconciled.mailboxes[0].unread_threads, 1);
     assert_eq!(reconciled.result.ids, ["Me2"]);
     assert_eq!(reconciled.result.emails.len(), 1);
 }

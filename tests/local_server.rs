@@ -73,7 +73,7 @@ async fn a_session_without_mail_is_refused() {
 }
 
 #[tokio::test]
-async fn mailbox_get_returns_the_stores_mailboxes() {
+async fn mailbox_get_returns_the_stores_mailboxes_with_their_unread_thread_counts() {
     let server = LocalJmap::start(store(), TOKEN).await;
     let jmap = connect(&server, TOKEN).await.unwrap();
 
@@ -87,12 +87,14 @@ async fn mailbox_get_returns_the_stores_mailboxes() {
                 name: "Inbox".into(),
                 parent_id: None,
                 role: Some("inbox".into()),
+                unread_threads: 3,
             },
             Mailbox {
                 id: "mb-travel".into(),
                 name: "Travel".into(),
                 parent_id: None,
                 role: None,
+                unread_threads: 1,
             },
         ]
     );

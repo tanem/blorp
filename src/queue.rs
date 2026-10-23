@@ -1,14 +1,14 @@
 //! The queue's rows and cursor.
 
 use crate::mail::Thread;
+use crate::prompt::{Prompt, PromptKey};
 
 /// The threads of the mailbox shown, newest first, the search, and the
 /// cursor row. The rows are the threads that match the search.
 #[derive(Debug, Clone, Default)]
 pub struct Queue {
     threads: Vec<Thread>,
-    /// The search, as typed; empty when none is set.
-    search: String,
+    search: Prompt,
     cursor: usize,
 }
 
@@ -17,7 +17,7 @@ impl Queue {
     pub fn rows(&self) -> Vec<&Thread> {
         self.threads
             .iter()
-            .filter(|t| t.matches(&self.search))
+            .filter(|t| t.matches(self.search.text()))
             .collect()
     }
 
@@ -28,7 +28,12 @@ impl Queue {
 
     /// The search, as typed; empty when none is set.
     pub fn search(&self) -> &str {
-        &self.search
+        self.search.text()
+    }
+
+    /// The search while the search prompt is open.
+    pub fn prompt(&self) -> Option<&str> {
+        self.search.typing()
     }
 
     /// Whether the queue holds the thread with `id`, whether or not it
@@ -37,11 +42,33 @@ impl Queue {
         self.threads.iter().any(|t| t.id == id)
     }
 
-    /// Sets the search to `search`. The cursor stays on its thread if that
-    /// still matches, and otherwise goes to the first row.
-    pub fn set_search(&mut self, search: String) {
+    /// `/`: opens the search prompt, pre-filled with the search.
+    pub fn open_search(&mut self) {
+        self.search.open();
+    }
+
+    /// Handles a key at the search prompt, narrowing the queue at once.
+    pub fn search_key(&mut self, key: PromptKey) {
+        self.narrow(|search| search.key(key));
+    }
+
+    /// Clears the search.
+    pub fn clear_search(&mut self) {
+        self.narrow(|search| {
+            search.clear();
+        });
+    }
+
+    /// Clears the search and closes the search prompt, as a switch does.
+    pub fn reset_search(&mut self) {
+        self.narrow(|search| *search = Prompt::default());
+    }
+
+    /// Changes the search through `change`. The cursor stays on its thread
+    /// if that still matches, and otherwise goes to the first row.
+    fn narrow(&mut self, change: impl FnOnce(&mut Prompt)) {
         let current = self.current().map(|t| t.id.clone());
-        self.search = search;
+        change(&mut self.search);
         self.cursor = current.and_then(|id| self.row_of(&id)).unwrap_or(0);
     }
 
@@ -117,7 +144,7 @@ impl Queue {
         self.threads
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.matches(&self.search))
+            .filter(|(_, t)| t.matches(self.search.text()))
             .nth(row)
             .map(|(i, _)| i)
     }

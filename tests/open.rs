@@ -5,7 +5,6 @@ use blorp::app::{Effect, Msg};
 use blorp::harness::Harness;
 use blorp::jmap::Error;
 use blorp::jmap::fake::{EmailSpec, Store, StoreBuilder};
-use crossterm::event::KeyCode;
 
 /// `n` single-email Inbox threads, newest first: t1 holding e1 to tn
 /// holding en.
@@ -107,8 +106,7 @@ fn o_uses_the_name_of_the_mailbox_shown() {
             )
             .build(),
     );
-    h.keys("mreceipts");
-    let effects = h.press(KeyCode::Enter);
+    let effects = h.switch_to("receipts");
     assert_eq!(h.resolve(effects), []);
 
     assert_eq!(
