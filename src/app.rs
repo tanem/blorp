@@ -124,13 +124,11 @@ impl Action {
             Action::Read { row, .. } => row.as_mut(),
         }
     }
-}
 
-impl Action {
     /// What the action does, as in `Could not archive`.
     fn verb(&self) -> &'static str {
         match self {
-            Action::Archive { .. } => "archive",
+            Action::Archive(_) => "archive",
             Action::Read { .. } => "mark read",
         }
     }
@@ -434,7 +432,7 @@ impl App {
                     return Vec::new();
                 };
                 self.mailbox_list = None;
-                let unread_only = self.next().map_or(self.unread_only, |r| r.unread_only);
+                let unread_only = self.to_show().map_or(self.unread_only, |r| r.unread_only);
                 return self.reload(Reload {
                     mailbox: chosen.id,
                     unread_only,
@@ -447,7 +445,7 @@ impl App {
     /// What the queue is to show once the queue query in flight lands:
     /// the mailbox and setting of the switch or toggle in flight, or else
     /// those shown.
-    fn next(&self) -> Option<Reload> {
+    fn to_show(&self) -> Option<Reload> {
         self.reloading.clone().or_else(|| {
             Some(Reload {
                 mailbox: self.shown.clone()?,
@@ -459,7 +457,7 @@ impl App {
     /// Turns unread only on or off, from what the queue is to show next,
     /// and reloads the queue.
     fn toggle_unread_only(&mut self) -> Vec<Effect> {
-        let Some(next) = self.next() else {
+        let Some(next) = self.to_show() else {
             return Vec::new();
         };
         self.reload(Reload {
@@ -503,9 +501,9 @@ impl App {
     }
 
     /// Whether the queue holds `thread`: any thread, or under unread only
-    /// an unread one.
+    /// one with an unread email in the mailbox shown.
     fn holds(&self, thread: &Thread) -> bool {
-        !self.unread_only || thread.unread()
+        !self.unread_only || self.shown.as_deref().is_some_and(|id| thread.unread_in(id))
     }
 
     /// Runs `query` as the queue query, retried unless it is a probe.
@@ -627,15 +625,15 @@ impl App {
     /// failure on the bottom line, a transient one as being disconnected.
     /// The cursor stays on its thread when that is still in the queue, and
     /// otherwise goes to the first row. A switch or a toggle that succeeds
-    /// shows its mailbox with its setting, a switch with the cursor on the
-    /// first row; one that fails leaves the queue as it was. Threads in the
-    /// outbox, archived from the mailbox loaded, are left out, and emails a
-    /// mark in the outbox marks read are shown read, or under unread only
-    /// left out when that leaves their thread read. A
-    /// result that may predate an action, one sent while an action was in
-    /// flight or before one was sent, is shown and a reconcile runs once
-    /// the outbox drains, so that it never keeps a thread an archive took
-    /// out or a dot a mark cleared.
+    /// shows its mailbox with its setting, a switch to another mailbox with
+    /// the cursor on the first row; one that fails leaves the queue as it
+    /// was. Threads in the outbox, archived from the mailbox loaded, are
+    /// left out, and emails a mark in the outbox marks read are shown read,
+    /// or under unread only left out when that leaves no email of their
+    /// thread in the mailbox unread. A result that may predate an action,
+    /// one sent while an action was in flight or before one was sent, is
+    /// shown and a reconcile runs once the outbox drains, so that it never
+    /// keeps a thread an archive took out or a dot a mark cleared.
     fn loaded(&mut self, generation: u64, result: Result<QueryResult, Error>) -> Vec<Effect> {
         if let Err(error) = &result
             && let Some(fatal) = error.fatal()
@@ -865,8 +863,8 @@ impl App {
             Action::Read { emails, row } => {
                 self.queue.set_seen(&emails, false);
                 for f in &mut self.in_flight {
-                    if let Some(row) = f.action.row_mut() {
-                        row.thread.set_seen(&emails, false);
+                    if let Some(taken) = f.action.row_mut() {
+                        taken.thread.set_seen(&emails, false);
                     }
                 }
                 row
@@ -940,7 +938,10 @@ impl App {
             (n, a) if a == n => format!("{DISCONNECTED}; could not archive {n} threads"),
             (n, _) => format!("{DISCONNECTED}; could not send {n} actions"),
         };
-        while let Some(lost) = self.in_flight.pop() {
+        // Oldest first, so that a mark brings back the dot on the row of a
+        // later archive before that row is put back.
+        while !self.in_flight.is_empty() {
+            let lost = self.in_flight.remove(0);
             self.undo(lost);
         }
         if let Some(quitting) = &mut self.quitting {

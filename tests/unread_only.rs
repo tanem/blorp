@@ -528,3 +528,62 @@ fn a_failed_archive_of_a_read_thread_stays_out_once_the_setting_is_on() {
     assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
     assert_eq!(h.app.total(), 2);
 }
+
+#[test]
+fn a_failed_archive_of_a_thread_unread_only_in_another_mailbox_stays_out() {
+    let mut h = Harness::loaded(store());
+    h.keys("je");
+    assert_eq!(h.subjects(), ["Lunch", "Invoice", "Order"]);
+    let effects = h.keys("u");
+    let [
+        Effect::Query {
+            generation, query, ..
+        },
+    ] = &effects[..]
+    else {
+        panic!("{effects:?}");
+    };
+    let result = h.store_mut().query(query);
+    h.send(Msg::Loaded {
+        generation: *generation,
+        result,
+    });
+
+    h.send(Msg::Sent {
+        job: 1,
+        result: Err(Error::Status(400)),
+    });
+
+    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
+    assert_eq!(h.app.total(), 2);
+}
+
+#[test]
+fn a_transient_failure_puts_back_a_thread_marked_read_then_archived() {
+    let mut h = Harness::loaded(store());
+    h.keys("re");
+    let effects = h.keys("u");
+    let [
+        Effect::Query {
+            generation, query, ..
+        },
+    ] = &effects[..]
+    else {
+        panic!("{effects:?}");
+    };
+    let result = h.store_mut().query(query);
+    h.send(Msg::Loaded {
+        generation: *generation,
+        result,
+    });
+    assert_eq!(h.subjects(), ["Invoice"]);
+
+    h.send(Msg::Sent {
+        job: 1,
+        result: Err(Error::Transport("connection reset".into())),
+    });
+
+    assert_eq!(h.subjects(), ["Lunch", "Invoice"]);
+    assert!(h.app.queue().threads()[0].unread());
+    assert_eq!(h.app.total(), 2);
+}
