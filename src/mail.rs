@@ -11,6 +11,11 @@ use crate::jmap::{self, QueryResult};
 pub struct Mailboxes(Vec<jmap::Mailbox>);
 
 impl Mailboxes {
+    /// How many mailboxes there are.
+    pub fn count(&self) -> usize {
+        self.0.len()
+    }
+
     /// The mailbox carrying the `inbox` role, if any.
     pub fn inbox(&self) -> Option<&jmap::Mailbox> {
         self.by_role("inbox")

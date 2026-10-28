@@ -88,6 +88,8 @@ pub struct App {
     retrying: Option<u32>,
     /// While `q` waits for the outbox to drain.
     quitting: Option<Quitting>,
+    /// The count typed, until `j`, `k`, or another key takes it.
+    count: Option<usize>,
 }
 
 /// An action in the outbox.
@@ -194,9 +196,9 @@ pub struct MailboxRow {
 /// A key at the mailbox list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListKey {
-    /// `j`: move the highlight down a row.
+    /// `j`: move the highlight down a row, or with a count that many.
     Down,
-    /// `k`: move the highlight up a row.
+    /// `k`: move the highlight up a row, or with a count that many.
     Up,
     /// `u`: turn unread mailboxes only on or off.
     UnreadOnly,
@@ -254,9 +256,14 @@ pub enum Msg {
     /// Launch: show the Inbox, load its queue, and start the reconcile
     /// tick.
     Start,
-    /// `j`: move the cursor down a row.
+    /// A digit typed as part of a count.
+    Digit(u8),
+    /// A key that does nothing else, such as Esc or Enter, with a count
+    /// typed: drop the count.
+    DropCount,
+    /// `j`: move the cursor down a row, or with a count that many.
     Down,
-    /// `k`: move the cursor up a row.
+    /// `k`: move the cursor up a row, or with a count that many.
     Up,
     /// `e`: archive the thread under the cursor.
     Archive,
@@ -309,6 +316,39 @@ pub enum Msg {
         generation: u64,
         result: Result<Reconciled, Error>,
     },
+}
+
+impl Msg {
+    /// Whether the message is a key that drops a count typed: any key but
+    /// a digit, `j`, and `k`, which take it. A message that is not a key,
+    /// such as a reconcile landing or a spinner tick, leaves it alone.
+    fn drops_count(&self) -> bool {
+        match self {
+            Msg::Digit(_) | Msg::Down | Msg::Up => false,
+            Msg::ListKey(key) => !matches!(key, ListKey::Down | ListKey::Up),
+            Msg::DropCount
+            | Msg::Archive
+            | Msg::MarkRead
+            | Msg::UnreadOnly
+            | Msg::Search
+            | Msg::SearchKey(_)
+            | Msg::ClearSearch
+            | Msg::Open
+            | Msg::OpenMailboxList
+            | Msg::Quit => true,
+            Msg::Start
+            | Msg::Sent { .. }
+            | Msg::OpenFailed { .. }
+            | Msg::QuitTimeout
+            | Msg::Tick
+            | Msg::Wake
+            | Msg::StreamRefused(_)
+            | Msg::ReconcileTick
+            | Msg::Retrying { .. }
+            | Msg::Loaded { .. }
+            | Msg::Reconciled { .. } => false,
+        }
+    }
 }
 
 /// Something for the executor to do.
@@ -383,6 +423,7 @@ impl App {
             probe_wait: PROBE_START,
             retrying: None,
             quitting: None,
+            count: None,
         }
     }
 
@@ -431,6 +472,12 @@ impl App {
         self.mailboxes.by_id(self.shown.as_deref()?)
     }
 
+    /// How many mailboxes the mailbox list holds before the text or
+    /// unread mailboxes only narrows it.
+    pub fn mailbox_count(&self) -> usize {
+        self.mailboxes.count()
+    }
+
     /// The mailbox list, while it is open.
     pub fn mailbox_list(&self) -> Option<MailboxChoices> {
         let list = self.mailbox_list.as_ref()?;
@@ -468,12 +515,20 @@ impl App {
         }
     }
 
-    /// Handles a key at the mailbox list: `j` and `k` move the highlight
-    /// and stop at the ends, `u` turns unread mailboxes only on or off,
-    /// `/` and the keys at its prompt narrow the list as they do the queue,
-    /// Enter switches to the highlighted mailbox, and Esc clears the text,
-    /// or with none closes the list.
+    /// Handles a key at the mailbox list: `j` and `k` move the highlight a
+    /// row, or with a count that many, and stop at the ends, `u` turns
+    /// unread mailboxes only on or off, `/` and the keys at its prompt
+    /// narrow the list as they do the queue, Enter switches to the
+    /// highlighted mailbox, and Esc clears the text, or with none closes
+    /// the list.
     fn mailbox_list_key(&mut self, key: ListKey) -> Vec<Effect> {
+        if self.mailbox_list.is_none() {
+            return Vec::new();
+        }
+        let rows = match key {
+            ListKey::Down | ListKey::Up => self.take_rows(),
+            _ => 0,
+        };
         let Some(list) = &mut self.mailbox_list else {
             return Vec::new();
         };
@@ -481,8 +536,8 @@ impl App {
         match key {
             ListKey::Down | ListKey::Up => {
                 let row = list.highlight_row(&listed).map_or(0, |row| match key {
-                    ListKey::Down => (row + 1).min(listed.len() - 1),
-                    _ => row.saturating_sub(1),
+                    ListKey::Down => row.saturating_add(rows).min(listed.len() - 1),
+                    _ => row.saturating_sub(rows),
                 });
                 list.highlight = listed.get(row).map(|m| m.id.clone());
             }
@@ -649,6 +704,25 @@ impl App {
     /// The status message on the bottom line.
     pub fn status(&self) -> &str {
         &self.status
+    }
+
+    /// The count typed, while one is held.
+    pub fn count(&self) -> Option<usize> {
+        self.count
+    }
+
+    /// Extends the count with `digit`. A `0` with no count typed does
+    /// nothing.
+    fn digit(&mut self, digit: u8) {
+        let count = self.count.unwrap_or(0);
+        if count > 0 || digit > 0 {
+            self.count = Some(count.saturating_mul(10).saturating_add(digit.into()));
+        }
+    }
+
+    /// The rows `j` or `k` moves: the count typed, which it takes, or 1.
+    fn take_rows(&mut self) -> usize {
+        self.count.take().unwrap_or(1)
     }
 
     /// When `q` stops waiting for the outbox, while it waits.
@@ -1177,17 +1251,27 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
 
 /// Applies `msg` to `app`, without the quit that ends `q`'s wait.
 fn handle(app: &mut App, msg: Msg) -> Vec<Effect> {
+    if msg.drops_count() {
+        app.count = None;
+    }
     match msg {
         Msg::Start => {
             app.next_reconcile_at = app.now + RECONCILE_INTERVAL;
             app.start()
         }
+        Msg::Digit(digit) => {
+            app.digit(digit);
+            Vec::new()
+        }
+        Msg::DropCount => Vec::new(),
         Msg::Down => {
-            app.queue.down();
+            let rows = app.take_rows();
+            app.queue.down(rows);
             Vec::new()
         }
         Msg::Up => {
-            app.queue.up();
+            let rows = app.take_rows();
+            app.queue.up(rows);
             Vec::new()
         }
         Msg::Archive => app.archive(),

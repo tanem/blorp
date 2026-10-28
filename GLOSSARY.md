@@ -36,6 +36,14 @@ _Avoid_: View, filter, unread mode
 The text typed after `/` that narrows the queue to those of its threads whose row's sender or subject contains it, ignoring case; the mailbox's threads beyond the queue are not searched. Empty at launch, and cleared with Esc or by a switch of the mailbox shown.
 _Avoid_: Filter, find, query
 
+**Count**:
+A number typed before `j` or `k` that moves the queue's cursor, or the mailbox list's highlight, that many rows instead of one, stopping at the first or last row listed. It starts with a digit from 1 to 9, shows on the right of the statusline while held, and is dropped by Esc, Enter, or any other key, which acts once.
+_Avoid_: Prefix, repeat, multiplier
+
+**Row number**:
+The number at the left of each row of the queue and the mailbox list: on the cursor's or highlight's own row, its position in the rows listed, counting from 1; on every other row, its distance from the cursor or highlight, which is the count that reaches it. Search, unread only, and Unread mailboxes only narrow the rows it counts.
+_Avoid_: Line number, index
+
 **Action**:
 A change blorp makes to the account's mail on a key, such as archiving a thread. It shows in the queue at once and is sent through the outbox.
 _Avoid_: Command, operation, mutation

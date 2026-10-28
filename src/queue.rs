@@ -21,6 +21,12 @@ impl Queue {
             .collect()
     }
 
+    /// How many threads the queue holds, whether or not they match the
+    /// search.
+    pub fn held(&self) -> usize {
+        self.threads.len()
+    }
+
     /// The cursor's row, counting from 0. It is 0 in an empty queue.
     pub fn cursor(&self) -> usize {
         self.cursor
@@ -129,14 +135,14 @@ impl Queue {
         self.index(self.cursor).map(|i| &self.threads[i])
     }
 
-    /// Moves the cursor down a row, stopping at the last.
-    pub fn down(&mut self) {
-        self.cursor = (self.cursor + 1).min(self.last());
+    /// Moves the cursor down `rows` rows, stopping at the last.
+    pub fn down(&mut self, rows: usize) {
+        self.cursor = self.cursor.saturating_add(rows).min(self.last());
     }
 
-    /// Moves the cursor up a row, stopping at the first.
-    pub fn up(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+    /// Moves the cursor up `rows` rows, stopping at the first.
+    pub fn up(&mut self, rows: usize) {
+        self.cursor = self.cursor.saturating_sub(rows);
     }
 
     /// The index in `threads` of row `row`.

@@ -56,13 +56,13 @@ async fn r_marks_the_thread_read_on_the_server() {
     sandbox.store_token(TOKEN);
     let mut blorp = sandbox.spawn(&[], 80, 24);
     blorp.wait_statusline(" 1/2");
-    assert!(blorp.rows()[0].starts_with('●'), "{:#?}", blorp.rows());
+    assert!(blorp.rows()[0].starts_with("1 ●"), "{:#?}", blorp.rows());
 
     blorp.keys("r");
     blorp.wait_text("Marked read");
     let rows = blorp.rows();
     assert!(
-        rows[0].contains("Re: Lunch on Friday?") && !rows[0].starts_with('●'),
+        rows[0].contains("Re: Lunch on Friday?") && rows[0].starts_with("1  "),
         "{rows:#?}"
     );
     assert!(
