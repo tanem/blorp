@@ -1,0 +1,28 @@
+---
+source: src/ui.rs
+expression: screen
+---
+" 3    Sender               Thread 2                                          12h"
+" 2    Sender               Thread 20                                         12h"
+" 1    Sender               Thread 21                                         12h"
+" 4    Sender               Thread 22                                         12h"
+" 1    Sender               Thread 23                                         12h"
+" 2    Sender               Thread 24                                         12h"
+" 3    Sender               Thread 25                                         12h"
+" 4    Sender               Thread 26                                         12h"
+" 5    Sender               Thread 27                                         12h"
+" 6    Sender               Thread 28                                         12h"
+" 7    Sender               Thread 29                                         12h"
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+" Inbox   /thread 2                                                         4/11 "
+"                                                                                "

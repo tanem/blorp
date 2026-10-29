@@ -2,11 +2,11 @@
 source: src/ui.rs
 expression: "render(&h, 120, 40)"
 ---
-"●  Ana Lopez            Lunch on Friday?                                                                              2m"
-"   Ravi Shah            Re: Trip to Wellington                                                                    3   5h"
-" ⚑ billing@shop.exampl… Your order 48213 has shipped and will arrive between Tuesday and Thursday next week           3d"
-"●⚑ Maximiliana Feather… (no subject)                                                                                  4w"
-"   Old Friend           Catching up                                                                                   1y"
+"2 ●  Ana Lopez            Lunch on Friday?                                                                            2m"
+"1    Ravi Shah            Re: Trip to Wellington                                                                  3   5h"
+"3  ⚑ billing@shop.exampl… Your order 48213 has shipped and will arrive between Tuesday and Thursday next week         3d"
+"1 ●⚑ Maximiliana Feather… (no subject)                                                                                4w"
+"2    Old Friend           Catching up                                                                                 1y"
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "

@@ -2,9 +2,9 @@
 source: src/ui.rs
 expression: screen
 ---
-" Inbox                                                                         1"
-" Newsletters                                                                   2"
-" Travel                                                                        1"
+" 1 Inbox                                                                       1"
+" 1 Newsletters                                                                 2"
+" 2 Travel                                                                      1"
 "                                                                                "
 "                                                                                "
 "                                                                                "

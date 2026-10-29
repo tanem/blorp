@@ -80,15 +80,6 @@ fn j_and_k_stop_at_the_ends_of_the_queue() {
 }
 
 #[test]
-fn digits_are_not_counts() {
-    let mut h = Harness::loaded(inbox(10));
-
-    assert_eq!(h.keys("3j"), []);
-
-    assert_eq!(h.cursor(), 1);
-}
-
-#[test]
 fn keys_during_the_initial_load_act_on_an_empty_queue() {
     let mut h = Harness::new(inbox(3));
     h.start();

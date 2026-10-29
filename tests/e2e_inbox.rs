@@ -110,11 +110,11 @@ async fn the_inbox_loads_with_its_rows_and_statusline_at_80x24() {
     assert_eq!(
         rows[..7],
         [
-            "●  Ana Lopez            Lunch on Friday?                                      2m",
-            "   Ravi Shah            Re: Trip to Wellington                            3   5h",
-            " ⚑ billing@shop.exampl… Your order 48213 has shipped and will arrive b…       3d",
-            "●⚑ Maximiliana Feather… (no subject)                                          4w",
-            "   Old Friend           Catching up                                           1y",
+            "2 ●  Ana Lopez            Lunch on Friday?                                    2m",
+            "1    Ravi Shah            Re: Trip to Wellington                          3   5h",
+            "3  ⚑ billing@shop.exampl… Your order 48213 has shipped and will arrive…       3d",
+            "1 ●⚑ Maximiliana Feather… (no subject)                                        4w",
+            "2    Old Friend           Catching up                                         1y",
             "",
             "",
         ]
@@ -139,11 +139,11 @@ async fn the_inbox_loads_with_its_rows_and_statusline_at_120x40() {
     assert_eq!(
         rows[..7],
         [
-            "●  Ana Lopez            Lunch on Friday?                                                                              2m",
-            "   Ravi Shah            Re: Trip to Wellington                                                                    3   5h",
-            " ⚑ billing@shop.exampl… Your order 48213 has shipped and will arrive between Tuesday and Thursday next week           3d",
-            "●⚑ Maximiliana Feather… (no subject)                                                                                  4w",
-            "   Old Friend           Catching up                                                                                   1y",
+            "2 ●  Ana Lopez            Lunch on Friday?                                                                            2m",
+            "1    Ravi Shah            Re: Trip to Wellington                                                                  3   5h",
+            "3  ⚑ billing@shop.exampl… Your order 48213 has shipped and will arrive between Tuesday and Thursday next week         3d",
+            "1 ●⚑ Maximiliana Feather… (no subject)                                                                                4w",
+            "2    Old Friend           Catching up                                                                                 1y",
             "",
             "",
         ]

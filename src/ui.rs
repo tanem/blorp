@@ -18,11 +18,12 @@ use crate::prompt::PromptKey;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 const SENDER_WIDTH: usize = 20;
-const COUNT_WIDTH: usize = 3;
+const MESSAGES_WIDTH: usize = 3;
 const AGE_WIDTH: usize = 4;
-/// Everything in a row but the subject: two flag columns and a space, the
-/// sender and a space, and a space before each of the count and the age.
-const FIXED_WIDTH: usize = 3 + SENDER_WIDTH + 1 + 1 + COUNT_WIDTH + 1 + AGE_WIDTH;
+/// Everything in a row but the row number and the subject: a space, two
+/// flag columns and a space, the sender and a space, and a space before
+/// each of the message count and the age.
+const FIXED_WIDTH: usize = 1 + 3 + SENDER_WIDTH + 1 + 1 + MESSAGES_WIDTH + 1 + AGE_WIDTH;
 
 /// The width of the mailbox list's unread thread counts.
 const UNREAD_WIDTH: usize = 6;
@@ -39,7 +40,7 @@ pub fn view(app: &App, frame: &mut Frame) {
     .areas(frame.area());
     let status = match app.mailbox_list() {
         Some(choices) => {
-            mailbox_list(frame, &choices, page);
+            mailbox_list(frame, &choices, app.mailbox_count(), page);
             list_status_bar(app, &choices, statusline.width)
         }
         None => {
@@ -55,10 +56,11 @@ pub fn view(app: &App, frame: &mut Frame) {
     }
 }
 
-/// The mailbox list over `area`: each mailbox's path, and its unread
-/// thread count on the right, blank when 0, scrolled to keep the
-/// highlighted row in view and reversed.
-fn mailbox_list(frame: &mut Frame, choices: &MailboxChoices, area: Rect) {
+/// The mailbox list over `area`: each mailbox's row number and path, and
+/// its unread thread count on the right, blank when 0, scrolled to keep
+/// the highlighted row in view and reversed. The row numbers are as wide
+/// as a list of all `mailboxes` needs.
+fn mailbox_list(frame: &mut Frame, choices: &MailboxChoices, mailboxes: usize, area: Rect) {
     if choices.rows.is_empty() {
         let text = match (choices.unread_mailboxes_only, choices.text.as_str()) {
             (true, "") => "No unread mail".to_string(),
@@ -73,6 +75,7 @@ fn mailbox_list(frame: &mut Frame, choices: &MailboxChoices, area: Rect) {
     let height = usize::from(area.height);
     let width = usize::from(area.width);
     let first = choices.highlight.saturating_sub(height.saturating_sub(1));
+    let number_width = number_width(mailboxes);
     let lines: Vec<Line> = choices
         .rows
         .iter()
@@ -84,8 +87,12 @@ fn mailbox_list(frame: &mut Frame, choices: &MailboxChoices, area: Rect) {
                 0 => String::new(),
                 n => n.to_string(),
             };
-            let path = fit(&row.path, width.saturating_sub(2 + UNREAD_WIDTH));
+            let path = fit(
+                &row.path,
+                width.saturating_sub(number_width + 2 + UNREAD_WIDTH),
+            );
             let line = Line::from(vec![
+                row_number(i, choices.highlight, number_width),
                 Span::raw(format!(" {path}")),
                 Span::styled(
                     format!(" {unread:>UNREAD_WIDTH$}"),
@@ -122,17 +129,50 @@ fn rows(app: &App, frame: &mut Frame, area: Rect) {
     }
     let height = usize::from(area.height);
     let first = queue.cursor().saturating_sub(height.saturating_sub(1));
+    let number_width = number_width(queue.held());
     let lines: Vec<Line> = threads
         .into_iter()
         .enumerate()
         .skip(first)
         .take(height)
-        .map(|(index, thread)| row(app, index, thread, usize::from(area.width)))
+        .map(|(index, thread)| row(app, index, thread, number_width, usize::from(area.width)))
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> {
+/// The width of the row number column for a list that holds `len` rows
+/// before search, unread mailboxes only, or the text narrows it: enough for
+/// the largest number shown, and the same while a narrowing is typed.
+fn number_width(len: usize) -> usize {
+    len.to_string().len()
+}
+
+/// The row number of row `index` with the cursor or highlight on row `at`,
+/// right-aligned in `width` columns: the cursor's or highlight's own
+/// position, counting from 1, in bold yellow, and on every other row its
+/// distance from it, in dark grey.
+fn row_number(index: usize, at: usize, width: usize) -> Span<'static> {
+    if index == at {
+        Span::styled(
+            format!("{:>width$}", index + 1),
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            format!("{:>width$}", index.abs_diff(at)),
+            Style::new().fg(Color::DarkGray),
+        )
+    }
+}
+
+fn row(
+    app: &App,
+    index: usize,
+    thread: &Thread,
+    number_width: usize,
+    width: usize,
+) -> Line<'static> {
+    let cursor = app.queue().cursor();
     let unread = thread.unread();
     let text = if unread {
         Style::new().add_modifier(Modifier::BOLD)
@@ -143,12 +183,14 @@ fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> 
     let hit = thread.hit();
     let sender = hit.sender.as_deref().unwrap_or("(no sender)");
     let subject = hit.subject.as_deref().unwrap_or("(no subject)");
-    let subject_width = width.saturating_sub(FIXED_WIDTH);
-    let count = match thread.message_count() {
+    let subject_width = width.saturating_sub(number_width + FIXED_WIDTH);
+    let messages = match thread.message_count() {
         1 => String::new(),
         n => n.to_string(),
     };
     let line = Line::from(vec![
+        row_number(index, cursor, number_width),
+        Span::raw(" "),
         Span::styled(if unread { "●" } else { " " }, Style::new().fg(Color::Blue)),
         Span::styled(
             if thread.flagged() { "⚑" } else { " " },
@@ -157,13 +199,13 @@ fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> 
         Span::raw(" "),
         Span::styled(format!("{} ", fit(sender, SENDER_WIDTH)), text),
         Span::styled(fit(subject, subject_width), text),
-        Span::styled(format!(" {count:>COUNT_WIDTH$}"), dim),
+        Span::styled(format!(" {messages:>MESSAGES_WIDTH$}"), dim),
         Span::styled(
             format!(" {:>AGE_WIDTH$}", age(app.now, hit.received_at)),
             dim,
         ),
     ]);
-    if index == app.queue().cursor() {
+    if index == cursor {
         line.style(Style::new().add_modifier(Modifier::REVERSED))
     } else {
         line
@@ -171,10 +213,11 @@ fn row(app: &App, index: usize, thread: &Thread, width: usize) -> Line<'static> 
 }
 
 /// The path of the mailbox shown, `Unread only` while it is on, and `/` and
-/// the search while one is set on the left; the `DISCONNECTED` badge while
-/// disconnected and the cursor's position on the right. The count is of
-/// the rows, and the mailbox's total follows it when the mailbox holds
-/// more threads than the queue and no search is set.
+/// the search while one is set on the left; the count typed while one is
+/// held, the `DISCONNECTED` badge while disconnected, and the cursor's
+/// position on the right. The position is among the rows, and the
+/// mailbox's total follows it when the mailbox holds more threads than the
+/// queue and no search is set.
 fn status_bar(app: &App, width: u16) -> Line<'static> {
     let queue = app.queue();
     let len = queue.rows().len();
@@ -202,8 +245,9 @@ fn list_status_bar(app: &App, choices: &MailboxChoices, width: u16) -> Line<'sta
 }
 
 /// The path of the mailbox shown, `badge` when given, and `/` and `text`
-/// while it is not empty on the left; the `DISCONNECTED` badge while
-/// disconnected and `position` on the right.
+/// while it is not empty on the left; the count typed while one is held,
+/// the `DISCONNECTED` badge while disconnected, and `position` on the
+/// right.
 fn statusline(
     app: &App,
     badge: Option<&str>,
@@ -230,6 +274,9 @@ fn statusline(
         ));
     }
     let mut right = Vec::new();
+    if let Some(count) = app.count() {
+        right.push(Span::raw(format!("{count} ")));
+    }
     if !app.connected() {
         right.push(Span::styled(
             " DISCONNECTED ",
@@ -313,8 +360,9 @@ fn age(now: Timestamp, then: Timestamp) -> String {
 }
 
 /// The message a key press stands for: at a prompt, a key of the
-/// prompt's; at the mailbox list, a key of the list's; and otherwise one in
-/// the keymap, if any.
+/// prompt's; otherwise a key of a count, then at the mailbox list a key of
+/// the list's, and on the queue one in the keymap; and with a count typed,
+/// any other key drops it.
 pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
     if key.kind != KeyEventKind::Press {
         return None;
@@ -323,18 +371,43 @@ pub fn key_msg(app: &App, key: KeyEvent) -> Option<Msg> {
         if choices.typing {
             return prompt_key(key, |key| Msg::ListKey(ListKey::Prompt(key)));
         }
-        return list_key(key);
+        return count_key(app, key)
+            .or_else(|| list_key(key))
+            .or_else(|| drop_count(app));
     }
     if app.prompt().is_some() {
         return prompt_key(key, Msg::SearchKey);
+    }
+    if let Some(msg) = count_key(app, key) {
+        return Some(msg);
     }
     let key = match key.code {
         KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => keymap::Key::Ctrl(c),
         KeyCode::Char(c) => keymap::Key::Char(c),
         KeyCode::Esc => keymap::Key::Esc,
-        _ => return None,
+        _ => return drop_count(app),
     };
-    keymap::msg(key)
+    keymap::msg(key).or_else(|| drop_count(app))
+}
+
+/// The message a key that does nothing stands for: with a count typed, it
+/// drops the count.
+fn drop_count(app: &App) -> Option<Msg> {
+    app.count().map(|_| Msg::DropCount)
+}
+
+/// The message a key press stands for as part of a count, with the
+/// prompt closed: a digit extends it, and Esc and Enter drop the count
+/// typed and do nothing else.
+fn count_key(app: &App, key: KeyEvent) -> Option<Msg> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(c) => c.to_digit(10).map(|digit| Msg::Digit(digit as u8)),
+        KeyCode::Esc | KeyCode::Enter => drop_count(app),
+        _ => None,
+    }
 }
 
 /// The message a key press at a prompt stands for, through `msg`: Enter
@@ -607,6 +680,120 @@ mod tests {
     }
 
     #[test]
+    fn a_count_on_the_statusline_80x24() {
+        let mut h = Harness::loaded(busy_inbox());
+        h.keys("12");
+
+        let screen = render(&h, 80, 24);
+        assert!(statusline(&screen).ends_with(" 12  1/5 \""), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn a_count_on_the_mailbox_list_statusline() {
+        let mut h = Harness::loaded(many_mailboxes());
+        h.keys("m3");
+
+        let screen = render(&h, 80, 24);
+        assert!(statusline(&screen).ends_with(" 3  1/14 \""), "{screen}");
+    }
+
+    /// An Inbox of thirty threads, "Thread 1" newest.
+    fn long_inbox() -> Store {
+        let mut store = Store::builder().role_mailbox("mb-inbox", "Inbox", "inbox");
+        for i in 0..30 {
+            let received = format!("2026-10-17T23:{:02}:00Z", 59 - i);
+            store = store.email(
+                EmailSpec::new(&format!("e{i}"), &format!("t{i}"), &received)
+                    .in_mailbox("mb-inbox")
+                    .seen()
+                    .from("Sender", "sender@example.invalid")
+                    .subject(&format!("Thread {}", i + 1)),
+            );
+        }
+        store.build()
+    }
+
+    #[test]
+    fn row_numbers_on_the_queue_with_the_cursor_mid_list_80x24() {
+        let mut h = Harness::loaded(long_inbox());
+        h.keys("12j");
+
+        let screen = render(&h, 80, 24);
+        let page: Vec<&str> = screen.lines().collect();
+        assert!(page[0].starts_with("\"12    Sender "), "{screen}");
+        assert!(page[11].starts_with("\" 1    Sender "), "{screen}");
+        assert!(page[12].starts_with("\"13    Sender "), "{screen}");
+        assert!(page[13].starts_with("\" 1    Sender "), "{screen}");
+        assert!(page[21].starts_with("\" 9    Sender "), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn row_numbers_count_the_rows_of_a_narrowed_queue_80x24() {
+        let mut h = Harness::loaded(long_inbox());
+        h.keys("/thread 2");
+        h.press(KeyCode::Enter);
+        h.keys("3j");
+
+        let screen = render(&h, 80, 24);
+        let page: Vec<&str> = screen.lines().collect();
+        assert!(
+            page[0].starts_with("\" 3    Sender               Thread 2 "),
+            "{screen}"
+        );
+        assert!(
+            page[3].starts_with("\" 4    Sender               Thread 22 "),
+            "{screen}"
+        );
+        assert!(
+            page[10].starts_with("\" 7    Sender               Thread 29 "),
+            "{screen}"
+        );
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn the_row_number_column_keeps_its_width_while_a_search_narrows_the_queue() {
+        let mut h = Harness::loaded(long_inbox());
+        h.keys("/thread 3");
+
+        let screen = render(&h, 80, 24);
+        let page: Vec<&str> = screen.lines().collect();
+        assert!(
+            page[0].starts_with("\" 1    Sender               Thread 3 "),
+            "{screen}"
+        );
+        assert!(
+            page[1].starts_with("\" 1    Sender               Thread 30 "),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn the_row_number_column_keeps_its_width_while_the_mailbox_list_narrows() {
+        let mut h = Harness::loaded(many_mailboxes());
+        h.keys("m/work");
+
+        let screen = render(&h, 80, 24);
+        let page: Vec<&str> = screen.lines().collect();
+        assert!(page[0].starts_with("\" 1 Work "), "{screen}");
+    }
+
+    #[test]
+    fn row_numbers_on_the_mailbox_list_with_the_highlight_mid_list_80x24() {
+        let mut h = Harness::loaded(many_mailboxes());
+        h.keys("m5j");
+
+        let screen = render(&h, 80, 24);
+        let page: Vec<&str> = screen.lines().collect();
+        assert!(page[0].starts_with("\" 5 Inbox "), "{screen}");
+        assert!(page[5].starts_with("\" 6 Junk "), "{screen}");
+        assert!(page[13].starts_with("\" 8 Work/Reports "), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
     fn retrying_80x24() {
         let mut h = Harness::loaded(busy_inbox());
         let generation = match h.send(Msg::Wake)[..] {
@@ -803,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn on_the_mailbox_list_only_j_k_u_slash_enter_esc_q_and_ctrl_c_send_a_message() {
+    fn on_the_mailbox_list_only_digits_j_k_u_slash_enter_esc_q_and_ctrl_c_send_a_message() {
         let mut h = Harness::loaded(empty_inbox());
         h.keys("m");
         let press = |code, modifiers| key_msg(&h.app, KeyEvent::new(code, modifiers));
@@ -838,8 +1025,14 @@ mod tests {
             press(KeyCode::Char('c'), KeyModifiers::CONTROL),
             Some(Msg::Quit)
         ));
-        for c in "eromgGJKUd!x .0".chars() {
+        for c in "eromgGJKUd!x .".chars() {
             assert!(list(KeyCode::Char(c)).is_none(), "{c}");
+        }
+        for (c, digit) in ('0'..='9').zip(0..) {
+            assert!(
+                matches!(list(KeyCode::Char(c)), Some(Msg::Digit(d)) if d == digit),
+                "{c}"
+            );
         }
         for code in [KeyCode::Down, KeyCode::Up, KeyCode::Tab, KeyCode::Backspace] {
             assert!(list(code).is_none(), "{code:?}");
@@ -949,7 +1142,7 @@ mod tests {
 
         let screen = render(&h, 80, 24);
         let page: Vec<&str> = screen.lines().take(22).collect();
-        assert!(page[0].starts_with("\" Clients/Project 10 "), "{screen}");
+        assert!(page[0].starts_with("\"21 Clients/Project 10 "), "{screen}");
         assert!(
             page[21].contains("Clients/Project 30/Notes from"),
             "{screen}"
@@ -1025,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn only_j_k_e_r_o_m_u_slash_esc_q_and_ctrl_c_send_a_message() {
+    fn only_digits_j_k_e_r_o_m_u_slash_esc_q_and_ctrl_c_send_a_message() {
         let h = Harness::loaded(empty_inbox());
         let press = |code, modifiers| key_msg(&h.app, KeyEvent::new(code, modifiers));
 
@@ -1073,8 +1266,17 @@ mod tests {
             press(KeyCode::Char('c'), KeyModifiers::CONTROL),
             Some(Msg::Quit)
         ));
-        for c in "gGEd!Mzfx XUV.tR:D?0123456789Jc".chars() {
+        for c in "gGEd!Mzfx XUV.tR:D?Jc".chars() {
             assert!(press(KeyCode::Char(c), KeyModifiers::NONE).is_none(), "{c}");
+        }
+        for (c, digit) in ('0'..='9').zip(0..) {
+            assert!(
+                matches!(
+                    press(KeyCode::Char(c), KeyModifiers::NONE),
+                    Some(Msg::Digit(d)) if d == digit
+                ),
+                "{c}"
+            );
         }
         for code in [
             KeyCode::Tab,

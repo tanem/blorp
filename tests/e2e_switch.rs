@@ -66,10 +66,10 @@ async fn m_lists_the_mailboxes_with_their_unread_counts_and_switches_to_the_one_
     assert_eq!(
         rows[..4],
         [
-            format!(" Inbox{}1", " ".repeat(73)),
-            " Travel".to_string(),
-            " Work".to_string(),
-            format!(" Work/Receipts{}2", " ".repeat(65)),
+            format!("1 Inbox{}1", " ".repeat(72)),
+            "1 Travel".to_string(),
+            "2 Work".to_string(),
+            format!("3 Work/Receipts{}2", " ".repeat(64)),
         ],
         "{rows:#?}"
     );
@@ -82,7 +82,7 @@ async fn m_lists_the_mailboxes_with_their_unread_counts_and_switches_to_the_one_
         blorp.statusline()
     );
     assert!(
-        blorp.rows()[1].starts_with(" Work/Receipts "),
+        blorp.rows()[1].starts_with("1 Work/Receipts "),
         "{:#?}",
         blorp.rows()
     );
