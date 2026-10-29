@@ -14,7 +14,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test --no-fail-fast
 ```
 
-`cargo test` needs no network beyond localhost and no secrets. The end-to-end tests run the binary in a pseudo-terminal against a local JMAP server, through two variables that only debug builds read: `BLORP_SESSION_URL` replaces Fastmail's session URL, and `BLORP_TOKEN_STORE=<path>` replaces the keyring with a file that only the user can read. A test fails when the key table in `README.md` differs from the key bindings in `src/keymap.rs`.
+`cargo test` needs no network beyond localhost and no secrets. The end-to-end tests run the binary in a pseudo-terminal against a local JMAP server, through two variables that only debug builds read: `BLORP_SESSION_URL` replaces Fastmail's session URL, and `BLORP_TOKEN_STORE=<path>` replaces the keyring with a file that only the user can read. A test fails when the key table in `README.md` differs from the key bindings in `src/keymap.rs` plus its one row for a count.
 
 Two sets of tests are ignored by default:
 
