@@ -652,17 +652,11 @@ mod tests {
 
     #[test]
     fn a_search_counts_only_the_matching_threads_of_a_mailbox_larger_than_the_queue() {
-        let mut store = Store::builder().role_mailbox("mb-inbox", "Inbox", "inbox");
-        for i in 0..503 {
-            let received = jiff::Timestamp::from_second(1_760_000_000 - i * 60).unwrap();
-            store = store.email(
-                EmailSpec::new(&format!("e{i}"), &format!("t{i}"), &received.to_string())
-                    .in_mailbox("mb-inbox")
-                    .seen()
-                    .from("Sender", "sender@example.invalid")
-                    .subject(&format!("Thread {}", i + 1)),
-            );
-        }
+        let store = Store::builder()
+            .role_mailbox("mb-inbox", "Inbox", "inbox")
+            .threads(503, "mb-inbox", "2025-10-09T08:53:20Z", |email| {
+                email.seen().from("Sender", "sender@example.invalid")
+            });
         let mut h = Harness::loaded(store.build());
         h.keys("/thread 1");
         h.press(KeyCode::Enter);
@@ -700,18 +694,12 @@ mod tests {
 
     /// An Inbox of thirty threads, "Thread 1" newest.
     fn long_inbox() -> Store {
-        let mut store = Store::builder().role_mailbox("mb-inbox", "Inbox", "inbox");
-        for i in 0..30 {
-            let received = format!("2026-10-17T23:{:02}:00Z", 59 - i);
-            store = store.email(
-                EmailSpec::new(&format!("e{i}"), &format!("t{i}"), &received)
-                    .in_mailbox("mb-inbox")
-                    .seen()
-                    .from("Sender", "sender@example.invalid")
-                    .subject(&format!("Thread {}", i + 1)),
-            );
-        }
-        store.build()
+        Store::builder()
+            .role_mailbox("mb-inbox", "Inbox", "inbox")
+            .threads(30, "mb-inbox", "2026-10-17T23:59:00Z", |email| {
+                email.seen().from("Sender", "sender@example.invalid")
+            })
+            .build()
     }
 
     #[test]
@@ -825,17 +813,11 @@ mod tests {
 
     #[test]
     fn a_mailbox_larger_than_the_queue_shows_its_total() {
-        let mut store = Store::builder().role_mailbox("mb-inbox", "Inbox", "inbox");
-        for i in 0..503 {
-            let received = jiff::Timestamp::from_second(1_760_000_000 - i * 60).unwrap();
-            store = store.email(
-                EmailSpec::new(&format!("e{i}"), &format!("t{i}"), &received.to_string())
-                    .in_mailbox("mb-inbox")
-                    .seen()
-                    .from("Sender", "sender@example.invalid")
-                    .subject(&format!("Thread {}", i + 1)),
-            );
-        }
+        let store = Store::builder()
+            .role_mailbox("mb-inbox", "Inbox", "inbox")
+            .threads(503, "mb-inbox", "2025-10-09T08:53:20Z", |email| {
+                email.seen().from("Sender", "sender@example.invalid")
+            });
         let h = Harness::loaded(store.build());
 
         insta::assert_snapshot!(render(&h, 80, 24));
@@ -843,18 +825,7 @@ mod tests {
 
     #[test]
     fn the_cursor_stays_on_screen_in_a_long_queue() {
-        let mut store = Store::builder().role_mailbox("mb-inbox", "Inbox", "inbox");
-        for i in 0..30 {
-            let received = format!("2026-10-17T{:02}:{:02}:00Z", 23 - i / 60, 59 - i % 60);
-            store = store.email(
-                EmailSpec::new(&format!("e{i}"), &format!("t{i}"), &received)
-                    .in_mailbox("mb-inbox")
-                    .seen()
-                    .from("Sender", "sender@example.invalid")
-                    .subject(&format!("Thread {}", i + 1)),
-            );
-        }
-        let mut h = Harness::loaded(store.build());
+        let mut h = Harness::loaded(long_inbox());
         h.keys(&"j".repeat(25));
 
         insta::assert_snapshot!(render(&h, 80, 24));
