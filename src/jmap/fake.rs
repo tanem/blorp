@@ -571,6 +571,29 @@ impl StoreBuilder {
         self
     }
 
+    /// `n` single-email threads in the mailbox with id `mailbox_id`, a
+    /// minute apart and newest first: "Thread 1", e1 in t1, received at
+    /// `newest`, to "Thread n", en in tn. `each` sets anything else on
+    /// every email.
+    pub fn threads(
+        mut self,
+        n: usize,
+        mailbox_id: &str,
+        newest: &str,
+        each: impl Fn(EmailSpec) -> EmailSpec,
+    ) -> Self {
+        let newest: jiff::Timestamp = newest.parse().expect("RFC 3339 timestamp");
+        for i in 1..=n {
+            let received = newest - jiff::SignedDuration::from_mins(i as i64 - 1);
+            self = self.email(each(
+                EmailSpec::new(&format!("e{i}"), &format!("t{i}"), &received.to_string())
+                    .in_mailbox(mailbox_id)
+                    .subject(&format!("Thread {i}")),
+            ));
+        }
+        self
+    }
+
     pub fn build(self) -> Store {
         self.store
     }

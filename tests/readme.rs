@@ -4,6 +4,9 @@ use blorp::keymap::BINDINGS;
 
 const README: &str = include_str!("../README.md");
 
+/// The key table's row for a count, which no binding stands for.
+const COUNT: &str = "| A count, then `j` or `k` | Down or up that many rows |";
+
 /// The body rows of the first table under the `## Keys` heading.
 fn key_table() -> Vec<&'static str> {
     let section = README
@@ -29,5 +32,12 @@ fn the_readme_key_table_lists_every_binding_in_order() {
         })
         .collect();
 
-    assert_eq!(key_table(), expected);
+    let mut table = key_table();
+    let count = table
+        .iter()
+        .position(|row| *row == COUNT)
+        .expect("the key table has a row for a count");
+    table.remove(count);
+
+    assert_eq!(table, expected);
 }

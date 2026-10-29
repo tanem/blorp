@@ -9,18 +9,10 @@ use blorp::jmap::fake::{EmailSpec, Store, StoreBuilder};
 /// `n` single-email Inbox threads, newest first: t1 holding e1 to tn
 /// holding en.
 fn inbox(n: usize) -> StoreBuilder {
-    let mut store = Store::builder()
+    Store::builder()
         .role_mailbox("mb-inbox", "Inbox", "inbox")
-        .role_mailbox("mb-sent", "Sent", "sent");
-    for i in 1..=n {
-        let received = format!("2026-10-18T11:{:02}:00Z", 59 - i);
-        store = store.email(
-            EmailSpec::new(&format!("e{i}"), &format!("t{i}"), &received)
-                .in_mailbox("mb-inbox")
-                .subject(&format!("Thread {i}")),
-        );
-    }
-    store
+        .role_mailbox("mb-sent", "Sent", "sent")
+        .threads(n, "mb-inbox", "2026-10-18T11:58:00Z", |email| email)
 }
 
 fn open(thread: &str, email: &str) -> Effect {

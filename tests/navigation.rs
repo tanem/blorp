@@ -1,21 +1,15 @@
 use blorp::app::{Effect, Msg};
 use blorp::harness::Harness;
-use blorp::jmap::fake::{EmailSpec, Store};
+use blorp::jmap::fake::Store;
 use blorp::jmap::{EmailQuery, Error};
 use serde_json::json;
 
 /// An Inbox of `n` single-email threads, "Thread 1" newest.
 fn inbox(n: usize) -> Store {
-    let mut store = Store::builder().role_mailbox("mb-inbox", "Inbox", "inbox");
-    for i in 1..=n {
-        let received = jiff::Timestamp::from_second(1_760_000_000 - i as i64 * 60).unwrap();
-        store = store.email(
-            EmailSpec::new(&format!("e{i}"), &format!("t{i}"), &received.to_string())
-                .in_mailbox("mb-inbox")
-                .subject(&format!("Thread {i}")),
-        );
-    }
-    store.build()
+    Store::builder()
+        .role_mailbox("mb-inbox", "Inbox", "inbox")
+        .threads(n, "mb-inbox", "2025-10-09T08:52:20Z", |email| email)
+        .build()
 }
 
 fn inbox_query() -> EmailQuery {
